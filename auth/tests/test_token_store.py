@@ -79,6 +79,23 @@ class TestFilePermissions:
         tmp_leftovers = list(tmp_path.glob(".*.tmp"))
         assert tmp_leftovers == [], f"leftover tempfiles: {tmp_leftovers}"
 
+    def test_temp_file_cleaned_up_on_replace_failure(self, tmp_path):
+        """If os.replace fails, the tempfile must still be cleaned up to
+        avoid leaving stray .tmp files with secrets in the cache dir."""
+        store = TokenStore("replace_fail", cache_dir=tmp_path)
+
+        with patch("auth.token_store.os.replace",
+                   side_effect=OSError("simulated rename failure")):
+            with pytest.raises(OSError, match="simulated"):
+                store.save_token({"access_token": "secret"})
+
+        leftovers = list(tmp_path.glob(".replace_fail.*.tmp"))
+        assert leftovers == [], (
+            f"leftover tempfile(s) after failed save: {leftovers}"
+        )
+        # And the target file should not exist (write never completed)
+        assert not store.cache_file.exists()
+
 
 class TestClear:
     def test_clear_removes_file(self, tmp_path):

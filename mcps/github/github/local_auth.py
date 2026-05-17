@@ -103,7 +103,7 @@ def _verify_token(token: str) -> bool:
 def _do_browser_auth(client_id: str, client_secret: str) -> str | None:
     """Run OAuth2 auth code + PKCE flow via shared proxy."""
     try:
-        from auth import OAuthProxyClient
+        from auth import AuthStateExpiredError, OAuthProxyClient
         proxy = OAuthProxyClient()
         proxy.check_proxy()
     except (RuntimeError, ImportError) as e:
@@ -146,6 +146,15 @@ def _do_browser_auth(client_id: str, client_secret: str) -> str | None:
 
     try:
         callback_result = proxy.wait_for_callback(state, timeout=120)
+    except AuthStateExpiredError:
+        # Subclass of TimeoutError — must come first
+        logger.warning("GitHub browser auth state expired or already consumed")
+        print(
+            "Browser login session expired or was already used. "
+            "Trying device code...",
+            flush=True,
+        )
+        return None
     except (TimeoutError, RuntimeError) as e:
         logger.warning("GitHub browser auth failed: %s", e)
         print("Browser login failed. Trying device code...", flush=True)
