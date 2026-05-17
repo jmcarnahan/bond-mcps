@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Microsoft Graph MCP Server for Bond AI.
+Microsoft Graph MCP Server.
 
-Provides email, calendar, Teams, file, and Power BI tools. Graph tools use the
-user's Microsoft Graph OAuth token; Power BI tools use a PBI-scoped token — both
-passed by Bond AI's backend as Authorization: Bearer headers (via separate
-connection entries in bond_mcp_config).
+Provides email, calendar, Teams, file, and Power BI tools. Tokens are resolved
+in this order (see ms_graph/auth.py):
+  1. Authorization: Bearer header (backend mode, e.g. Bond AI — Graph and Power BI
+     get separate tokens via separate connection entries in bond_mcp_config)
+  2. Local MSAL auth via ms_graph.local_auth (standalone mode — Claude Code, CLI),
+     activated when MS_CLIENT_ID is set; reads/writes ~/.bond_mcps/microsoft.json
 
-Run:
-    fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557
+Run (standalone):
+    make dev                                                                       # all 4 services
+    poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
 Tool summary (23 tools):
   Email     : get_user_profile, list_emails, read_email, send_email
@@ -21,8 +24,12 @@ Tool summary (23 tools):
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastmcp import FastMCP
+
+load_dotenv(Path(__file__).parent / ".env")
 
 from ms_graph.auth import get_graph_token, get_powerbi_token
 from ms_graph.graph_client import AsyncGraphClient
@@ -1113,8 +1120,9 @@ async def export_report(
     except PermissionError:
         result = (
             f"Report exported as {export_format} ({size}), but could not save to OneDrive "
-            f"because the Microsoft connection is not active. "
-            f"Connect your Microsoft account in Bond AI Settings → Connections to enable OneDrive upload."
+            f"because Microsoft auth is not active. "
+            f"Run `make login-microsoft` (standalone) or connect your Microsoft account "
+            f"in Bond AI Settings → Connections (backend mode) to enable OneDrive upload."
         )
     return result
 

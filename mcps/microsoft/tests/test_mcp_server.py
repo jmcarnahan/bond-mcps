@@ -1357,7 +1357,7 @@ class TestMCPPowerBITools:
         text = _get_text(result)
         assert "exported" in text.lower()
         assert "OneDrive" in text
-        assert "Microsoft connection" in text
+        assert "Microsoft auth" in text
         assert "PDF" in text
 
     @respx.mock

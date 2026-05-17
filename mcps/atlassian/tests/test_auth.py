@@ -34,7 +34,7 @@ class TestGetAtlassianToken:
 
         with patch(_HEADERS_PATCH, return_value={}), \
              patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(PermissionError, match="Authorization required"):
+            with pytest.raises(PermissionError, match="authorization required"):
                 get_atlassian_token()
 
     def test_raises_if_not_bearer(self):
@@ -42,7 +42,7 @@ class TestGetAtlassianToken:
 
         with patch(_HEADERS_PATCH, return_value={"authorization": f"Basic {FAKE_BASIC_AUTH}"}), \
              patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(PermissionError, match="Authorization required"):
+            with pytest.raises(PermissionError, match="authorization required"):
                 get_atlassian_token()
 
 

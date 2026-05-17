@@ -16,9 +16,11 @@ bond-mcps/
 
 | MCP | Directory | Port | CLI |
 |-----|-----------|------|-----|
-| Microsoft | [`mcps/microsoft/`](mcps/microsoft/) | 5557 | `ms-graph-cli` |
-| GitHub | [`mcps/github/`](mcps/github/) | 5558 | `github-cli` |
-| Atlassian | [`mcps/atlassian/`](mcps/atlassian/) | 9001 | `atlassian-cli` |
+| Microsoft | [`mcps/microsoft/`](mcps/microsoft/) | 18001 | `ms-graph-cli` |
+| GitHub | [`mcps/github/`](mcps/github/) | 18002 | `github-cli` |
+| Atlassian | [`mcps/atlassian/`](mcps/atlassian/) | 18003 | `atlassian-cli` |
+
+The MCP ports are configurable — see the `Makefile` (`MS_GRAPH_PORT`, `GITHUB_PORT`, `ATLASSIAN_PORT`). The auth proxy port (`8000`) is fixed by the OAuth callback URIs registered in each provider's OAuth app, so changing it requires updating those app registrations.
 
 ## Architecture
 
@@ -47,7 +49,7 @@ For local OAuth (no backend):
   - Microsoft → Azure App Registration ([`mcps/microsoft/README.md`](mcps/microsoft/README.md))
   - GitHub → GitHub OAuth App ([`mcps/github/README.md`](mcps/github/README.md))
   - Atlassian → Atlassian OAuth 2.0 integration ([`mcps/atlassian/README.md`](mcps/atlassian/README.md))
-- The OAuth app's **redirect URI** must include `http://localhost:8000/connections/<provider>/callback` so the local auth proxy can receive callbacks.
+- The OAuth app's **redirect URI** must include `http://localhost:8000/connections/<provider>/callback` so the local auth proxy can receive callbacks. If you override `BOND_AUTH_PROXY_PORT`, you must update the registered redirect URI in each provider's OAuth app config — otherwise the callback will be rejected.
 
 ### Required environment variables per MCP
 
@@ -56,56 +58,105 @@ Create a `.env` in each MCP directory (or `export` the values). These are needed
 | MCP | Required | Optional |
 |---|---|---|
 | `mcps/microsoft/` | `MS_CLIENT_ID` | `MS_CLIENT_SECRET` (required if Azure app is a confidential client), `MS_TENANT_ID` (defaults to `consumers`), `MS_DEFAULT_FROM_ADDRESS` |
-| `mcps/github/` | `GH_CLIENT_ID` (device-code flow used by the CLI) | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` (used by the MCP server's proxy/PKCE flow) |
+| `mcps/github/` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | — (the CLI and MCP server share this OAuth app; PKCE first, device-code fallback) |
 | `mcps/atlassian/` | `ATLASSIAN_CLIENT_ID`, `ATLASSIAN_CLIENT_SECRET` | `ATLASSIAN_ACCESS_TOKEN` + `ATLASSIAN_CLOUD_ID` (bypass OAuth flow entirely) |
 
 `.env` files are gitignored. The auth proxy port can be overridden with `BOND_AUTH_PROXY_PORT`.
 
+**Precedence**: shell-exported env vars win over values in `.env` (standard `python-dotenv` behavior). If something in `.env` "isn't working," check `env | grep <VAR>` first.
+
 ## Quick start (local development)
 
-### 1. Install the auth library
+The repo-root `Makefile` orchestrates all four processes (auth proxy + 3 MCPs). The "by hand" path below is shown for debugging individual components.
+
+### 0. Populate `.env` per MCP (one-time)
 
 ```bash
-cd auth
-poetry install
+cp mcps/microsoft/.env.example mcps/microsoft/.env   # then fill in MS_CLIENT_ID etc.
+cp mcps/github/.env.example    mcps/github/.env      # then fill in GITHUB_CLIENT_ID + SECRET
+cp mcps/atlassian/.env.example mcps/atlassian/.env   # then fill in ATLASSIAN_CLIENT_ID + SECRET
 ```
 
-### 2. Start the auth callback proxy
+Without these, the MCP servers boot but every tool call fails with `PermissionError`. See each per-MCP README for OAuth app registration steps.
 
-Leave this running in a dedicated terminal. The MCP server / CLI checks it at startup and exits if it's not reachable.
+### 1. Start everything
 
 ```bash
-cd auth
-poetry run python -m auth          # defaults to 127.0.0.1:8000
+make install          # poetry install in auth/ + each MCP
+make dev              # boots auth proxy + 3 MCPs in the background
+make status           # shows [up]/[down] per service
+make logs             # tail all log files (Ctrl-C to detach; processes keep running)
+make stop             # shut everything down
 ```
 
-You should see `Bond AI OAuth Proxy — Listening on 127.0.0.1:8000`.
+`make dev` first runs `check-ports` (uses `lsof`) and refuses to start if any of 8000/18001/18002/18003 is already in use — it names the offending process. Override any port: `MS_GRAPH_PORT=29001 make dev`, or `AUTH_PORT=9000 make dev` for the auth proxy (the proxy reads `BOND_AUTH_PROXY_PORT`, which the Makefile sets from `AUTH_PORT`).
 
-### 3. Install and run an MCP
+Logs land in `tmp/logs/` and are gitignored.
 
-In a second terminal, set up the env vars from the table above, then:
+### By hand: a single MCP
 
 ```bash
-cd mcps/microsoft
-poetry install
-poetry run pytest -q                                                            # tests
-poetry run ms-graph-cli whoami                                                  # CLI smoke test
-poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557  # server
+# Terminal 1 — auth proxy (required for any local OAuth flow)
+cd auth && poetry install && poetry run python -m auth      # 127.0.0.1:8000
+
+# Terminal 2 — MCP server (substitute github / atlassian as needed)
+cd mcps/microsoft && poetry install
+poetry run pytest -q                                                              # tests
+poetry run ms-graph-cli whoami                                                    # CLI smoke test
+poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001   # server
 ```
 
-Substitute `github` (CLI: `github-cli`, port 5558) or `atlassian` (CLI: `atlassian-cli`, port 9001).
+For GitHub: CLI `github-cli`, port `18002`. For Atlassian: CLI `atlassian-cli`, port `18003`.
 
 The first CLI invocation opens your browser for OAuth (unless a cached token is still valid). See the per-MCP README for the full CLI surface.
 
+## Authenticate (prime token caches)
+
+After `make dev`, drive the initial OAuth flow per provider. Do this *before* registering with Claude Code so the first MCP tool call doesn't have to wait on an interactive browser flow:
+
+```bash
+make login              # runs Microsoft, then GitHub, then Atlassian sequentially
+make login-microsoft    # individual provider
+make logout             # clear all cached tokens
+make logout-github      # clear one
+```
+
+Each `login-*` target runs the matching CLI's user-info command — that triggers a browser-based OAuth flow if there's no valid cached token, and returns silently if a token is already cached. Login is sequential by design so the browser only opens one tab at a time.
+
+The first invocation per provider opens your browser; subsequent ones return immediately from cache.
+
+## Connect to Claude Code
+
+With `make dev` running and tokens primed via `make login`, register the MCPs with Claude Code at **user scope** so they're available in every project:
+
+```bash
+make claude-add                 # registers all three at user scope (idempotent)
+claude mcp list                 # all three should show "connected"
+```
+
+Manual equivalent (default ports):
+
+```bash
+claude mcp add --transport http --scope user ms-graph  http://localhost:18001/mcp
+claude mcp add --transport http --scope user github    http://localhost:18002/mcp
+claude mcp add --transport http --scope user atlassian http://localhost:18003/mcp
+```
+
+The MCP servers must be running whenever Claude Code is. Use `make stop` to shut down between sessions, `make claude-remove` to unregister.
+
 ## Token caches
+
+All providers cache under `~/.bond_mcps/`:
 
 | MCP | Cache file | Notes |
 |---|---|---|
-| Microsoft | `~/.ms_graph_tokens.json` | MSAL-managed (separate from the shared TokenStore) |
-| GitHub | `~/.bond_ai_tokens/github.json` | Long-lived OAuth token, no auto-refresh |
-| Atlassian | `~/.bond_ai_tokens/atlassian.json` | Auto-refresh via `refresh_token` if `ATLASSIAN_CLIENT_ID/SECRET` are set |
+| Microsoft | `~/.bond_mcps/microsoft.json` | MSAL-managed (silent refresh via cached refresh token) |
+| GitHub | `~/.bond_mcps/github.json` | GitHub OAuth tokens don't expire by default — no refresh needed; re-auth only required if you revoke the token |
+| Atlassian | `~/.bond_mcps/atlassian.json` | Auto-refresh via `refresh_token` if `ATLASSIAN_CLIENT_ID/SECRET` are set |
 
-To force re-auth for one provider, delete its cache file.
+To force re-auth for one provider: `make logout-<provider>` (or delete its cache file). To wipe everything: `rm -rf ~/.bond_mcps/`.
+
+**Migrating from the old layout** (`~/.ms_graph_tokens.json`, `~/.bond_ai_tokens/`): run `make migrate-tokens` once. It moves existing tokens into `~/.bond_mcps/` and removes the empty legacy directory. Safe to re-run.
 
 ## Known account-type limitations
 

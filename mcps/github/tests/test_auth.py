@@ -35,21 +35,21 @@ class TestGetGitHubToken:
         from github.auth import get_github_token
 
         with patch(_HEADERS_PATCH, return_value={}):
-            with pytest.raises(PermissionError, match="Authorization required"):
+            with pytest.raises(PermissionError, match="authorization required"):
                 get_github_token()
 
     def test_raises_on_empty_authorization(self):
         from github.auth import get_github_token
 
         with patch(_HEADERS_PATCH, return_value={"authorization": ""}):
-            with pytest.raises(PermissionError, match="Authorization required"):
+            with pytest.raises(PermissionError, match="authorization required"):
                 get_github_token()
 
     def test_raises_on_non_bearer_scheme(self):
         from github.auth import get_github_token
 
         with patch(_HEADERS_PATCH, return_value={"authorization": f"Basic {FAKE_BASIC_AUTH}"}):
-            with pytest.raises(PermissionError, match="Authorization required"):
+            with pytest.raises(PermissionError, match="authorization required"):
                 get_github_token()
 
     def test_preserves_full_token_value(self):
@@ -79,7 +79,7 @@ class TestGetGitHubTokenFallback:
 
         with patch(_HEADERS_PATCH, side_effect=Exception("no HTTP context")), \
              patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(PermissionError, match="Authorization required"):
+            with pytest.raises(PermissionError, match="authorization required"):
                 get_github_token()
 
     def test_bearer_header_takes_priority_over_local_auth(self):
