@@ -152,16 +152,18 @@ poetry run ms-graph-cli files inspect <item_id> --content               # Also f
 poetry run ms-graph-cli files sites                                     # Followed SharePoint sites
 poetry run ms-graph-cli files sites --query engineering                 # Search sites
 poetry run ms-graph-cli files list --site-id <site_id>                  # Files in a SharePoint site
-poetry run ms-graph-cli files upload <path> --content "text"            # Create/overwrite text file
+poetry run ms-graph-cli files upload "notes.md" "# Hello" --folder Documents    # Create/overwrite text file
 poetry run ms-graph-cli files copy <item_id> <dest_folder_id>
 poetry run ms-graph-cli files rename <item_id> "new-name.txt"
 
 # Power BI (organizational accounts only — separate scope token)
 poetry run ms-graph-cli powerbi workspaces
 poetry run ms-graph-cli powerbi content <workspace_id>
-poetry run ms-graph-cli powerbi query <dataset_id> "EVALUATE Sales"
-poetry run ms-graph-cli powerbi refresh <dataset_id>
-poetry run ms-graph-cli powerbi export <report_id> --format PDF
+poetry run ms-graph-cli powerbi content <workspace_id> --type reports
+poetry run ms-graph-cli powerbi query <workspace_id> <dataset_id> "EVALUATE TOPN(10, 'Sales')"
+poetry run ms-graph-cli powerbi refresh <workspace_id> <dataset_id>
+poetry run ms-graph-cli powerbi refresh <workspace_id> <dataset_id> --history
+poetry run ms-graph-cli powerbi export <workspace_id> <report_id> --format PDF
 ```
 
 Teams and SharePoint scopes (`Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Send`, `Sites.Read.All`) are only requested when `MS_TENANT_ID` is set, since consumer accounts don't support them. `Files.Read.All` is always requested (works with both consumer and organizational accounts). Power BI uses a separate scope (`https://analysis.windows.net/powerbi/api/.default`) and a separate token cache entry — it will trigger a fresh browser flow the first time you use it.
@@ -249,26 +251,35 @@ Run `/mcp` in Claude Code to confirm `ms-graph` shows as connected, then try:
 poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557
 ```
 
-### Available Tools
+### Available Tools (23)
 
 | Tool | Description |
 |------|-------------|
-| `get_user_profile` | Get the authenticated user's profile (name, email addresses, mailbox address) |
-| `list_emails` | List recent emails from a mailbox folder |
-| `read_email` | Read a single email by ID |
+| `get_user_profile` | Get the authenticated user's profile information |
+| `list_emails` | List recent emails or search email messages |
+| `read_email` | Read a single email message by its ID |
 | `send_email` | Send an email message |
-| `search_emails` | Search emails by keyword query |
-| `list_teams` | List joined Microsoft Teams |
-| `list_team_channels` | List channels in a team |
-| `send_teams_message` | Send a message to a Teams channel |
-| `list_onedrive_files` | List files/folders in OneDrive |
-| `get_file_info` | Get detailed metadata for a file or folder |
-| `read_file_content` | Read text file content (up to 512 KB) |
-| `search_files` | Search files across OneDrive and SharePoint |
-| `list_sharepoint_sites` | Search or list followed SharePoint sites |
-| `list_site_files` | List files in a SharePoint site's document library |
+| `list_calendar_events` | List calendar events in a date range |
+| `get_calendar_event` | Get detailed information about a specific calendar event |
+| `create_calendar_event` | Create a new calendar event |
+| `check_availability` | Check free/busy availability for one or more people |
+| `list_teams` | List joined Microsoft Teams, or list channels within a specific team |
+| `list_chats` | List Teams chats (1:1, group, meeting) with last message preview |
+| `read_teams_messages` | Read recent messages from a Teams channel or chat |
+| `send_teams_message` | Send a message to a Teams channel or chat |
+| `get_teams_activity` | Get recent Teams activity across all channels and chats as a CSV digest |
+| `list_sharepoint_sites` | Search for SharePoint sites, or list followed sites |
+| `list_files` | List or search files in OneDrive or SharePoint |
+| `inspect_file` | Get metadata and optionally the content of a file from OneDrive or SharePoint |
+| `upload_file` | Create or overwrite a text file in OneDrive or SharePoint |
+| `copy_or_rename_file` | Copy or rename a file or folder |
+| `list_powerbi_workspaces` | List all Power BI workspaces the user has access to |
+| `list_powerbi_content` | List datasets, reports, and/or dashboards in a Power BI workspace |
+| `query_dataset` | Execute a DAX query against a Power BI dataset and return results as CSV |
+| `refresh_dataset` | Trigger an on-demand refresh of a Power BI dataset |
+| `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive |
 
-All parameters use simple `str`/`int` types for Bedrock compatibility. Teams tools return a friendly message when Teams is not available for the account. File tools work with both OneDrive (consumer) and SharePoint (organizational) accounts.
+All parameters use simple `str`/`int` types for Bedrock compatibility. Teams tools return a friendly message when Teams is not available for the account (personal MSA accounts). File tools work with both OneDrive (consumer) and SharePoint (organizational). Power BI tools require an organizational tenant and use a separate token scope.
 
 ## Bond AI Integration
 
@@ -323,6 +334,13 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557
 **Important**: After changing MCP tool selections on an agent, you must **save the agent** to update the Bedrock action groups. The tool-to-server mapping is baked into the action group at save time.
 
 ### 4. Production Deployment (AWS)
+
+> ⚠️ **Legacy — inherited from `bond-ai`, not yet adapted to bond-mcps.**
+> The Terraform in `mcps/microsoft/deployment/` still references the old
+> `../../shared_auth/` paths and will fail `terraform apply` as-is. A shared
+> deployment target (ECS Express / Fargate) is being designed at the top-level
+> `deployment/` directory and will replace these per-MCP modules. Treat the
+> sections below as reference only.
 
 The Microsoft MCP server has its own Terraform module in `mcps/microsoft/deployment/` that deploys it as a standalone App Runner service.
 

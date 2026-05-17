@@ -20,6 +20,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_PORT = 8000
 
 
+class AuthStateExpiredError(TimeoutError):
+    """Raised when the OAuth state was never registered with the proxy, or has
+    already been consumed/expired.
+
+    Subclasses TimeoutError so existing handlers that catch TimeoutError keep
+    working; callers that need to distinguish "user took too long" from "state
+    was already used" can catch this specifically.
+    """
+    pass
+
+
 class OAuthProxyClient:
     """Client for the shared OAuth callback proxy."""
 
@@ -81,8 +92,8 @@ class OAuthProxyClient:
                         return data
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    raise TimeoutError(
-                        "Auth state expired or unknown"
+                    raise AuthStateExpiredError(
+                        "Auth state expired or already consumed"
                     ) from e
                 raise
             except urllib.error.URLError:

@@ -199,6 +199,13 @@ GitHub OAuth tokens are long-lived (no refresh token, no expiry). Once authorize
 
 ## Deployment (AWS)
 
+> ⚠️ **Legacy — inherited from `bond-ai`, not yet adapted to bond-mcps.**
+> The Terraform in `mcps/github/deployment/` still references the old
+> `../../shared_auth/` paths and will fail `terraform apply` as-is. A shared
+> deployment target (ECS Express / Fargate) is being designed at the top-level
+> `deployment/` directory and will replace these per-MCP modules. Treat the
+> instructions below as reference only.
+
 Create a tfvars file (e.g., `mcps/github/deployment/github-mcp.tfvars`):
 ```hcl
 aws_region              = "us-west-2"

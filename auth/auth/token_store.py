@@ -8,9 +8,10 @@ SerializableTokenCache at ~/.ms_graph_tokens.json.
 import json
 import logging
 import os
-import stat
+import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -41,10 +42,28 @@ class TokenStore:
         return data
 
     def save_token(self, data: dict) -> None:
-        """Save token data with 0600 file permissions."""
+        """Save token data atomically with 0600 file permissions.
+
+        Uses tempfile.mkstemp (which creates with 0600) + os.replace to ensure
+        the file is never observable with broader permissions, even if a
+        previous version of the file existed with weaker perms.
+        """
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.cache_file.write_text(json.dumps(data, indent=2))
-        self.cache_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{self.provider}.",
+            suffix=".tmp",
+            dir=str(self.cache_dir),
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, self.cache_file)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def refresh_if_needed(
         self, client_id: str, client_secret: str, token_url: str
@@ -109,8 +128,13 @@ class TokenStore:
         token_url: str,
         refresh_token: str,
     ) -> dict | None:
-        """POST to token_url with grant_type=refresh_token."""
-        body = json.dumps({
+        """POST to token_url with grant_type=refresh_token.
+
+        Uses application/x-www-form-urlencoded per RFC 6749 §4.1.3 — required
+        for GitHub, accepted by Atlassian/Microsoft. Asks for a JSON response
+        via the Accept header.
+        """
+        body = urllib.parse.urlencode({
             "grant_type": "refresh_token",
             "client_id": client_id,
             "client_secret": client_secret,
@@ -120,7 +144,10 @@ class TokenStore:
         req = urllib.request.Request(
             token_url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
             method="POST",
         )
         try:

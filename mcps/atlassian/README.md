@@ -16,36 +16,57 @@ poetry run pytest tests/ -v
 fastmcp run atlassian_mcp.py --transport streamable-http --port 9001
 ```
 
-## Tools (14 total)
+## MCP Tools (5 dispatcher tools)
 
-### Jira (8 tools)
+The MCP server exposes **5 tools**, each a dispatcher that selects an operation via a `target` parameter. (The CLI flattens these into the friendly subcommands shown above — but external MCP clients like Claude Code or Bond AI call these 5 tools directly.)
 
-| Tool | Description |
-|------|-------------|
-| `list_projects` | List accessible Jira projects (name, key, type) |
-| `search_issues` | Search with JQL — the workhorse tool |
-| `count_issues` | Count issues matching JQL without fetching data |
-| `get_issue` | Full issue details including comments |
-| `create_issue` | Create issue with type, description, assignee, priority, labels |
-| `update_issue` | Update summary, description, assignee, priority, labels |
-| `add_issue_comment` | Add comment to an issue |
-| `transition_issue` | Move issue through workflow (e.g., "In Progress", "Done") |
+### `jira_search`
+Search and list Jira resources. `target` ∈ `{projects, issues, issue_count, versions, users, myself}`.
 
-### Confluence (5 tools)
+| `target` | Purpose | Required params |
+|---|---|---|
+| `projects` | List accessible Jira projects | — |
+| `issues` | Search issues using JQL | `jql` |
+| `issue_count` | Count issues matching JQL | `jql` |
+| `versions` | List release versions for a project | `project_key` |
+| `users` | Search users by name/email | `query` |
+| `myself` | Current user's account ID, email, display name | — |
 
-| Tool | Description |
-|------|-------------|
-| `list_spaces` | List accessible spaces |
-| `search_content` | Search pages/blogs using CQL |
-| `get_page` | Get page with body content |
-| `create_page` | Create page in a space |
-| `update_page` | Update page title/body |
+### `jira_get`
+Get detailed Jira info for one issue. `target` ∈ `{issue, transitions}`.
 
-### User (1 tool)
+| `target` | Purpose | Required params |
+|---|---|---|
+| `issue` | Full issue + comments | `issue_key` |
+| `transitions` | List available workflow transitions for the issue | `issue_key` |
 
-| Tool | Description |
-|------|-------------|
-| `get_myself` | Current user info (accountId, displayName, email) |
+### `jira_manage`
+Create, update, or transition Jira resources. `target` ∈ `{create_issue, update_issue, comment, transition, create_version}`.
+
+| `target` | Purpose | Required params |
+|---|---|---|
+| `create_issue` | Create a new issue | `project_key`, `summary` |
+| `update_issue` | Update issue fields | `issue_key` + ≥1 field |
+| `comment` | Add comment to issue (supports `@{accountId}` mentions) | `issue_key`, `body` |
+| `transition` | Move issue to another workflow state | `issue_key`, `transition_name` |
+| `create_version` | Create a release version | `project_key`, `name` |
+
+### `confluence_search`
+Search and read Confluence content. `target` ∈ `{spaces, pages, page}`.
+
+| `target` | Purpose | Required params |
+|---|---|---|
+| `spaces` | List accessible spaces | — |
+| `pages` | Search pages/blogs using CQL | `query` |
+| `page` | Get full page content + version | `page_id` |
+
+### `confluence_manage`
+Create or update Confluence pages. `target` ∈ `{create_page, update_page}`.
+
+| `target` | Purpose | Required params |
+|---|---|---|
+| `create_page` | Create a new page in a space | `space_id`, `title`, `body` |
+| `update_page` | Update an existing page | `page_id`, `title`, `body` (auto-detects version) |
 
 ## Atlassian OAuth App Setup
 
@@ -112,8 +133,12 @@ atlassian-cli confluence get <page_id>
 atlassian-cli user me
 
 # Raw — direct MCP tool interface (debugging / testing)
-atlassian-cli raw jira-search --jql "project = PROJ" --max-results 5
+# All raw commands require --target (matches the dispatcher tool's `target` parameter)
+atlassian-cli raw jira-search --target issues --jql "project = PROJ" --max-results 5
+atlassian-cli raw jira-search --target projects
+atlassian-cli raw jira-get --target transitions --issue-key PROJ-123
 atlassian-cli raw confluence-search --target spaces --max-results 5
+atlassian-cli raw confluence-search --target pages --query 'text ~ "release"'
 
 # Auth
 atlassian-cli logout                                                 # Clear cached token
@@ -241,6 +266,13 @@ Jira v3 requires descriptions and comments in ADF. Plain text is auto-wrapped:
 ```
 
 ## Deployment (AWS)
+
+> ⚠️ **Legacy — inherited from `bond-ai`, not yet adapted to bond-mcps.**
+> The Terraform in `mcps/atlassian/deployment/` still references the old
+> `../../shared_auth/` paths and will fail `terraform apply` as-is. A shared
+> deployment target (ECS Express / Fargate) is being designed at the top-level
+> `deployment/` directory and will replace these per-MCP modules. Treat the
+> instructions below as reference only.
 
 Create a tfvars file (e.g., `mcps/atlassian/deployment/atlassian-mcp.tfvars`):
 ```hcl
