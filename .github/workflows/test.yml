@@ -19,6 +19,7 @@ jobs:
           - mcps/microsoft
           - mcps/github
           - mcps/atlassian
+          - mcps/databricks
 
     steps:
       - uses: actions/checkout@v4

@@ -18,6 +18,9 @@ build/
 # Dev orchestration scratch (Makefile writes logs here)
 tmp/
 
+# Git worktrees
+.worktrees/
+
 # Terraform
 .terraform/
 *.tfstate
