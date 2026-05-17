@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "ms-graph-mcp"
+version = "0.1.0"
+description = "Microsoft Graph MCP server for Bond AI - email and Teams integration"
+authors = ["Bond AI"]
+packages = [{include = "ms_graph"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+httpx = ">=0.27"
+msal = ">=1.28"
+fastmcp = ">=3.0.0,<4.0"
+python-dotenv = "^1.2.2"
+authlib = ">=1.7.1"
+pyjwt = {version = ">=2.12.0", extras = ["crypto"]}
+pygments = ">=2.20.0"
+bond-auth = {path = "../../auth", develop = true}
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.24"
+respx = ">=0.22"
+
+[tool.poetry.scripts]
+ms-graph-cli = "ms_graph_cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

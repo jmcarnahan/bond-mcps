@@ -1,0 +1,9 @@
+.venv/
+tests/
+.env
+deployment/
+__pycache__/
+*.pyc
+README.md
+ms_graph_cli.py
+.pytest_cache/
