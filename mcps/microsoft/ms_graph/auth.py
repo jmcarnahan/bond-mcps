@@ -41,8 +41,10 @@ def get_graph_token() -> str:
 
     # Path 3: No auth available
     raise PermissionError(
-        "Authorization required. Either connect your Microsoft account "
-        "in Bond AI Settings -> Connections, or set MS_CLIENT_ID for local auth."
+        "Microsoft authorization required. For standalone use, set MS_CLIENT_ID "
+        "(plus MS_CLIENT_SECRET if confidential) and run `make login-microsoft`. "
+        "For backend mode (e.g. Bond AI), ensure the backend forwards an "
+        "Authorization: Bearer header."
     )
 
 
@@ -79,6 +81,8 @@ def get_powerbi_token() -> str:
 
     # Path 3: No auth available
     raise PermissionError(
-        "Power BI authorization required. Either connect your Microsoft account "
-        "in Bond AI Settings -> Connections, or set MS_CLIENT_ID for local auth."
+        "Power BI authorization required. For standalone use, set MS_CLIENT_ID "
+        "(plus MS_CLIENT_SECRET if confidential) and run `make login-microsoft` — "
+        "Power BI uses a separate PBI-scoped token from Graph. For backend mode, "
+        "ensure the backend forwards an Authorization: Bearer header with a PBI token."
     )
