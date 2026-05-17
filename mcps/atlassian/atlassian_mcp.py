@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Atlassian MCP Server for Bond AI.
+Atlassian MCP Server.
 
-Provides Jira, Confluence, and user tools that use the user's Atlassian OAuth
-token and cloud ID, passed through by Bond AI's backend as HTTP headers:
-  - Authorization: Bearer {token}
-  - X-Atlassian-Cloud-Id: {cloud_id}
+Provides Jira and Confluence tools. Token + cloud ID are resolved in this
+order (see atlassian/auth.py):
+  1. Authorization: Bearer header + X-Atlassian-Cloud-Id header (backend mode, e.g. Bond AI)
+  2. Local OAuth via atlassian.local_auth (standalone mode — Claude Code, CLI),
+     activated when ATLASSIAN_CLIENT_ID is set; reads/writes ~/.bond_mcps/atlassian.json
+     and auto-discovers cloud_id via the accessible-resources API.
 
-Run:
-    fastmcp run atlassian_mcp.py --transport streamable-http --port 9001
+Run (standalone):
+    make dev                                                                      # all 4 services
+    poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port 18003
 
 Tool summary (5 tools):
   Jira       : jira_search, jira_get, jira_manage
@@ -20,9 +23,13 @@ import io
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Optional, Sequence
+from pathlib import Path
+from typing import Sequence
 
+from dotenv import load_dotenv
 from fastmcp import FastMCP
+
+load_dotenv(Path(__file__).parent / ".env")
 
 from atlassian.auth import get_atlassian_token, get_cloud_id
 from atlassian.atlassian_client import AsyncAtlassianClient, AtlassianError

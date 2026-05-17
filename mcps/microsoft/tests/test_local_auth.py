@@ -235,7 +235,7 @@ class TestTokenCacheSecurity:
         mock_cache.has_state_changed = True
         mock_cache.serialize.return_value = '{"cache": "data"}'
 
-        fake_path = tmp_path / ".ms_graph_tokens.json"
+        fake_path = tmp_path / "microsoft.json"
         with patch.object(la, "TOKEN_CACHE_PATH", fake_path):
             la._save_token_cache(mock_cache)
 
@@ -249,8 +249,35 @@ class TestTokenCacheSecurity:
         mock_cache = MagicMock()
         mock_cache.has_state_changed = False
 
-        fake_path = tmp_path / ".ms_graph_tokens.json"
+        fake_path = tmp_path / "microsoft.json"
         with patch.object(la, "TOKEN_CACHE_PATH", fake_path):
             la._save_token_cache(mock_cache)
 
         assert not fake_path.exists()
+
+    def test_save_creates_parent_dir(self, tmp_path):
+        """A fresh system has no ~/.bond_mcps/; _save_token_cache must mkdir it."""
+        import ms_graph.local_auth as la
+
+        mock_cache = MagicMock()
+        mock_cache.has_state_changed = True
+        mock_cache.serialize.return_value = '{"cache": "data"}'
+
+        fake_path = tmp_path / "fresh" / "subdir" / "microsoft.json"
+        assert not fake_path.parent.exists()
+
+        with patch.object(la, "TOKEN_CACHE_PATH", fake_path):
+            la._save_token_cache(mock_cache)
+
+        assert fake_path.exists()
+        # Parent dir created with 0700 (owner-only)
+        assert (fake_path.parent.stat().st_mode & 0o777) == 0o700
+
+
+class TestTokenCacheDefaults:
+    """Pin the production default cache location so it can't silently regress."""
+
+    def test_default_token_cache_path(self):
+        from pathlib import Path
+        from ms_graph.local_auth import TOKEN_CACHE_PATH
+        assert TOKEN_CACHE_PATH == Path.home() / ".bond_mcps" / "microsoft.json"

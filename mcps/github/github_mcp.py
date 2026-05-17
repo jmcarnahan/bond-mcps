@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """
-GitHub MCP Server for Bond AI.
+GitHub MCP Server.
 
-Provides repository, issue, pull request, and code tools that use the user's
-GitHub OAuth token, passed through by Bond AI's backend as an Authorization:
-Bearer header.
+Provides repository, issue, pull request, and code tools. Tokens are resolved
+in this order (see github/auth.py):
+  1. Authorization: Bearer header (backend mode, e.g. Bond AI)
+  2. Local OAuth via github.local_auth (standalone mode — Claude Code, CLI),
+     activated when GITHUB_CLIENT_ID is set; reads/writes ~/.bond_mcps/github.json
 
-Run:
-    fastmcp run github_mcp.py --transport streamable-http --port 5558
+Run (standalone):
+    make dev                                                                # all 4 services
+    poetry run fastmcp run github_mcp.py --transport streamable-http --port 18002
 """
 
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastmcp import FastMCP
+
+load_dotenv(Path(__file__).parent / ".env")
 
 from github.auth import get_github_token
 from github.github_client import AsyncGitHubClient, GitHubError
@@ -29,12 +36,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app):
-    """Validate auth proxy is reachable when local auth is configured."""
+    """Warn if auth proxy is unreachable when local auth is configured."""
     if os.environ.get("GITHUB_CLIENT_ID"):
         from auth import OAuthProxyClient
         proxy = OAuthProxyClient()
-        proxy.check_proxy()
-        logger.info("Auth proxy validated for local GitHub auth")
+        try:
+            proxy.check_proxy()
+            logger.info("Auth proxy validated for local GitHub auth")
+        except RuntimeError as e:
+            logger.warning("Auth proxy not available: %s", e)
     yield
 
 

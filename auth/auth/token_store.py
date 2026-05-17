@@ -2,7 +2,8 @@
 Generic file-based token cache for OAuth providers.
 
 For non-MSAL providers (Atlassian, GitHub). Microsoft uses MSAL's own
-SerializableTokenCache at ~/.ms_graph_tokens.json.
+SerializableTokenCache at ~/.bond_mcps/microsoft.json. All providers
+share the ~/.bond_mcps/ directory.
 """
 
 import json
@@ -17,7 +18,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_DIR = Path.home() / ".bond_ai_tokens"
+DEFAULT_CACHE_DIR = Path.home() / ".bond_mcps"
 
 
 class TokenStore:

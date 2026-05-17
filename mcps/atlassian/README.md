@@ -1,6 +1,6 @@
-# Atlassian MCP Server for Bond AI
+# Atlassian MCP Server
 
-Custom MCP server providing Jira and Confluence tools for Bond AI. Built following the same patterns as the GitHub and Microsoft Graph MCP servers.
+MCP server providing Jira and Confluence tools. Runs standalone (Claude Code, CLI) or behind the Bond AI backend — token resolution at `atlassian/auth.py` tries Bearer header first, falls back to local OAuth when `ATLASSIAN_CLIENT_ID` is set.
 
 ## Quick Start
 
@@ -13,7 +13,7 @@ poetry install
 poetry run pytest tests/ -v
 
 # Start MCP server locally
-fastmcp run atlassian_mcp.py --transport streamable-http --port 9001
+fastmcp run atlassian_mcp.py --transport streamable-http --port 18003
 ```
 
 ## MCP Tools (5 dispatcher tools)
@@ -80,7 +80,7 @@ Create or update Confluence pages. `target` ∈ `{create_page, update_page}`.
    - `read:confluence-content.all` — Read Confluence pages
    - `write:confluence-content` — Create/update Confluence pages
    - `read:me` — Read user profile
-4. Set callback URL to your Bond AI backend OAuth callback
+4. Set callback URL to `http://localhost:8000/connections/atlassian/callback` (for standalone use via the shared auth proxy) or your Bond AI backend OAuth callback (for backend mode)
 5. Note your Client ID and Client Secret
 
 ### 2. Find Your Cloud ID
@@ -94,7 +94,7 @@ curl -s https://YOUR-DOMAIN.atlassian.net/_edge/tenant_info | jq .cloudId
 
 The CLI supports two authentication modes:
 
-1. **Browser OAuth via the shared auth proxy (recommended)** — set `ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET`; the CLI runs the OAuth flow on first use, caches the token at `~/.bond_ai_tokens/atlassian.json`, and auto-refreshes it via `refresh_token`. Requires the auth proxy to be running (`cd auth && poetry run python -m auth`).
+1. **Browser OAuth via the shared auth proxy (recommended)** — set `ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET`; the CLI runs the OAuth flow on first use, caches the token at `~/.bond_mcps/atlassian.json` (shared with the MCP server), and auto-refreshes it via `refresh_token`. Requires the auth proxy to be running (`make dev` or `cd auth && poetry run python -m auth`).
 2. **Direct token (CI / scripts)** — set `ATLASSIAN_ACCESS_TOKEN` (and `ATLASSIAN_CLOUD_ID`) to bypass OAuth entirely. No proxy needed, but no refresh — you renew the token yourself.
 
 ```bash
@@ -148,67 +148,50 @@ atlassian-cli logout                                                 # Clear cac
 
 ## Standalone Use with Claude Code
 
-The MCP server can run standalone with local OAuth — no Bond AI backend required. Authentication uses browser-based authorization code + PKCE flow via a shared OAuth proxy.
+The MCP server runs standalone with local OAuth — no Bond AI backend required. Browser-based authorization code + PKCE flow via the shared OAuth proxy. Auto-discovers `cloud_id` from the accessible-resources API and stores it alongside the token.
 
 ### Prerequisites
 
 1. An Atlassian OAuth 2.0 app (see [Atlassian OAuth App Setup](#atlassian-oauth-app-setup) above)
-2. **Add a callback URL** to your OAuth app: `http://localhost:8000/connections/atlassian_v2/callback`
+2. **Callback URL** registered on the OAuth app: `http://localhost:8000/connections/atlassian/callback`
+3. `ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET` set in `mcps/atlassian/.env` (or your shell). `ATLASSIAN_CLOUD_ID` is optional — pin it only if you have multiple sites and want a specific one.
 
-### Step 1: Start the Shared Auth Proxy
-
-The OAuth callback proxy handles browser redirects for all MCP servers. Start it in its own terminal:
-
-```bash
-cd auth
-poetry install
-poetry run python -m auth
-```
-
-You should see `Bond AI OAuth Proxy — Listening on 127.0.0.1:8000`. Leave this running.
-
-### Step 2: Start the MCP Server
-
-In a second terminal:
+### Recommended: orchestrate via the repo-root Makefile
 
 ```bash
-cd mcps/atlassian
-poetry install
-
-export ATLASSIAN_CLIENT_ID=<your-oauth-app-client-id>
-export ATLASSIAN_CLIENT_SECRET=<your-oauth-app-client-secret>
-
-# Optional: set cloud ID if you have multiple Atlassian sites
-# Omit to auto-discover (prompts if multiple sites found)
-export ATLASSIAN_CLOUD_ID=<your-cloud-id>
-
-# Fails fast if the auth proxy isn't running
-poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port 9001
+make install            # one-time
+make dev                # auth proxy on :8000 + Atlassian MCP on :18003 (and the other two)
+make claude-add         # registers ms-graph / github / atlassian with Claude Code at user scope
+make login-atlassian    # opens browser for first-time auth (or returns cached info)
 ```
 
-### Step 3: Register with Claude Code
-
-```bash
-claude mcp add-json atlassian '{"type":"http","url":"http://localhost:9001/mcp"}' --scope local
-```
-
-Then restart Claude Code to pick up the new server.
-
-### Step 4: Authenticate
-
-The first time you use an Atlassian tool in Claude Code, the server will open your browser to Atlassian's authorization page. After you authorize, the token is cached at `~/.bond_ai_tokens/atlassian.json`.
-
-To force re-authentication:
-
-```bash
-rm ~/.bond_ai_tokens/atlassian.json
-```
-
-### Verify
-
-Run `/mcp` in Claude Code to confirm `atlassian` shows as connected, then try:
+`claude mcp list` should show `atlassian` as ✓ Connected. Try in Claude Code:
 
 > "What's my Atlassian profile?" or "List my Jira projects"
+
+### By hand
+
+```bash
+# Terminal 1 — auth proxy
+cd auth && poetry run python -m auth
+
+# Terminal 2 — MCP server
+cd mcps/atlassian
+poetry install
+poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port 18003
+
+# Register
+claude mcp add --transport http --scope user atlassian http://localhost:18003/mcp
+```
+
+### Authenticate / re-authenticate
+
+Token is cached at `~/.bond_mcps/atlassian.json` (shared with the CLI) and includes the discovered `cloud_id` + refresh token for silent renewal.
+
+```bash
+make logout-atlassian      # or: rm ~/.bond_mcps/atlassian.json
+make login-atlassian       # browser opens for re-auth
+```
 
 ## Bond AI Integration
 
@@ -304,10 +287,10 @@ Creates:
 ## Troubleshooting
 
 ### "Authorization required" error
-The MCP server isn't receiving the OAuth token. Check that Bond AI backend is passing the `Authorization: Bearer` header.
+The MCP server resolved no token. **Standalone mode**: check that `ATLASSIAN_CLIENT_ID` is set, the auth proxy is running (`make status`), and `~/.bond_mcps/atlassian.json` exists (run `make login-atlassian` to populate it). **Backend mode**: confirm Bond AI is forwarding the `Authorization: Bearer` header.
 
 ### "Cloud ID required" error
-The `X-Atlassian-Cloud-Id` header is missing. Ensure `cloud_id` is configured in the MCP server config.
+The MCP server resolved a token but no cloud_id. **Standalone mode**: re-run `make login-atlassian` (the OAuth flow auto-discovers cloud_id and writes it to the cache) or pin one via `ATLASSIAN_CLOUD_ID`. **Backend mode**: ensure `cloud_id` is set in the MCP server config so the backend sends `X-Atlassian-Cloud-Id`.
 
 ### "Rate limited by Atlassian"
 Atlassian enforces rate limits. The error message includes the retry-after time. Wait and try again.

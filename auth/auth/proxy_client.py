@@ -45,9 +45,10 @@ class OAuthProxyClient:
             logger.info("Auth proxy verified on port %d", self.port)
             return
         raise RuntimeError(
-            f"Bond AI auth proxy is not running on port {self.port}.\n"
-            f"Start it in a separate terminal:\n"
-            f"  cd auth && poetry run python -m auth\n"
+            f"Bond MCPs auth proxy is not running on port {self.port}.\n"
+            f"Start it via:\n"
+            f"  make dev                     (orchestrates everything)\n"
+            f"  cd auth && poetry run python -m auth   (proxy only)\n"
             f"Or set BOND_AUTH_PROXY_PORT to use a different port."
         )
 

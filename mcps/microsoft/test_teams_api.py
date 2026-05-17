@@ -418,7 +418,7 @@ def main():
     print("  Any 403 errors indicate missing OAuth scopes that need to be")
     print("  added to the Azure app registration and re-consented.\n")
     print("  To re-consent with new scopes, delete the token cache:")
-    print(f"    rm ~/.ms_graph_tokens.json\n")
+    print(f"    rm ~/.bond_mcps/microsoft.json\n")
 
     client.close()
 
