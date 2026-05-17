@@ -15,6 +15,9 @@ build/
 .env
 .env.local
 
+# Dev orchestration scratch (Makefile writes logs here)
+tmp/
+
 # Terraform
 .terraform/
 *.tfstate
