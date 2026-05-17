@@ -105,7 +105,7 @@ def get_local_token_and_cloud_id() -> tuple[str, str]:
 
 def _do_browser_auth(client_id: str, client_secret: str) -> dict | None:
     """Run OAuth2 auth code + PKCE flow via shared proxy."""
-    from auth import OAuthProxyClient
+    from auth import AuthStateExpiredError, OAuthProxyClient
 
     proxy = OAuthProxyClient()
     try:
@@ -148,6 +148,14 @@ def _do_browser_auth(client_id: str, client_secret: str) -> dict | None:
 
     try:
         callback_result = proxy.wait_for_callback(state, timeout=120)
+    except AuthStateExpiredError:
+        # Subclass of TimeoutError — must come first
+        logger.warning("Atlassian browser auth state expired or already consumed")
+        print(
+            "Browser login session expired or was already used. Please retry.",
+            flush=True,
+        )
+        return None
     except (TimeoutError, RuntimeError) as e:
         logger.warning("Atlassian browser auth failed: %s", e)
         print("Browser login failed.", flush=True)

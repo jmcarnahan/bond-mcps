@@ -123,7 +123,7 @@ The `auth` proxy defaults to port 8000; override with `BOND_AUTH_PROXY_PORT`. No
 
 ## Deployment
 
-A shared deployment target (ECS Express vs Fargate vs EKS) is being designed. Existing per-MCP `deployment/` directories (App Runner Terraform copied from `bond-ai`) are kept as legacy references and will be replaced.
+A shared deployment target (ECS Express vs Fargate vs EKS) is being designed and will live at the top-level `deployment/` directory. Each MCP also has a `deployment.legacy/` directory with App Runner Terraform copied verbatim from `bond-ai` — these still reference the old `../../shared_auth/` paths and will not apply as-is. They're kept as reference until the shared cluster work lands.
 
 ## Adding a new MCP
 

@@ -268,13 +268,13 @@ Jira v3 requires descriptions and comments in ADF. Plain text is auto-wrapped:
 ## Deployment (AWS)
 
 > ⚠️ **Legacy — inherited from `bond-ai`, not yet adapted to bond-mcps.**
-> The Terraform in `mcps/atlassian/deployment/` still references the old
+> The Terraform in `mcps/atlassian/deployment.legacy/` still references the old
 > `../../shared_auth/` paths and will fail `terraform apply` as-is. A shared
 > deployment target (ECS Express / Fargate) is being designed at the top-level
 > `deployment/` directory and will replace these per-MCP modules. Treat the
 > instructions below as reference only.
 
-Create a tfvars file (e.g., `mcps/atlassian/deployment/atlassian-mcp.tfvars`):
+Create a tfvars file (e.g., `mcps/atlassian/deployment.legacy/atlassian-mcp.tfvars`):
 ```hcl
 aws_region                 = "us-west-2"
 environment                = "dev"
@@ -285,7 +285,7 @@ mcp_atlassian_is_private   = true   # Set to false for public access
 
 Deploy:
 ```bash
-cd mcps/atlassian/deployment
+cd mcps/atlassian/deployment.legacy
 terraform init
 terraform apply -var-file=atlassian-mcp.tfvars
 ```
