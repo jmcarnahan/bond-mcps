@@ -50,12 +50,44 @@ poetry run pytest tests/ -v
 ```
 
 ### CLI (Device Code Flow)
+
+The CLI uses GitHub's device code flow. It needs only the OAuth App's Client ID — no secret. The shared auth proxy is **not** required for the CLI (the proxy is only needed by the MCP server's PKCE flow).
+
 ```bash
-export GH_CLIENT_ID=<your-client-id>
-poetry run github-cli repos list
-poetry run github-cli issues list <owner> <repo>
-poetry run github-cli pulls list <owner> <repo>
+export GH_CLIENT_ID=<your-oauth-app-client-id>
+
+# Repos
+poetry run github-cli repos list                                     # Your repositories
+poetry run github-cli repos list --type owner --sort updated
+poetry run github-cli repos get <owner> <repo>
+poetry run github-cli repos search "fastmcp language:python"
+
+# Issues
+poetry run github-cli issues list <owner> <repo> --state open
+poetry run github-cli issues get <owner> <repo> <issue_number>
+poetry run github-cli issues create <owner> <repo> "Title" --body "Body"
+
+# Pull requests
+poetry run github-cli pulls list <owner> <repo> --state open
+poetry run github-cli pulls get <owner> <repo> <pr_number>
+
+# Code
+poetry run github-cli code search "FastMCP repo:owner/repo"
+poetry run github-cli code get <owner> <repo> <path> [--ref <branch>]
+
+# User
 poetry run github-cli user
+```
+
+**Two distinct OAuth env var sets:**
+- **`GH_CLIENT_ID`** — used by the **CLI** (device code flow, no secret, no proxy)
+- **`GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET`** — used by the **MCP server's** PKCE/proxy flow when running standalone (see [Standalone Use with Claude Code](#standalone-use-with-claude-code))
+
+They can be the same OAuth App if it has both device flow and a callback URL configured; or separate apps if you prefer.
+
+Tokens are cached at `~/.bond_ai_tokens/github.json`. To force re-auth:
+```bash
+rm ~/.bond_ai_tokens/github.json
 ```
 
 ## Standalone Use with Claude Code
@@ -72,9 +104,9 @@ The MCP server can run standalone with local OAuth — no Bond AI backend requir
 The OAuth callback proxy handles browser redirects for all MCP servers. Start it in its own terminal:
 
 ```bash
-cd mcps/shared_auth
+cd auth
 poetry install
-poetry run python -m shared_auth
+poetry run python -m auth
 ```
 
 You should see `Bond AI OAuth Proxy — Listening on 127.0.0.1:8000`. Leave this running.
