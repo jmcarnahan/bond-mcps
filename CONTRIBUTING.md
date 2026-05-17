@@ -7,7 +7,7 @@ No direct commits to `main`. Every change — code, docs, CI, even one-line typo
 1. **Branch off main**: `git checkout -b <kebab-case-name>` (e.g. `fix-confluence-scope`, `add-ecs-deployment`, `docs-cli-cleanup`).
 2. **Commit on the branch** with focused, well-described commits. Reference the relevant suggestion or issue in the commit body when applicable.
 3. **Push and open a PR**: `git push -u origin <branch>` then `gh pr create` (or open in the GitHub UI).
-4. **Wait for CI** ([`.github/workflows/test.yml`](.github/workflows/test.yml)) to go green. The workflow runs the full test suite (~752 tests) across all 4 packages on Python 3.10, 3.11, and 3.12.
+4. **Wait for CI** ([`.github/workflows/test.yml`](.github/workflows/test.yml)) to go green. The workflow runs the full test suite across all 4 packages on Python 3.10, 3.11, and 3.12.
 5. **Merge after review.** Squash or rebase merge — your call.
 
 Branch protection should be configured in GitHub repo settings to enforce this (require PRs, require status checks). If it isn't yet, treat the rule as enforced by convention regardless.
@@ -17,11 +17,11 @@ Branch protection should be configured in GitHub repo settings to enforce this (
 ```
 bond-mcps/
 ├── auth/                       # Python package `auth` — OAuth proxy + token store
-│   └── tests/                  # 53 tests
+│   └── tests/                  # http.server + token_store tests
 ├── mcps/
-│   ├── microsoft/              # Microsoft Graph MCP — port 5557, CLI: ms-graph-cli
-│   ├── github/                 # GitHub MCP — port 5558, CLI: github-cli
-│   └── atlassian/              # Atlassian MCP — port 9001, CLI: atlassian-cli
+│   ├── microsoft/              # Microsoft Graph MCP — port 18001, CLI: ms-graph-cli
+│   ├── github/                 # GitHub MCP — port 18002, CLI: github-cli
+│   └── atlassian/              # Atlassian MCP — port 18003, CLI: atlassian-cli
 └── deployment/                 # (planned) shared cluster infra
 ```
 
@@ -29,23 +29,30 @@ Each MCP is an independent Poetry project that depends on the local `auth` packa
 
 ## Local development
 
-Prereqs: Python ≥ 3.10, Poetry.
+Prereqs: Python ≥ 3.10, Poetry. macOS or Linux (the Makefile uses `lsof`, `kill`, `ps`, `curl`).
+
+The recommended path is the repo-root `Makefile`, which orchestrates the auth proxy and all 3 MCPs together:
 
 ```bash
-# 1. Install the shared auth library
-cd auth && poetry install
+make install            # poetry install in auth/ + each MCP
+# Populate .env per MCP first — see README.md "Quick start" step 0
+make dev                # boots all 4 services in tmp/logs/
+make login              # primes OAuth tokens via the CLIs (opens browser per provider)
+make claude-add         # registers the 3 MCPs with Claude Code (user scope)
+make status             # show [up]/[down] per service
+make stop               # shut everything down
+```
 
-# 2. Start the OAuth callback proxy (separate terminal)
-cd auth && poetry run python -m auth
+The full target list is in the [Makefile](Makefile) itself. See [`README.md`](README.md) for env-var requirements and the per-MCP READMEs for OAuth app registration.
 
-# 3. Install + run an MCP
-cd mcps/<name> && poetry install
-poetry run pytest -q
+For single-MCP debugging (bypassing the Makefile):
+
+```bash
+cd auth && poetry install && poetry run python -m auth    # auth proxy (separate terminal)
+cd mcps/<name> && poetry install && poetry run pytest -q
 poetry run <cli-name> --help
 poetry run fastmcp run <name>_mcp.py --transport streamable-http --port <port>
 ```
-
-Per-MCP env var requirements are documented in each MCP's README and in the [top-level README](README.md).
 
 ## Running tests
 
@@ -59,7 +66,7 @@ for p in auth mcps/microsoft mcps/github mcps/atlassian; do
 done
 ```
 
-All tests are unit tests using `respx` to mock HTTP — no real credentials needed.
+All tests are hermetic — no real credentials needed. MCP tests use `respx` to mock httpx; `auth/` tests use stdlib `http.server` to spin up a real proxy on `127.0.0.1:0` and `unittest.mock` for client-side patching.
 
 The atlassian package has 16 integration tests gated by `--integration`; they hit real Atlassian APIs and are skipped by default.
 
@@ -67,7 +74,7 @@ The atlassian package has 16 integration tests gated by `--integration`; they hi
 
 - **Python**: 3.10+ features OK (PEP 604 union syntax, `dict[str, X]` builtins, structural pattern matching where it clarifies). Type hints on public functions.
 - **Auth package**: stdlib only — no external runtime deps. Tests use pytest + the standard library mock.
-- **MCPs**: httpx for HTTP (sync + async), fastmcp for the server, respx for test mocking.
+- **MCPs**: httpx for HTTP (sync + async), fastmcp for the server, python-dotenv for `.env` loading, respx for test mocking.
 - **No comments that just restate the code.** Comment the *why* (non-obvious constraints, workarounds, invariants), not the *what*.
 
 ## Adding a new MCP
