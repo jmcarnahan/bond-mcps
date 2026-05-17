@@ -1,9 +1,9 @@
 # Microsoft Graph MCP Server
 
-MCP server providing Microsoft email, Teams, OneDrive, and SharePoint tools. Supports two authentication modes:
+MCP server providing Microsoft email, Teams, OneDrive, and SharePoint tools. Supports two authentication modes (resolved in this order, see `ms_graph/auth.py`):
 
-- **Bond AI backend**: Receives pre-authenticated Bearer tokens (production deployment)
-- **Local auth**: Browser-based OAuth with PKCE for standalone use with Claude Code, other MCP clients, or the CLI
+- **Standalone**: Local MSAL OAuth (browser PKCE via the shared auth proxy, device-code fallback). Active when `MS_CLIENT_ID` is set. Used by the CLI and by MCP clients like Claude Code.
+- **Backend mode**: Receives pre-authenticated Bearer tokens via the `Authorization` header (e.g. Bond AI forwarding a per-user token).
 
 ## Quick Start
 
@@ -101,7 +101,7 @@ If `MS_TENANT_ID` is not set, the CLI defaults to `consumers`.
 
 ## CLI Usage
 
-The CLI uses MSAL for authentication (browser-based PKCE flow with device code fallback). Tokens are cached locally at `~/.ms_graph_tokens.json`.
+The CLI uses MSAL for authentication (browser-based PKCE flow with device code fallback). Tokens are cached locally at `~/.bond_mcps/microsoft.json`.
 
 **Prerequisites:**
 - The shared auth proxy must be running (`cd auth && poetry run python -m auth`)
@@ -170,7 +170,7 @@ Teams and SharePoint scopes (`Team.ReadBasic.All`, `Channel.ReadBasic.All`, `Cha
 
 To clear cached tokens and re-authenticate:
 ```bash
-rm -f ~/.ms_graph_tokens.json
+rm -f ~/.bond_mcps/microsoft.json
 ```
 
 Enable debug output to inspect token claims:
@@ -180,75 +180,59 @@ export MS_DEBUG=1
 
 ## Standalone Use with Claude Code
 
-The MCP server can run standalone with local OAuth — no Bond AI backend required. Authentication uses browser-based authorization code + PKCE flow via a shared OAuth proxy, with device code as a fallback for headless environments.
+The MCP server runs standalone with local OAuth — no Bond AI backend required. MSAL browser-based PKCE flow via the shared OAuth proxy, with device code fallback for headless environments.
 
 ### Prerequisites
 
 1. An Azure App Registration with the required API permissions (see [Azure App Registration](#azure-app-registration) above)
-2. **Add a Web redirect URI**: `http://localhost:8000/connections/microsoft/callback`
-3. **Create a client secret** if your app is registered as a confidential client
-4. **Enable public client flows** (optional, enables device code fallback)
+2. **Web redirect URI** on the app: `http://localhost:8000/connections/microsoft/callback`
+3. **Client secret** created if your app is registered as a confidential client (`MS_CLIENT_SECRET`)
+4. **Public client flows enabled** (optional — enables device code fallback for headless use)
+5. `MS_CLIENT_ID` set in `mcps/microsoft/.env` (and `MS_CLIENT_SECRET` if confidential, `MS_TENANT_ID` if organizational)
 
-### Step 1: Start the Shared Auth Proxy
-
-The OAuth callback proxy handles browser redirects for all MCP servers. Start it in its own terminal:
-
-```bash
-cd auth
-poetry install
-poetry run python -m auth
-```
-
-You should see `Bond AI OAuth Proxy — Listening on 127.0.0.1:8000`. Leave this running.
-
-### Step 2: Start the MCP Server
-
-In a second terminal:
+### Recommended: orchestrate via the repo-root Makefile
 
 ```bash
-cd mcps/microsoft
-poetry install
-
-export MS_CLIENT_ID=<your-application-client-id>
-export MS_CLIENT_SECRET=<your-client-secret>
-
-# Optional: for organizational accounts (Teams, SharePoint)
-export MS_TENANT_ID=<your-tenant-id>
-
-# Fails fast if the auth proxy isn't running
-poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557
+make install            # one-time
+make dev                # auth proxy on :8000 + Microsoft MCP on :18001 (and the other two)
+make claude-add         # registers ms-graph / github / atlassian with Claude Code at user scope
+make login-microsoft    # opens browser for first-time auth (or returns cached info)
 ```
 
-### Step 3: Register with Claude Code
-
-```bash
-claude mcp add-json ms-graph '{"type":"http","url":"http://localhost:5557/mcp"}' --scope local
-```
-
-Then restart Claude Code to pick up the new server.
-
-### Step 4: Authenticate
-
-The first time you use a Microsoft tool in Claude Code, the server will open your browser to Microsoft's login page. After you sign in, the token is cached at `~/.ms_graph_tokens.json`. Subsequent calls use the cached token automatically.
-
-If the browser doesn't open (SSH, headless), the server falls back to device code flow.
-
-To force re-authentication:
-
-```bash
-rm ~/.ms_graph_tokens.json
-```
-
-### Verify
-
-Run `/mcp` in Claude Code to confirm `ms-graph` shows as connected, then try:
+`claude mcp list` should show `ms-graph` as ✓ Connected. Try in Claude Code:
 
 > "What's my Microsoft profile?" or "List my recent emails"
+
+### By hand
+
+```bash
+# Terminal 1 — auth proxy
+cd auth && poetry run python -m auth
+
+# Terminal 2 — MCP server
+cd mcps/microsoft
+poetry install
+poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
+
+# Register
+claude mcp add --transport http --scope user ms-graph http://localhost:18001/mcp
+```
+
+### Authenticate / re-authenticate
+
+Token cached at `~/.bond_mcps/microsoft.json` (MSAL-managed, shared with the CLI). MSAL handles silent refresh transparently using the cached refresh token.
+
+```bash
+make logout-microsoft      # or: rm ~/.bond_mcps/microsoft.json
+make login-microsoft       # browser opens for re-auth
+```
+
+If the browser path fails (SSH, headless), MSAL falls back to device code flow — output goes to the server log (`tmp/logs/microsoft.log` when running via `make dev`).
 
 ## MCP Server
 
 ```bash
-poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557
+poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
 ### Available Tools (23)
@@ -289,7 +273,7 @@ Add a `microsoft` entry to the `mcpServers` object in your `BOND_MCP_CONFIG` env
 
 ```json
 "microsoft": {
-    "url": "http://localhost:5557/mcp",
+    "url": "http://localhost:18001/mcp",
     "auth_type": "oauth2",
     "transport": "streamable-http",
     "display_name": "Microsoft",
@@ -320,7 +304,7 @@ For Teams support, add Teams scopes to the `scopes` field:
 
 ```bash
 cd mcps/microsoft
-poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557
+poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
 ### 3. Connect via Bond AI UI
