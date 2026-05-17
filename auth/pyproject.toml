@@ -1,14 +1,20 @@
 [tool.poetry]
 name = "bond-auth"
-version = "0.1.0"
-description = "Shared OAuth callback proxy and token store for Bond MCP servers"
+version = "0.2.0"
+description = "Shared OAuth callback proxy and encrypted token database for Bond MCP servers"
 packages = [{include = "auth"}]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
+sqlalchemy = ">=2.0,<3.0"
+alembic = ">=1.13,<2.0"
+cryptography = ">=43.0,<46.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"
+
+[tool.poetry.scripts]
+bond-mcps = "auth.cli:main"
 
 [build-system]
 requires = ["poetry-core"]

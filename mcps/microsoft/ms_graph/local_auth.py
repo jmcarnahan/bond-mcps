@@ -10,15 +10,11 @@ to be running. Start it with: cd auth && poetry run python -m auth
 
 import logging
 import os
-import stat
 import webbrowser
-from pathlib import Path
 
 import msal
 
 logger = logging.getLogger(__name__)
-
-TOKEN_CACHE_PATH = Path.home() / ".bond_mcps" / "microsoft.json"
 
 POWERBI_SCOPES = [
     "https://analysis.windows.net/powerbi/api/.default",
@@ -61,20 +57,36 @@ def _get_scopes() -> list[str]:
     return scopes
 
 
+def _get_repo():
+    """Lazy-import to avoid pulling SQLAlchemy into auth.proxy_server."""
+    from auth.db.repository import TokenRepository
+
+    return TokenRepository()
+
+
+def _user_key() -> str:
+    from auth.token_store import _current_user_key
+
+    return _current_user_key()
+
+
 def _load_token_cache() -> msal.SerializableTokenCache:
-    """Load the MSAL token cache from disk."""
+    """Load the MSAL token cache from the encrypted DB."""
     cache = msal.SerializableTokenCache()
-    if TOKEN_CACHE_PATH.exists():
-        cache.deserialize(TOKEN_CACHE_PATH.read_text())
+    blob = _get_repo().get_msal_cache(_user_key())
+    if blob:
+        cache.deserialize(blob)
     return cache
 
 
 def _save_token_cache(cache: msal.SerializableTokenCache) -> None:
-    """Save cache to disk with 0600 permissions."""
+    """Persist the MSAL cache to the encrypted DB if it has changed.
+
+    The repository's save_msal_cache acquires a row-level write lock so
+    concurrent MCP processes (server + CLI) don't trample each other.
+    """
     if cache.has_state_changed:
-        TOKEN_CACHE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        TOKEN_CACHE_PATH.write_text(cache.serialize())
-        TOKEN_CACHE_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        _get_repo().save_msal_cache(_user_key(), cache.serialize())
 
 
 def _create_msal_app(

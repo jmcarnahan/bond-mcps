@@ -227,57 +227,59 @@ class TestAcquireTokenBrowserProxy:
         assert result is None
 
 
-class TestTokenCacheSecurity:
-    def test_save_sets_0600_permissions(self, tmp_path):
+class TestMsalCachePersistence:
+    """The MSAL cache is now persisted to the encrypted DB via TokenRepository."""
+
+    def test_save_calls_repository_when_state_changed(self):
         import ms_graph.local_auth as la
 
         mock_cache = MagicMock()
         mock_cache.has_state_changed = True
         mock_cache.serialize.return_value = '{"cache": "data"}'
 
-        fake_path = tmp_path / "microsoft.json"
-        with patch.object(la, "TOKEN_CACHE_PATH", fake_path):
+        fake_repo = MagicMock()
+        with patch.object(la, "_get_repo", return_value=fake_repo), \
+             patch.object(la, "_user_key", return_value="alice"):
             la._save_token_cache(mock_cache)
 
-        assert fake_path.exists()
-        mode = fake_path.stat().st_mode & 0o777
-        assert mode == 0o600
+        fake_repo.save_msal_cache.assert_called_once_with("alice", '{"cache": "data"}')
 
-    def test_save_skips_when_no_state_change(self, tmp_path):
+    def test_save_skips_when_no_state_change(self):
         import ms_graph.local_auth as la
 
         mock_cache = MagicMock()
         mock_cache.has_state_changed = False
 
-        fake_path = tmp_path / "microsoft.json"
-        with patch.object(la, "TOKEN_CACHE_PATH", fake_path):
+        fake_repo = MagicMock()
+        with patch.object(la, "_get_repo", return_value=fake_repo), \
+             patch.object(la, "_user_key", return_value="alice"):
             la._save_token_cache(mock_cache)
 
-        assert not fake_path.exists()
+        fake_repo.save_msal_cache.assert_not_called()
 
-    def test_save_creates_parent_dir(self, tmp_path):
-        """A fresh system has no ~/.bond_mcps/; _save_token_cache must mkdir it."""
+    def test_load_deserializes_blob_from_repository(self):
+        import json
         import ms_graph.local_auth as la
 
-        mock_cache = MagicMock()
-        mock_cache.has_state_changed = True
-        mock_cache.serialize.return_value = '{"cache": "data"}'
+        blob = '{"AccessToken": {"acct-x": {"credential_type": "AccessToken"}}}'
+        fake_repo = MagicMock()
+        fake_repo.get_msal_cache.return_value = blob
+        with patch.object(la, "_get_repo", return_value=fake_repo), \
+             patch.object(la, "_user_key", return_value="alice"):
+            cache = la._load_token_cache()
 
-        fake_path = tmp_path / "fresh" / "subdir" / "microsoft.json"
-        assert not fake_path.parent.exists()
+        fake_repo.get_msal_cache.assert_called_once_with("alice")
+        # MSAL re-serializes with indentation; compare parsed structure.
+        assert json.loads(cache.serialize()) == json.loads(blob)
 
-        with patch.object(la, "TOKEN_CACHE_PATH", fake_path):
-            la._save_token_cache(mock_cache)
+    def test_load_with_no_existing_row_returns_empty_cache(self):
+        import ms_graph.local_auth as la
 
-        assert fake_path.exists()
-        # Parent dir created with 0700 (owner-only)
-        assert (fake_path.parent.stat().st_mode & 0o777) == 0o700
+        fake_repo = MagicMock()
+        fake_repo.get_msal_cache.return_value = None
+        with patch.object(la, "_get_repo", return_value=fake_repo), \
+             patch.object(la, "_user_key", return_value="alice"):
+            cache = la._load_token_cache()
 
-
-class TestTokenCacheDefaults:
-    """Pin the production default cache location so it can't silently regress."""
-
-    def test_default_token_cache_path(self):
-        from pathlib import Path
-        from ms_graph.local_auth import TOKEN_CACHE_PATH
-        assert TOKEN_CACHE_PATH == Path.home() / ".bond_mcps" / "microsoft.json"
+        # Empty MSAL cache serializes to a small JSON-ish value or empty string
+        assert cache.has_state_changed is False
