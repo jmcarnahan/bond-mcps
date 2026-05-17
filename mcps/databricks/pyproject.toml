@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "databricks-mcp"
+version = "0.1.0"
+description = "Databricks MCP server for Bond AI - SQL execution against Databricks SQL warehouses"
+authors = ["Bond AI"]
+# Local package is named 'dbx' (not 'databricks') to avoid shadowing the
+# databricks-sql-connector namespace package (databricks.sql).
+packages = [{include = "dbx"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+httpx = ">=0.27"
+fastmcp = ">=3.0.0,<4.0"
+authlib = ">=1.7.1"
+pyjwt = {version = ">=2.12.0", extras = ["crypto"]}
+pygments = ">=2.20.0"
+python-dotenv = ">=1.0"
+bond-auth = {path = "../../auth", develop = true}
+databricks-sql-connector = ">=3.4.0,<5.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.24"
+respx = ">=0.22"
+
+[tool.poetry.scripts]
+databricks-cli = "databricks_cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
