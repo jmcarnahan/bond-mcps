@@ -25,7 +25,7 @@ from urllib.parse import urlparse, parse_qs
 
 logger = logging.getLogger(__name__)
 
-PID_FILE = Path.home() / ".bond_ai_auth_proxy.pid"
+PID_FILE = Path.home() / ".bond_mcps" / "auth_proxy.pid"
 STATE_TTL = 300  # 5 minutes
 
 _lock = threading.Lock()
@@ -183,6 +183,7 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
 
 def _write_pid_file() -> None:
+    PID_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
 
 
@@ -213,7 +214,7 @@ def run_proxy(host: str = "127.0.0.1", port: int = 8000) -> None:
 
     logger.info("Auth proxy listening on %s:%d", host, port)
     print(f"\n{'=' * 50}", flush=True)
-    print(f"  Bond AI OAuth Proxy", flush=True)
+    print(f"  Bond MCPs OAuth Proxy", flush=True)
     print(f"  Listening on {host}:{port}", flush=True)
     print(f"  PID: {os.getpid()}", flush=True)
     print(f"  Press Ctrl+C to stop", flush=True)

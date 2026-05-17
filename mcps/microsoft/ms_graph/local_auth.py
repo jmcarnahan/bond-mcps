@@ -18,7 +18,7 @@ import msal
 
 logger = logging.getLogger(__name__)
 
-TOKEN_CACHE_PATH = Path.home() / ".ms_graph_tokens.json"
+TOKEN_CACHE_PATH = Path.home() / ".bond_mcps" / "microsoft.json"
 
 POWERBI_SCOPES = [
     "https://analysis.windows.net/powerbi/api/.default",
@@ -72,6 +72,7 @@ def _load_token_cache() -> msal.SerializableTokenCache:
 def _save_token_cache(cache: msal.SerializableTokenCache) -> None:
     """Save cache to disk with 0600 permissions."""
     if cache.has_state_changed:
+        TOKEN_CACHE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         TOKEN_CACHE_PATH.write_text(cache.serialize())
         TOKEN_CACHE_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)
 

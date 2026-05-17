@@ -199,3 +199,12 @@ class TestRefresh:
         assert "grant_type=refresh_token" in body_str
         assert "client_id=cid" in body_str
         assert "refresh_token=ref123" in body_str
+
+
+class TestDefaults:
+    """Pin the production default cache location so it can't silently regress."""
+
+    def test_default_cache_dir(self):
+        from pathlib import Path
+        from auth.token_store import DEFAULT_CACHE_DIR
+        assert DEFAULT_CACHE_DIR == Path.home() / ".bond_mcps"
