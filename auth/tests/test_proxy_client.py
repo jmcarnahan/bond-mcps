@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from auth.proxy_client import OAuthProxyClient
+from auth.proxy_client import AuthStateExpiredError, OAuthProxyClient
 
 
 class TestGetRedirectUri:
@@ -131,3 +131,25 @@ class TestWaitForCallback:
                    side_effect=[0, 0, 1, 1, 200, 200]):
             with pytest.raises(TimeoutError, match="Timed out"):
                 client.wait_for_callback("s1", timeout=5)
+
+    def test_404_raises_state_expired_not_timeout(self):
+        """A 404 from /auth/result/<state> means the state was never
+        registered or was already consumed — that is NOT a polling timeout."""
+        client = OAuthProxyClient()
+
+        def fake_urlopen(req, timeout=None):
+            import urllib.error
+            raise urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, None,
+            )
+
+        with patch("auth.proxy_client.urllib.request.urlopen",
+                   side_effect=fake_urlopen), \
+             patch("auth.proxy_client.time.sleep"):
+            with pytest.raises(AuthStateExpiredError):
+                client.wait_for_callback("s1", timeout=5)
+
+    def test_auth_state_expired_is_timeout_subclass(self):
+        """Existing callers that catch TimeoutError must still see the new
+        error so behavior doesn't silently change."""
+        assert issubclass(AuthStateExpiredError, TimeoutError)

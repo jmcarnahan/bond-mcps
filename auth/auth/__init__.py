@@ -1,6 +1,6 @@
-"""Shared OAuth callback proxy for Bond AI MCP servers."""
+"""Shared OAuth callback proxy and token store for Bond MCP servers."""
 
-from auth.proxy_client import OAuthProxyClient
+from auth.proxy_client import AuthStateExpiredError, OAuthProxyClient
 from auth.token_store import TokenStore
 
-__all__ = ["OAuthProxyClient", "TokenStore"]
+__all__ = ["AuthStateExpiredError", "OAuthProxyClient", "TokenStore"]
