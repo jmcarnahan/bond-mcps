@@ -48,3 +48,21 @@ jobs:
       - name: Run tests
         working-directory: ${{ matrix.package }}
         run: poetry run pytest -q
+
+  all-tests:
+    # Single aggregator check so branch protection only needs to require
+    # one status check name. Succeeds iff every job in the matrix succeeded.
+    # Add or remove packages/Python versions in the matrix above without
+    # touching the ruleset.
+    name: All tests
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Verify all matrix jobs passed
+        run: |
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "Matrix result: ${{ needs.test.result }} (expected: success)"
+            exit 1
+          fi
+          echo "All matrix jobs passed."
