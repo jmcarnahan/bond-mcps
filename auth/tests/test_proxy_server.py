@@ -214,3 +214,55 @@ class TestExpiry:
         _get(port, "/health")
         with _lock:
             assert "old" not in _pending
+
+
+class TestPidFile:
+    """Pin the PID file location and verify the parent dir is created on demand."""
+
+    def test_default_pid_file_path(self):
+        from pathlib import Path
+        from auth.proxy_server import PID_FILE
+        assert PID_FILE == Path.home() / ".bond_mcps" / "auth_proxy.pid"
+
+    def test_write_pid_creates_parent_dir(self, tmp_path, monkeypatch):
+        """A fresh system has no ~/.bond_mcps/; _write_pid_file must mkdir it."""
+        from auth import proxy_server as ps
+        fake_pid_file = tmp_path / "fresh" / "subdir" / "auth_proxy.pid"
+        assert not fake_pid_file.parent.exists()
+
+        monkeypatch.setattr(ps, "PID_FILE", fake_pid_file)
+        ps._write_pid_file()
+
+        assert fake_pid_file.exists()
+        assert fake_pid_file.read_text().isdigit()
+        # Parent dir created with 0700 (owner-only)
+        assert (fake_pid_file.parent.stat().st_mode & 0o777) == 0o700
+
+
+class TestMainDefaultPort:
+    """Pin the BOND_AUTH_PROXY_PORT env-var flow on the server side.
+
+    Mirrors test_proxy_client.TestGetRedirectUri.test_port_from_env. Catches
+    the round-2 regression where __main__.py argparse default ignored the env
+    var and the auth proxy bound to 8000 even when AUTH_PORT=9000 in the
+    Makefile.
+    """
+
+    def test_default_port_reads_env_var(self, monkeypatch):
+        import importlib
+        monkeypatch.setenv("BOND_AUTH_PROXY_PORT", "9999")
+        import auth.__main__ as main_module
+        importlib.reload(main_module)
+        try:
+            assert main_module.DEFAULT_PORT == 9999
+        finally:
+            # Restore the unset-env default for other tests
+            monkeypatch.delenv("BOND_AUTH_PROXY_PORT", raising=False)
+            importlib.reload(main_module)
+
+    def test_default_port_fallback_to_8000(self, monkeypatch):
+        import importlib
+        monkeypatch.delenv("BOND_AUTH_PROXY_PORT", raising=False)
+        import auth.__main__ as main_module
+        importlib.reload(main_module)
+        assert main_module.DEFAULT_PORT == 8000
