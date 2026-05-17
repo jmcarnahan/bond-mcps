@@ -19,7 +19,7 @@ import os
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from auth import encryption
@@ -41,7 +41,7 @@ _RESERVED_FIELDS = {
 def _default_resolver() -> encryption.EncryptionKeyResolver:
     # Postgres URLs require a strict env-var key; SQLite may use file fallback.
     url = os.environ.get("BOND_MCPS_DB_URL", "")
-    is_postgres = url.startswith("postgres") or url.startswith("postgresql")
+    is_postgres = url.startswith("postgres")  # matches postgres:// and postgresql://
     return encryption.EncryptionKeyResolver(allow_file_fallback=not is_postgres)
 
 
@@ -86,7 +86,7 @@ class TokenRepository:
         """
         bind = session.get_bind()
         if bind.dialect.name == "sqlite":
-            session.execute(__import__("sqlalchemy").text("BEGIN IMMEDIATE"))
+            session.execute(text("BEGIN IMMEDIATE"))
 
     # ---- ProviderToken CRUD --------------------------------------------------
 
@@ -219,6 +219,57 @@ class TokenRepository:
             if row is not None:
                 s.delete(row)
 
+    @contextmanager
+    def locked_msal_cache(self, user_key: str) -> Iterator["LockedMsalCache"]:
+        """Open a write-locked context spanning the entire MSAL R-M-W cycle.
+
+        MSAL's silent acquisition rotates the refresh_token on every call.
+        Without locking the read AND the write under one transaction, two
+        processes can both load the same blob, both call Microsoft with the
+        same refresh_token, and the second call fails with 'invalid_grant'
+        because the first call invalidated the token on use.
+
+        SQLite: BEGIN IMMEDIATE serializes writers; readers in WAL mode
+        continue uninterrupted.
+        Postgres: SELECT ... FOR UPDATE locks the single row.
+        """
+        session = self._session_factory()
+        try:
+            self._begin_immediate(session)
+            bind = session.get_bind()
+            if bind.dialect.name in ("postgresql", "postgres"):
+                stmt = (
+                    select(MsalTokenCache)
+                    .where(MsalTokenCache.user_key == user_key)
+                    .with_for_update()
+                )
+                row = session.execute(stmt).scalar_one_or_none()
+            else:
+                row = session.get(MsalTokenCache, user_key)
+
+            if row is not None:
+                blob = encryption.decrypt(
+                    row.cache_data_encrypted,
+                    user_key=user_key,
+                    provider="__msal__",
+                    field="cache_data",
+                    key_version=row.key_version,
+                    resolver=self._resolver,
+                ).decode("utf-8")
+            else:
+                blob = None
+
+            handle = LockedMsalCache(self, session, user_key, row, blob)
+            yield handle
+            if handle._dirty:
+                handle._persist()
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     # ---- internals -----------------------------------------------------------
 
     def _decode_row(self, row: ProviderToken) -> dict:
@@ -242,10 +293,6 @@ class TokenRepository:
         if refresh is not None:
             out["refresh_token"] = refresh.decode("utf-8")
         if row.expires_at is not None:
-            out["expires_at"] = row.expires_at.replace(
-                tzinfo=_dt.timezone.utc
-            ).timestamp() if row.expires_at.tzinfo is None else row.expires_at.timestamp()
-            # Use the simpler representation: a float epoch.
             out["expires_at"] = _to_epoch(row.expires_at)
         if row.scopes:
             out["scopes"] = row.scopes
@@ -326,6 +373,63 @@ class LockedToken:
         self._row.extra_metadata = merged_extras
         self._row.key_version = key_version
         self._data = self._repo._decode_row(self._row)
+
+
+class LockedMsalCache:
+    """Handle for a row-locked MSAL cache R-M-W transaction.
+
+    Use:
+        with repo.locked_msal_cache(user_key) as handle:
+            cache = msal.SerializableTokenCache()
+            if handle.blob:
+                cache.deserialize(handle.blob)
+            # ... run MSAL silent acquire, which may mutate cache ...
+            if cache.has_state_changed:
+                handle.set_blob(cache.serialize())
+    """
+
+    def __init__(
+        self,
+        repo: TokenRepository,
+        session: Session,
+        user_key: str,
+        row: MsalTokenCache | None,
+        blob: str | None,
+    ):
+        self._repo = repo
+        self._session = session
+        self._user_key = user_key
+        self._row = row
+        self._blob = blob
+        self._dirty = False
+
+    @property
+    def blob(self) -> str | None:
+        return self._blob
+
+    def set_blob(self, new_blob: str) -> None:
+        """Mark the cache as dirty with the new serialized blob.
+
+        The blob will be encrypted and persisted on context exit (commit).
+        """
+        if new_blob is None:
+            raise ValueError("set_blob requires a non-None string")
+        self._blob = new_blob
+        self._dirty = True
+
+    def _persist(self) -> None:
+        blob_bytes, version = encryption.encrypt(
+            self._blob.encode("utf-8"),
+            user_key=self._user_key,
+            provider="__msal__",
+            field="cache_data",
+            resolver=self._repo._resolver,
+        )
+        if self._row is None:
+            self._row = MsalTokenCache(user_key=self._user_key)
+            self._session.add(self._row)
+        self._row.cache_data_encrypted = blob_bytes
+        self._row.key_version = version
 
 
 def _to_bytes(s: str | bytes) -> bytes:

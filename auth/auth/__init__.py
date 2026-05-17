@@ -2,11 +2,12 @@
 
 from auth import log_discipline
 from auth.proxy_client import AuthStateExpiredError, OAuthProxyClient
-from auth.token_store import TokenStore
+from auth.token_store import TokenStore, current_user_key
 
 __all__ = [
     "AuthStateExpiredError",
     "OAuthProxyClient",
     "TokenStore",
+    "current_user_key",
     "log_discipline",
 ]

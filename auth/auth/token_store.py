@@ -24,14 +24,23 @@ import urllib.request
 logger = logging.getLogger(__name__)
 
 
-def _current_user_key() -> str:
+def current_user_key() -> str:
+    """Resolve the user identity for token rows.
+
+    BOND_MCPS_USER_ID env var wins. Falls back to getpass.getuser() for
+    convenience in local SQLite deployments. Postgres deployments should
+    set the env var explicitly (the OS username is meaningless in
+    containers or systemd units).
+    """
     explicit = os.environ.get("BOND_MCPS_USER_ID")
     if explicit:
         return explicit
-    # Postgres deployments without an explicit user are refused at the
-    # repository level via _default_resolver(); here we still fall back so
-    # local SQLite use is convenient.
     return getpass.getuser()
+
+
+# Backward-compatible alias for the private name used during initial
+# development. Prefer current_user_key in new code.
+_current_user_key = current_user_key
 
 
 class TokenStore:
