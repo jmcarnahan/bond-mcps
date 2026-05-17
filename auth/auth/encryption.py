@@ -133,6 +133,12 @@ def generate_key() -> str:
 
 
 def _aad(user_key: str, provider: str, field: str, key_version: int) -> bytes:
+    # The `|` delimiter is collision-safe under current callers: provider
+    # is from a fixed set ({github, atlassian, __msal__}), field is a Python
+    # literal in our code, and user_key is either BOND_MCPS_USER_ID (operator-
+    # supplied) or getpass.getuser() (no `|` on any reasonable platform). If
+    # we ever accept user_keys containing `|`, switch to a length-prefixed
+    # encoding so AAD remains unambiguous across rows.
     return f"{user_key}|{provider}|{field}|v{key_version}".encode("utf-8")
 
 

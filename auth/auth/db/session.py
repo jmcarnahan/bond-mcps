@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import scoped_session, sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -195,7 +196,11 @@ def ensure_schema_current(url: str | None = None) -> None:
             current = conn.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
-        except Exception:
+        except (OperationalError, ProgrammingError):
+            # Narrowly catch "no such table" (SQLite OperationalError) and
+            # "relation does not exist" (Postgres ProgrammingError). Other
+            # exceptions (auth, network, programmer errors) propagate so
+            # they're not misdiagnosed as "schema empty".
             current = None
 
     if current is None:

@@ -65,13 +65,20 @@ def _get_repo():
 
 
 def _user_key() -> str:
-    from auth.token_store import _current_user_key
+    from auth.token_store import current_user_key
 
-    return _current_user_key()
+    return current_user_key()
 
 
 def _load_token_cache() -> msal.SerializableTokenCache:
-    """Load the MSAL token cache from the encrypted DB."""
+    """Load the MSAL token cache from the encrypted DB.
+
+    Used for the interactive auth paths (browser, device code) which mint
+    fresh access + refresh tokens and are not race-sensitive. The silent
+    acquisition path uses ``_try_silent_under_lock`` instead, which spans
+    the read-mutate-write under a single row lock to prevent two processes
+    from invalidating each other's refresh tokens.
+    """
     cache = msal.SerializableTokenCache()
     blob = _get_repo().get_msal_cache(_user_key())
     if blob:
@@ -82,11 +89,47 @@ def _load_token_cache() -> msal.SerializableTokenCache:
 def _save_token_cache(cache: msal.SerializableTokenCache) -> None:
     """Persist the MSAL cache to the encrypted DB if it has changed.
 
-    The repository's save_msal_cache acquires a row-level write lock so
-    concurrent MCP processes (server + CLI) don't trample each other.
+    ``TokenRepository.save_msal_cache`` itself acquires a row-level write
+    lock, but this is only safe for paths that don't depend on a prior
+    READ of the same row (i.e., interactive flows). For the silent path,
+    use ``_try_silent_under_lock`` instead.
     """
     if cache.has_state_changed:
         _get_repo().save_msal_cache(_user_key(), cache.serialize())
+
+
+def _try_silent_under_lock(client_id: str, scopes: list[str]) -> str | None:
+    """Attempt MSAL silent acquisition while holding the MSAL cache row lock.
+
+    Returns the access_token on success, or None to signal the caller should
+    fall through to interactive (browser / device code) flows.
+
+    The lock spans:
+      1. Read the encrypted cache blob.
+      2. MSAL acquire_token_silent (may rotate refresh_token in-memory).
+      3. Write the updated blob back.
+
+    Without this lock, two processes can both read the same blob, both call
+    Microsoft with the same refresh_token, and the second call fails because
+    the first invalidated the refresh_token on use. The lock serializes the
+    silent path so the second caller sees the rotated token.
+    """
+    repo = _get_repo()
+    user_key = _user_key()
+    with repo.locked_msal_cache(user_key) as handle:
+        cache = msal.SerializableTokenCache()
+        if handle.blob:
+            cache.deserialize(handle.blob)
+        app = _create_msal_app(client_id, cache)
+        accounts = app.get_accounts()
+        if not accounts:
+            return None
+        result = app.acquire_token_silent(scopes, account=accounts[0])
+        if cache.has_state_changed:
+            handle.set_blob(cache.serialize())
+        if result and "access_token" in result:
+            return result["access_token"]
+        return None
 
 
 def _create_msal_app(
@@ -217,12 +260,36 @@ def _acquire_token_device_code(
     return result if "access_token" in result else None
 
 
+def _acquire_token_interactive(client_id: str, scopes: list[str]) -> str | None:
+    """Interactive fallback: browser PKCE then device code.
+
+    Done OUTSIDE the MSAL cache lock. These flows mint fresh access +
+    refresh tokens (they don't consume an existing refresh_token), so two
+    processes racing here is not a correctness problem — each obtains its
+    own tokens and the last writer wins on save.
+    """
+    cache = _load_token_cache()
+    app = _create_msal_app(client_id, cache)
+
+    result = _acquire_token_browser(app, scopes)
+    if result and "access_token" in result:
+        _save_token_cache(cache)
+        return result["access_token"]
+
+    result = _acquire_token_device_code(app, scopes)
+    if result and "access_token" in result:
+        _save_token_cache(cache)
+        return result["access_token"]
+
+    return None
+
+
 def get_local_token() -> str:
     """
     Acquire a Microsoft Graph access token using local MSAL auth.
 
     Resolution order:
-    1. Cached token (acquire_token_silent)
+    1. Cached token under MSAL cache row lock (acquire_token_silent)
     2. Browser-based authorization code + PKCE flow (via shared proxy)
     3. Device code flow fallback
 
@@ -235,29 +302,15 @@ def get_local_token() -> str:
             "MS_CLIENT_ID environment variable is required for local authentication."
         )
 
-    cache = _load_token_cache()
-    app = _create_msal_app(client_id, cache)
     scopes = _get_scopes()
 
-    # 1. Try silent (cached)
-    accounts = app.get_accounts()
-    if accounts:
-        result = app.acquire_token_silent(scopes, account=accounts[0])
-        if result and "access_token" in result:
-            _save_token_cache(cache)
-            return result["access_token"]
+    token = _try_silent_under_lock(client_id, scopes)
+    if token is not None:
+        return token
 
-    # 2. Try browser auth code + PKCE (requires shared proxy)
-    result = _acquire_token_browser(app, scopes)
-    if result and "access_token" in result:
-        _save_token_cache(cache)
-        return result["access_token"]
-
-    # 3. Fallback to device code
-    result = _acquire_token_device_code(app, scopes)
-    if result and "access_token" in result:
-        _save_token_cache(cache)
-        return result["access_token"]
+    token = _acquire_token_interactive(client_id, scopes)
+    if token is not None:
+        return token
 
     raise PermissionError(
         "Microsoft authentication failed. Could not acquire a token via "
@@ -271,11 +324,6 @@ def get_local_powerbi_token() -> str:
 
     Uses the same app registration and token cache as get_local_token() but
     requests the Power BI resource scope instead of Graph scopes.
-
-    Resolution order:
-    1. Cached token (acquire_token_silent)
-    2. Browser-based authorization code + PKCE flow (via shared proxy)
-    3. Device code flow fallback
     """
     client_id = os.environ.get("MS_CLIENT_ID")
     if not client_id:
@@ -283,28 +331,13 @@ def get_local_powerbi_token() -> str:
             "MS_CLIENT_ID environment variable is required for local authentication."
         )
 
-    cache = _load_token_cache()
-    app = _create_msal_app(client_id, cache)
+    token = _try_silent_under_lock(client_id, POWERBI_SCOPES)
+    if token is not None:
+        return token
 
-    # 1. Try silent (cached)
-    accounts = app.get_accounts()
-    if accounts:
-        result = app.acquire_token_silent(POWERBI_SCOPES, account=accounts[0])
-        if result and "access_token" in result:
-            _save_token_cache(cache)
-            return result["access_token"]
-
-    # 2. Try browser auth code + PKCE (requires shared proxy)
-    result = _acquire_token_browser(app, POWERBI_SCOPES)
-    if result and "access_token" in result:
-        _save_token_cache(cache)
-        return result["access_token"]
-
-    # 3. Fallback to device code
-    result = _acquire_token_device_code(app, POWERBI_SCOPES)
-    if result and "access_token" in result:
-        _save_token_cache(cache)
-        return result["access_token"]
+    token = _acquire_token_interactive(client_id, POWERBI_SCOPES)
+    if token is not None:
+        return token
 
     raise PermissionError(
         "Power BI authentication failed. Could not acquire a token via "

@@ -66,3 +66,53 @@ def test_ensure_schema_current_raises_for_empty_db(tmp_path, monkeypatch):
             ensure_schema_current()
     finally:
         reset_for_tests()
+
+
+def test_downgrade_drops_schema_cleanly(tmp_path, monkeypatch):
+    """Downgrade base reverts to an empty DB. Inverse of upgrade head."""
+    from alembic import command
+    from sqlalchemy import inspect
+
+    from auth.alembic_config import get_alembic_config
+
+    url = f"sqlite:///{tmp_path / 'tokens.db'}"
+    monkeypatch.setenv("BOND_MCPS_DB_URL", url)
+    reset_for_tests()
+    try:
+        upgrade_head()
+
+        cfg = get_alembic_config(url)
+        command.downgrade(cfg, "base")
+
+        engine = get_engine()
+        tables = set(inspect(engine).get_table_names())
+        assert "provider_tokens" not in tables
+        assert "msal_token_caches" not in tables
+    finally:
+        reset_for_tests()
+
+
+def test_ensure_schema_current_propagates_unexpected_errors(tmp_path, monkeypatch):
+    """An unexpected error (not 'no such table') must NOT be silently
+    swallowed as 'schema empty'. Catching the wrong exception class would
+    mask real failures."""
+    monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{tmp_path / 'tokens.db'}")
+    reset_for_tests()
+    try:
+        from unittest.mock import patch as _patch
+
+        upgrade_head()
+
+        # Simulate a non-Operational error inside the SELECT.
+        from auth.db.session import ensure_schema_current
+
+        class BoomError(RuntimeError):
+            pass
+
+        with _patch("sqlalchemy.engine.Connection.execute",
+                    side_effect=BoomError("simulated network failure")):
+            import pytest as _pt
+            with _pt.raises(BoomError, match="simulated network failure"):
+                ensure_schema_current()
+    finally:
+        reset_for_tests()

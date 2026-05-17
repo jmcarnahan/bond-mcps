@@ -1,8 +1,5 @@
 """Shared pytest fixtures for the auth test suite."""
 
-import os
-from pathlib import Path
-
 import pytest
 
 from auth import encryption

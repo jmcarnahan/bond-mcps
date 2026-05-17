@@ -10,8 +10,17 @@ logger = logging.getLogger(__name__)
 
 
 def cmd_generate_key(_args) -> int:
+    import os as _os
+
     from auth.encryption import generate_key
 
+    if _os.environ.get("BOND_MCPS_ENCRYPTION_KEY"):
+        print(
+            "WARNING: BOND_MCPS_ENCRYPTION_KEY is already set in this shell. "
+            "If you replace it with the value below, any data encrypted under "
+            "the previous key will become unreadable.",
+            file=sys.stderr,
+        )
     print(generate_key())
     print(
         "\nSet this in your environment as BOND_MCPS_ENCRYPTION_KEY before "
@@ -33,9 +42,9 @@ def cmd_migrate_db(_args) -> int:
 
 def cmd_import_files(args) -> int:
     from auth.db.importer import import_legacy_files
-    from auth.token_store import _current_user_key
+    from auth.token_store import current_user_key
 
-    user_key = args.user or _current_user_key()
+    user_key = args.user or current_user_key()
     result = import_legacy_files(user_key=user_key)
 
     if result.imported:
@@ -55,9 +64,9 @@ def cmd_import_files(args) -> int:
 
 def cmd_clear(args) -> int:
     from auth.db.repository import TokenRepository
-    from auth.token_store import _current_user_key
+    from auth.token_store import current_user_key
 
-    user_key = args.user or _current_user_key()
+    user_key = args.user or current_user_key()
     repo = TokenRepository()
     if args.provider == "microsoft":
         repo.clear_msal_cache(user_key)
@@ -82,9 +91,11 @@ def cmd_doctor(_args) -> int:
     )
     from auth.encryption import TokenEncryptionError, verify_encryption_setup
 
+    from auth.token_store import current_user_key
+
     url = os.environ.get("BOND_MCPS_DB_URL") or default_db_url()
     print(f"DB URL:     {url}")
-    print(f"User key:   {_current_user_key_for_doctor()}")
+    print(f"User key:   {current_user_key()}")
 
     try:
         validate_db_url(url)
@@ -119,12 +130,6 @@ def cmd_doctor(_args) -> int:
     return 0
 
 
-def _current_user_key_for_doctor() -> str:
-    from auth.token_store import _current_user_key
-
-    return _current_user_key()
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bond-mcps",
@@ -153,8 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
         "clear",
         help="Delete the cached token for a provider (logout)",
     )
-    p_clear.add_argument("--provider", required=True,
-                         help="Provider name: github | atlassian | microsoft")
+    p_clear.add_argument(
+        "--provider", required=True,
+        choices=("github", "atlassian", "microsoft"),
+        help="Which provider's cached token to delete",
+    )
     p_clear.add_argument("--user", help="Override BOND_MCPS_USER_ID")
     p_clear.set_defaults(func=cmd_clear)
 
