@@ -41,6 +41,7 @@ def get_github_token() -> str:
 
     # Path 3: No auth available
     raise PermissionError(
-        "Authorization required. Either connect your GitHub account "
-        "in Bond AI Settings -> Connections, or set GITHUB_CLIENT_ID for local auth."
+        "GitHub authorization required. For standalone use, set GITHUB_CLIENT_ID "
+        "(and GITHUB_CLIENT_SECRET) and run `make login-github`. For backend mode "
+        "(e.g. Bond AI), ensure the backend forwards an Authorization: Bearer header."
     )

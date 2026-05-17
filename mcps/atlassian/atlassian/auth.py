@@ -42,9 +42,10 @@ def get_atlassian_token() -> str:
 
     # Path 3: No auth available
     raise PermissionError(
-        "Authorization required. Either connect your Atlassian account "
-        "in Bond AI Settings -> Connections, or set ATLASSIAN_CLIENT_ID "
-        "and ATLASSIAN_CLIENT_SECRET for local auth."
+        "Atlassian authorization required. For standalone use, set "
+        "ATLASSIAN_CLIENT_ID and ATLASSIAN_CLIENT_SECRET and run "
+        "`make login-atlassian`. For backend mode (e.g. Bond AI), ensure the "
+        "backend forwards Authorization: Bearer and X-Atlassian-Cloud-Id headers."
     )
 
 
@@ -87,6 +88,8 @@ def get_cloud_id() -> str:
 
     # Path 4: No cloud ID available
     raise PermissionError(
-        "Atlassian Cloud ID required. Either configure it in Bond AI Settings "
-        "-> Connections, or set ATLASSIAN_CLOUD_ID environment variable."
+        "Atlassian Cloud ID required. For standalone use, run `make login-atlassian` "
+        "(the OAuth flow auto-discovers cloud_id) or pin one via the "
+        "ATLASSIAN_CLOUD_ID environment variable. For backend mode, ensure the "
+        "backend sends the X-Atlassian-Cloud-Id header."
     )
