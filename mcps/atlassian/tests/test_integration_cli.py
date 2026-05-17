@@ -4,7 +4,7 @@ Integration tests for the Atlassian CLI.
 
 These tests hit the real Atlassian API using locally cached credentials.
 They require:
-  1. A valid cached token at ~/.bond_ai_tokens/atlassian.json
+  1. A valid cached token at ~/.bond_mcps/atlassian.json
   2. ATLASSIAN_CLIENT_ID and ATLASSIAN_CLIENT_SECRET env vars (or .env file)
 
 Run:
@@ -23,7 +23,7 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-TOKEN_CACHE = Path.home() / ".bond_ai_tokens" / "atlassian.json"
+TOKEN_CACHE = Path.home() / ".bond_mcps" / "atlassian.json"
 
 
 def _has_credentials() -> bool:
