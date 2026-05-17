@@ -133,6 +133,8 @@ def _acquire_token_via_proxy(
     proxy: "OAuthProxyClient",
 ) -> dict | None:
     """Browser auth using the shared OAuth callback proxy."""
+    from auth import AuthStateExpiredError
+
     redirect_uri = proxy.get_redirect_uri("microsoft")
 
     flow = app.initiate_auth_code_flow(
@@ -158,6 +160,15 @@ def _acquire_token_via_proxy(
 
     try:
         callback_result = proxy.wait_for_callback(state, timeout=120)
+    except AuthStateExpiredError:
+        # Subclass of TimeoutError — must come first
+        logger.warning("Browser auth state expired or already consumed")
+        print(
+            "Browser login session expired or was already used. "
+            "Trying device code...",
+            flush=True,
+        )
+        return None
     except TimeoutError:
         logger.warning("Browser auth timed out")
         print("Browser login timed out. Trying device code...", flush=True)

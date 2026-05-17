@@ -336,13 +336,13 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 5557
 ### 4. Production Deployment (AWS)
 
 > ⚠️ **Legacy — inherited from `bond-ai`, not yet adapted to bond-mcps.**
-> The Terraform in `mcps/microsoft/deployment/` still references the old
+> The Terraform in `mcps/microsoft/deployment.legacy/` still references the old
 > `../../shared_auth/` paths and will fail `terraform apply` as-is. A shared
 > deployment target (ECS Express / Fargate) is being designed at the top-level
 > `deployment/` directory and will replace these per-MCP modules. Treat the
 > sections below as reference only.
 
-The Microsoft MCP server has its own Terraform module in `mcps/microsoft/deployment/` that deploys it as a standalone App Runner service.
+The Microsoft MCP server has its own Terraform module in `mcps/microsoft/deployment.legacy/` that deploys it as a standalone App Runner service.
 
 #### Prerequisites
 
@@ -353,7 +353,7 @@ The Microsoft MCP server has its own Terraform module in `mcps/microsoft/deploym
 
 #### Step 1: Deploy the MCP Server
 
-Create a tfvars file (e.g., `mcps/microsoft/deployment/microsoft-mcp.tfvars`):
+Create a tfvars file (e.g., `mcps/microsoft/deployment.legacy/microsoft-mcp.tfvars`):
 ```hcl
 aws_region                 = "us-west-2"
 environment                = "dev"
@@ -364,7 +364,7 @@ mcp_microsoft_is_private   = true   # Set to false for public access
 
 Deploy:
 ```bash
-cd mcps/microsoft/deployment
+cd mcps/microsoft/deployment.legacy
 terraform init
 terraform apply -var-file=microsoft-mcp.tfvars
 ```
@@ -453,7 +453,7 @@ terraform apply -var-file=environments/us-west-2-existing-vpc.tfvars
 
 To rebuild and redeploy after code changes:
 ```bash
-cd mcps/microsoft/deployment
+cd mcps/microsoft/deployment.legacy
 terraform apply -var-file=microsoft-mcp.tfvars
 ```
 
@@ -467,7 +467,7 @@ terraform apply -var-file=microsoft-mcp.tfvars -var="force_rebuild=$(date +%s)"
 #### Tearing Down
 
 ```bash
-cd mcps/microsoft/deployment
+cd mcps/microsoft/deployment.legacy
 terraform destroy -var-file=microsoft-mcp.tfvars
 ```
 
