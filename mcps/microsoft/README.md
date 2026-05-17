@@ -103,42 +103,68 @@ If `MS_TENANT_ID` is not set, the CLI defaults to `consumers`.
 
 The CLI uses MSAL for authentication (browser-based PKCE flow with device code fallback). Tokens are cached locally at `~/.ms_graph_tokens.json`.
 
+**Prerequisites:**
+- The shared auth proxy must be running (`cd auth && poetry run python -m auth`)
+- `MS_CLIENT_ID` set (Application ID from your Azure App Registration)
+- `MS_CLIENT_SECRET` set if your Azure app is registered as a confidential client / Web platform. Without it, the token exchange returns `invalid_client`.
+- `MS_TENANT_ID` set to your organizational tenant GUID if you need Teams, SharePoint, or Power BI. Defaults to `consumers` (personal accounts only).
+
 ```bash
 export MS_CLIENT_ID=<your-application-client-id>
-
-# User profile
-poetry run python ms_graph_cli.py whoami                         # Show authenticated user info
-
-# Email
-poetry run python ms_graph_cli.py list                           # List inbox
-poetry run python ms_graph_cli.py list --folder sentitems        # List sent items
-poetry run python ms_graph_cli.py list --top 20                  # More results
-poetry run python ms_graph_cli.py read <message_id>              # Read a single email
-poetry run python ms_graph_cli.py send user@example.com "Subject" "Body"
-poetry run python ms_graph_cli.py send user@example.com "Subject" "Body" --from alias@outlook.com
-poetry run python ms_graph_cli.py search "budget report"
-
-# Teams (requires M365 license -- set MS_TENANT_ID to your org tenant)
-export MS_TENANT_ID=<your-tenant-id>
-poetry run python ms_graph_cli.py teams list
-poetry run python ms_graph_cli.py teams channels <team_id>
-poetry run python ms_graph_cli.py teams send <team_id> <channel_id> "Hello!"
-
-# Files / OneDrive
-poetry run python ms_graph_cli.py files list                        # List OneDrive root
-poetry run python ms_graph_cli.py files list --path Documents       # List subfolder
-poetry run python ms_graph_cli.py files info <item_id>              # File metadata
-poetry run python ms_graph_cli.py files read <item_id>              # Read text file content
-poetry run python ms_graph_cli.py files search "quarterly report"   # Search across drives
-
-# SharePoint sites
-poetry run python ms_graph_cli.py sites list --query engineering    # Search for sites
-poetry run python ms_graph_cli.py sites list                        # List followed sites
-poetry run python ms_graph_cli.py sites files <site_id>             # List site files
-poetry run python ms_graph_cli.py sites files <site_id> --path "Shared Documents"
+export MS_CLIENT_SECRET=<your-client-secret>   # if Azure app is confidential
 ```
 
-Teams and SharePoint scopes (`Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Send`, `Sites.Read.All`) are only requested when `MS_TENANT_ID` is set, since consumer accounts don't support them. `Files.Read.All` is always requested (works with both consumer and organizational accounts).
+The CLI is organized into subcategories: `whoami`, `email`, `calendar`, `teams`, `files`, `powerbi`. Run `poetry run ms-graph-cli <category> --help` for the full subcommand list.
+
+```bash
+# Profile
+poetry run ms-graph-cli whoami
+
+# Email
+poetry run ms-graph-cli email list                                      # Recent inbox
+poetry run ms-graph-cli email list --folder sentitems --top 20
+poetry run ms-graph-cli email list --query "budget report"              # Search
+poetry run ms-graph-cli email read <message_id>
+poetry run ms-graph-cli email send user@example.com "Subject" "Body"
+poetry run ms-graph-cli email send user@example.com "Subject" "Body" --from alias@outlook.com --cc cc@example.com
+
+# Calendar
+poetry run ms-graph-cli calendar list                                   # Next 7 days
+poetry run ms-graph-cli calendar list --start 2026-06-01T00:00:00Z --end 2026-06-30T23:59:59Z
+poetry run ms-graph-cli calendar get <event_id>
+poetry run ms-graph-cli calendar create "Subject" 2026-06-15T14:00:00Z 2026-06-15T15:00:00Z --attendees a@example.com,b@example.com
+poetry run ms-graph-cli calendar availability a@example.com,b@example.com 2026-06-15T09:00:00Z 2026-06-15T17:00:00Z
+
+# Teams (organizational accounts only — set MS_TENANT_ID)
+poetry run ms-graph-cli teams list                                      # Joined teams
+poetry run ms-graph-cli teams list --team-id <team_id>                  # Channels in a team
+poetry run ms-graph-cli teams chats --type oneOnOne
+poetry run ms-graph-cli teams read --chat-id <chat_id>
+poetry run ms-graph-cli teams send --chat-id <chat_id> "Hello!"
+poetry run ms-graph-cli teams activity
+
+# Files / OneDrive / SharePoint
+poetry run ms-graph-cli files list                                      # OneDrive root
+poetry run ms-graph-cli files list --path Documents --top 50
+poetry run ms-graph-cli files list --query "quarterly report"           # Search across drives
+poetry run ms-graph-cli files inspect <item_id>                         # Metadata only
+poetry run ms-graph-cli files inspect <item_id> --content               # Also fetch text content
+poetry run ms-graph-cli files sites                                     # Followed SharePoint sites
+poetry run ms-graph-cli files sites --query engineering                 # Search sites
+poetry run ms-graph-cli files list --site-id <site_id>                  # Files in a SharePoint site
+poetry run ms-graph-cli files upload <path> --content "text"            # Create/overwrite text file
+poetry run ms-graph-cli files copy <item_id> <dest_folder_id>
+poetry run ms-graph-cli files rename <item_id> "new-name.txt"
+
+# Power BI (organizational accounts only — separate scope token)
+poetry run ms-graph-cli powerbi workspaces
+poetry run ms-graph-cli powerbi content <workspace_id>
+poetry run ms-graph-cli powerbi query <dataset_id> "EVALUATE Sales"
+poetry run ms-graph-cli powerbi refresh <dataset_id>
+poetry run ms-graph-cli powerbi export <report_id> --format PDF
+```
+
+Teams and SharePoint scopes (`Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Send`, `Sites.Read.All`) are only requested when `MS_TENANT_ID` is set, since consumer accounts don't support them. `Files.Read.All` is always requested (works with both consumer and organizational accounts). Power BI uses a separate scope (`https://analysis.windows.net/powerbi/api/.default`) and a separate token cache entry — it will trigger a fresh browser flow the first time you use it.
 
 To clear cached tokens and re-authenticate:
 ```bash
@@ -166,9 +192,9 @@ The MCP server can run standalone with local OAuth — no Bond AI backend requir
 The OAuth callback proxy handles browser redirects for all MCP servers. Start it in its own terminal:
 
 ```bash
-cd mcps/shared_auth
+cd auth
 poetry install
-poetry run python -m shared_auth
+poetry run python -m auth
 ```
 
 You should see `Bond AI OAuth Proxy — Listening on 127.0.0.1:8000`. Leave this running.
@@ -612,7 +638,7 @@ export MS_CLIENT_SECRET=<your-client-secret>
 ```
 
 ### Claude Code: MCP server fails to start with "auth proxy is not running"
-Start the shared auth proxy first: `cd mcps/shared_auth && poetry run python -m shared_auth`. The MCP server validates the proxy is reachable at startup when `MS_CLIENT_ID` is set.
+Start the shared auth proxy first: `cd auth && poetry run python -m auth`. The MCP server validates the proxy is reachable at startup when `MS_CLIENT_ID` is set.
 
 ### Claude Code: Browser auth succeeds but terminal hangs
 Common causes: another service on port 8000, or the redirect URI `http://localhost:8000/connections/microsoft/callback` is not registered in the Azure app. To use a different port, set `BOND_AUTH_PROXY_PORT` before starting both the proxy and MCP server.

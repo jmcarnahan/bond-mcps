@@ -71,29 +71,55 @@ curl -s https://YOUR-DOMAIN.atlassian.net/_edge/tenant_info | jq .cloudId
 
 ## CLI Usage
 
-The CLI uses environment variables for authentication (no OAuth flow):
+The CLI supports two authentication modes:
+
+1. **Browser OAuth via the shared auth proxy (recommended)** — set `ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET`; the CLI runs the OAuth flow on first use, caches the token at `~/.bond_ai_tokens/atlassian.json`, and auto-refreshes it via `refresh_token`. Requires the auth proxy to be running (`cd auth && poetry run python -m auth`).
+2. **Direct token (CI / scripts)** — set `ATLASSIAN_ACCESS_TOKEN` (and `ATLASSIAN_CLOUD_ID`) to bypass OAuth entirely. No proxy needed, but no refresh — you renew the token yourself.
 
 ```bash
-export ATLASSIAN_ACCESS_TOKEN=your_token
-export ATLASSIAN_CLOUD_ID=your_cloud_id
+# Mode 1 (OAuth flow)
+export ATLASSIAN_CLIENT_ID=<your-oauth-app-client-id>
+export ATLASSIAN_CLIENT_SECRET=<your-oauth-app-client-secret>
 
-# Jira
+# Mode 2 (direct token)
+export ATLASSIAN_ACCESS_TOKEN=<your-token>
+export ATLASSIAN_CLOUD_ID=<your-cloud-id>
+```
+
+```bash
+# Jira — read
 atlassian-cli jira projects
-atlassian-cli jira search "project = PROJ AND status = Open"
+atlassian-cli jira search "project = PROJ AND status = Open" --max-results 10
 atlassian-cli jira count "project = PROJ AND type = Bug"
 atlassian-cli jira get PROJ-123
+atlassian-cli jira transitions PROJ-123                              # List available transitions
+atlassian-cli jira versions PROJ                                     # List project releases
+atlassian-cli jira lookup-user "Jane Doe"                            # Find user by name/email
+
+# Jira — write
 atlassian-cli jira create PROJ "Fix login bug" --type Bug --priority High
+atlassian-cli jira update PROJ-123 --summary "New title"
 atlassian-cli jira comment PROJ-123 "Working on this"
 atlassian-cli jira transition PROJ-123 "In Progress"
+atlassian-cli jira create-version PROJ "1.2.0" --description "Q3 release"
 
 # Confluence
 atlassian-cli confluence spaces
-atlassian-cli confluence search 'type = page AND text ~ "release notes"'
-atlassian-cli confluence get 12345
+atlassian-cli confluence search 'type = page AND text ~ "release notes"' --max-results 10
+atlassian-cli confluence get <page_id>
 
 # User
 atlassian-cli user me
+
+# Raw — direct MCP tool interface (debugging / testing)
+atlassian-cli raw jira-search --jql "project = PROJ" --max-results 5
+atlassian-cli raw confluence-search --target spaces --max-results 5
+
+# Auth
+atlassian-cli logout                                                 # Clear cached token
 ```
+
+> **Confluence scope gotcha**: the code calls `/wiki/api/v2/spaces`, which requires the **granular** scope `read:space:confluence`. If your OAuth app was registered with only the legacy `read:confluence-space.summary` scope, confluence calls return `401 scope does not match`. Add the granular scope to your OAuth app and re-authenticate. Jira is unaffected.
 
 ## Standalone Use with Claude Code
 
@@ -109,9 +135,9 @@ The MCP server can run standalone with local OAuth — no Bond AI backend requir
 The OAuth callback proxy handles browser redirects for all MCP servers. Start it in its own terminal:
 
 ```bash
-cd mcps/shared_auth
+cd auth
 poetry install
-poetry run python -m shared_auth
+poetry run python -m auth
 ```
 
 You should see `Bond AI OAuth Proxy — Listening on 127.0.0.1:8000`. Leave this running.
