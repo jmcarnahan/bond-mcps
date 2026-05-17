@@ -144,19 +144,41 @@ claude mcp add --transport http --scope user atlassian http://localhost:18003/mc
 
 The MCP servers must be running whenever Claude Code is. Use `make stop` to shut down between sessions, `make claude-remove` to unregister.
 
-## Token caches
+## Token database
 
-All providers cache under `~/.bond_mcps/`:
+OAuth tokens are stored in an encrypted SQLAlchemy database. By default this is a SQLite file at `<repo>/tokens.db` (gitignored); set `BOND_MCPS_DB_URL` to point at PostgreSQL / Aurora RDS for a deployed setup.
 
-| MCP | Cache file | Notes |
+| Setting | Default | Notes |
 |---|---|---|
-| Microsoft | `~/.bond_mcps/microsoft.json` | MSAL-managed (silent refresh via cached refresh token) |
-| GitHub | `~/.bond_mcps/github.json` | GitHub OAuth tokens don't expire by default — no refresh needed; re-auth only required if you revoke the token |
-| Atlassian | `~/.bond_mcps/atlassian.json` | Auto-refresh via `refresh_token` if `ATLASSIAN_CLIENT_ID/SECRET` are set |
+| `BOND_MCPS_DB_URL` | `sqlite:///<repo>/tokens.db` | Postgres URLs must include `sslmode=require\|verify-ca\|verify-full` |
+| `BOND_MCPS_ENCRYPTION_KEY` | (none) | base64-encoded 32-byte AES-256 key. Required for Postgres; for SQLite, falls back to a 0600 file at `~/.bond_mcps/encryption_key` (logs a WARN on every startup) |
+| `BOND_MCPS_USER_ID` | `getpass.getuser()` | identifies who the tokens belong to. Required for Postgres deployments — refused at start if missing |
 
-To force re-auth for one provider: `make logout-<provider>` (or delete its cache file). To wipe everything: `rm -rf ~/.bond_mcps/`.
+Tokens are encrypted with AES-256-GCM. Each ciphertext is bound to `(user_key, provider, field, key_version)` as AEAD associated data, so cross-row or cross-field tampering is rejected. Plaintext tokens never appear in the DB.
 
-**Migrating from the old layout** (`~/.ms_graph_tokens.json`, `~/.bond_ai_tokens/`): run `make migrate-tokens` once. It moves existing tokens into `~/.bond_mcps/` and removes the empty legacy directory. Safe to re-run.
+### One-time setup
+
+```bash
+make install              # installs deps + runs `bond-mcps migrate-db`
+cd auth && poetry run bond-mcps generate-key   # mint a key
+export BOND_MCPS_ENCRYPTION_KEY=<paste here>
+cd auth && poetry run bond-mcps doctor          # validates URL, schema, encryption
+```
+
+### Day-to-day
+
+| Action | Command |
+|---|---|
+| Re-auth a provider | `make logout-<provider>` (clears DB row) then `make login-<provider>` |
+| Wipe everything | `rm -f tokens.db tokens.db-*` |
+| Run schema migrations | `make migrate-db` |
+| Health check | `make doctor` |
+
+### Migrating from the legacy file cache
+
+If you have existing tokens in `~/.bond_mcps/*.json` from a prior version: `make import-tokens` imports them into the encrypted DB and moves the original files to `~/.bond_mcps/legacy_imported/<provider>.json.<timestamp>` (preserved for recovery). Per-provider: GitHub/Atlassian go into the `provider_tokens` table; Microsoft's MSAL cache blob goes into `msal_token_caches`.
+
+The older `make migrate-tokens` target still handles paths from the pre-`bond_mcps` era (`~/.ms_graph_tokens.json`, `~/.bond_ai_tokens/`) — run that first if you're coming from bond-ai, then `make import-tokens` to move into the DB.
 
 ## Known account-type limitations
 

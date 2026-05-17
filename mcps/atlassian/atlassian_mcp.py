@@ -38,6 +38,8 @@ from atlassian import confluence as confluence_ops
 from atlassian import user as user_ops
 
 logging.basicConfig(level=logging.INFO)
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
 logger = logging.getLogger(__name__)
 
 

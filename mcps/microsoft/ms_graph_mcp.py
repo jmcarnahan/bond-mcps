@@ -42,6 +42,8 @@ from ms_graph.power_bi import AsyncPowerBIClient
 from ms_graph.teams import TeamsNotAvailableError, extract_message_text, extract_message_sender
 
 logging.basicConfig(level=logging.INFO)
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
 logger = logging.getLogger(__name__)
 
 

@@ -31,6 +31,8 @@ from github import pulls as pulls_ops
 from github import code as code_ops
 
 logging.basicConfig(level=logging.INFO)
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
 logger = logging.getLogger(__name__)
 
 
