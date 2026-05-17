@@ -12,6 +12,7 @@ fastmcp = ">=3.0.0,<4.0"
 authlib = ">=1.7.1"
 pyjwt = {version = ">=2.12.0", extras = ["crypto"]}
 pygments = ">=2.20.0"
+python-dotenv = ">=1.0"
 bond-auth = {path = "../../auth", develop = true}
 
 [tool.poetry.group.dev.dependencies]
