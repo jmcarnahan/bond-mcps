@@ -1,125 +1,59 @@
 #!/usr/bin/env python3
 """
-GitHub CLI -- interact with GitHub using device code flow.
+GitHub CLI -- interact with GitHub using the shared local-OAuth flow.
+
+Auth is delegated to github.local_auth.get_local_token(), which is the same
+code path the GitHub MCP server uses. Browser PKCE first (via the auth proxy
+on :8000), device-code fallback. Cached at ~/.bond_mcps/github.json.
 
 Usage:
-    export GH_CLIENT_ID=<your-github-oauth-app-client-id>
+    export GITHUB_CLIENT_ID=<your-github-oauth-app-client-id>
+    export GITHUB_CLIENT_SECRET=<your-github-oauth-app-client-secret>
+    # or set them in mcps/github/.env
 
-    python github_cli.py repos list [--type all] [--sort updated] [--per-page 30]
-    python github_cli.py repos get <owner> <repo>
-    python github_cli.py repos search <query>
+    poetry run github-cli repos list [--type all] [--sort updated] [--per-page 30]
+    poetry run github-cli repos get <owner> <repo>
+    poetry run github-cli repos search <query>
 
-    python github_cli.py issues list <owner> <repo> [--state open]
-    python github_cli.py issues get <owner> <repo> <number>
-    python github_cli.py issues create <owner> <repo> <title> [--body "..."]
+    poetry run github-cli issues list <owner> <repo> [--state open]
+    poetry run github-cli issues get <owner> <repo> <number>
+    poetry run github-cli issues create <owner> <repo> <title> [--body "..."]
 
-    python github_cli.py pulls list <owner> <repo> [--state open]
-    python github_cli.py pulls get <owner> <repo> <number>
+    poetry run github-cli pulls list <owner> <repo> [--state open]
+    poetry run github-cli pulls get <owner> <repo> <number>
 
-    python github_cli.py code get <owner> <repo> <path>
-    python github_cli.py code search <query>
+    poetry run github-cli code get <owner> <repo> <path>
+    poetry run github-cli code search <query>
 
-    python github_cli.py user
+    poetry run github-cli user
 """
 
 import argparse
-import json
-import os
 import sys
-import time
 from pathlib import Path
 
-import httpx
+from dotenv import load_dotenv
 
 from github.github_client import GitHubClient, GitHubError
 from github import repos, issues, pulls, code
 
-TOKEN_CACHE_PATH = Path.home() / ".github_mcp_tokens.json"
-
-# GitHub OAuth scopes
-SCOPES = "repo user read:org"
+load_dotenv(Path(__file__).parent / ".env")
 
 
 def _get_token() -> str:
-    """Authenticate using GitHub device code flow with token caching."""
-    # Try cached token first
-    if TOKEN_CACHE_PATH.exists():
-        try:
-            cache = json.loads(TOKEN_CACHE_PATH.read_text())
-            token = cache.get("access_token")
-            if token:
-                # Verify the token still works
-                with GitHubClient(token) as client:
-                    try:
-                        client.get("/user")
-                        return token
-                    except (httpx.HTTPError, GitHubError):
-                        pass  # Token expired or revoked, re-authenticate
-        except (json.JSONDecodeError, OSError):
-            pass  # Corrupt or unreadable cache file, re-authenticate
+    """Get a GitHub access token via the shared local-auth flow.
 
-    client_id = os.environ.get("GH_CLIENT_ID")
-    if not client_id:
-        print("Error: GH_CLIENT_ID environment variable is required.", file=sys.stderr)
+    Same code path as the MCP server: cached token first, then browser PKCE
+    via the auth proxy, then device-code fallback. Cache at ~/.bond_mcps/github.json.
+    """
+    try:
+        from github.local_auth import get_local_token
+        return get_local_token()
+    except (PermissionError, RuntimeError) as e:
+        # PermissionError: no env vars set / no auth available
+        # RuntimeError: auth proxy unreachable (raised by OAuthProxyClient)
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    # Step 1: Request device code
-    with httpx.Client(timeout=30.0) as http:
-        resp = http.post(
-            "https://github.com/login/device/code",
-            data={"client_id": client_id, "scope": SCOPES},
-            headers={"Accept": "application/json"},
-        )
-        resp.raise_for_status()
-        device_data = resp.json()
-
-    user_code = device_data.get("user_code")
-    verification_uri = device_data.get("verification_uri")
-    device_code = device_data.get("device_code")
-    interval = device_data.get("interval", 5)
-    expires_in = device_data.get("expires_in", 900)
-
-    print(f"\nTo authenticate, visit: {verification_uri}")
-    print(f"Enter code: {user_code}\n")
-    print(f"Waiting for authorization (expires in {expires_in}s)...")
-
-    # Step 2: Poll for access token
-    deadline = time.time() + expires_in
-    with httpx.Client(timeout=30.0) as http:
-        while time.time() < deadline:
-            time.sleep(interval)
-            resp = http.post(
-                "https://github.com/login/oauth/access_token",
-                data={
-                    "client_id": client_id,
-                    "device_code": device_code,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                },
-                headers={"Accept": "application/json"},
-            )
-            resp.raise_for_status()
-            token_data = resp.json()
-
-            error = token_data.get("error")
-            if error == "authorization_pending":
-                continue
-            elif error == "slow_down":
-                interval = token_data.get("interval", interval + 5)
-                continue
-            elif error:
-                print(f"Authentication failed: {token_data.get('error_description', error)}", file=sys.stderr)
-                sys.exit(1)
-
-            access_token = token_data.get("access_token")
-            if access_token:
-                # Cache the token
-                TOKEN_CACHE_PATH.write_text(json.dumps({"access_token": access_token}))
-                TOKEN_CACHE_PATH.chmod(0o600)
-                print("Authenticated successfully!\n")
-                return access_token
-
-    print("Authentication timed out.", file=sys.stderr)
-    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
