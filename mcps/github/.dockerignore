@@ -1,0 +1,9 @@
+.venv/
+tests/
+.env
+deployment/
+__pycache__/
+*.pyc
+README.md
+github_cli.py
+.pytest_cache/

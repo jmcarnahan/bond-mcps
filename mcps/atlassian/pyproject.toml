@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "atlassian-mcp"
+version = "0.1.0"
+description = "Atlassian MCP server for Bond AI - Jira issues, Confluence pages, and project management"
+authors = ["Bond AI"]
+packages = [{include = "atlassian"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+httpx = ">=0.27"
+fastmcp = ">=3.0.0,<4.0"
+authlib = ">=1.7.1"
+pyjwt = {version = ">=2.12.0", extras = ["crypto"]}
+pygments = ">=2.20.0"
+bond-auth = {path = "../../auth", develop = true}
+python-dotenv = ">=1.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.24"
+respx = ">=0.22"
+
+[tool.poetry.scripts]
+atlassian-cli = "atlassian_cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests that hit real Atlassian APIs (run with --integration)",
+]

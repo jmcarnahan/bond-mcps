@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "github-mcp"
+version = "0.1.0"
+description = "GitHub MCP server for Bond AI - repositories, issues, pull requests, and code"
+authors = ["Bond AI"]
+packages = [{include = "github"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+httpx = ">=0.27"
+fastmcp = ">=3.0.0,<4.0"
+authlib = ">=1.7.1"
+pyjwt = {version = ">=2.12.0", extras = ["crypto"]}
+pygments = ">=2.20.0"
+bond-auth = {path = "../../auth", develop = true}
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.24"
+respx = ">=0.22"
+
+[tool.poetry.scripts]
+github-cli = "github_cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
