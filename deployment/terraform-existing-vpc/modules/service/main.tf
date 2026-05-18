@@ -78,7 +78,7 @@ locals {
       # Stagger group.order so ALB rule eval is deterministic. Auth gets the
       # lowest number so its rule is evaluated first.
       groupOrder      = var.is_auth_proxy ? 1 : 10
-      scheme          = "internet-facing"
+      scheme          = var.ingress_scheme
       healthCheckPath = var.health.type == "http" ? var.health.path : "/"
       successCodes    = "200-499"
       environmentTag  = var.environment_tag

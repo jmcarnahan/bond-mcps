@@ -50,9 +50,14 @@ resource "aws_rds_cluster" "bond_mcps" {
   backup_retention_period = 7
   preferred_backup_window = "03:00-04:00"
 
-  deletion_protection       = var.aurora_deletion_protection
-  skip_final_snapshot       = !var.aurora_deletion_protection
-  final_snapshot_identifier = var.aurora_deletion_protection ? "${local.name_prefix}-aurora-final" : null
+  deletion_protection = var.aurora_deletion_protection
+  skip_final_snapshot = !var.aurora_deletion_protection
+  # Timestamp suffix makes the snapshot name unique per cluster lifecycle.
+  # ignore_changes prevents the timestamp from causing perpetual diffs;
+  # the value gets baked in at create and re-used on destroy. A re-created
+  # cluster gets a new timestamp, so destroy → recreate → destroy doesn't
+  # collide on the snapshot name.
+  final_snapshot_identifier = var.aurora_deletion_protection ? "${local.name_prefix}-aurora-final-${formatdate("YYYYMMDDhhmmss", timestamp())}" : null
 
   serverlessv2_scaling_configuration {
     min_capacity = var.aurora_min_capacity
@@ -62,7 +67,7 @@ resource "aws_rds_cluster" "bond_mcps" {
   tags = { Name = "${local.name_prefix}-aurora" }
 
   lifecycle {
-    ignore_changes = [master_password]
+    ignore_changes = [master_password, final_snapshot_identifier]
   }
 }
 
