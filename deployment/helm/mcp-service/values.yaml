@@ -55,6 +55,12 @@ authProxy:
   inject: false
   host: ""                     # e.g. auth.bond-mcps.svc.cluster.local
   port: 8000
+  # Public origin the OAuth provider can reach for callbacks. Injected as
+  # BOND_AUTH_PROXY_PUBLIC_URL — auth/proxy_client.py:get_redirect_uri uses
+  # it to build redirect URIs the provider redirects to after the user
+  # authorizes. Without this, MCPs fall back to http://localhost which only
+  # works in local dev.
+  publicUrl: ""                # e.g. https://auth.mcps.example.com
 
 # Secrets are sourced from AWS Secrets Manager via External Secrets Operator.
 # Each enabled entry renders one ExternalSecret that materialises a k8s Secret

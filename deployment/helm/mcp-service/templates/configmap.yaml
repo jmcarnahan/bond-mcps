@@ -9,6 +9,9 @@ data:
   {{- if .Values.authProxy.inject }}
   AUTH_PROXY_HOST: {{ .Values.authProxy.host | quote }}
   BOND_AUTH_PROXY_PORT: {{ .Values.authProxy.port | quote }}
+  {{- if .Values.authProxy.publicUrl }}
+  BOND_AUTH_PROXY_PUBLIC_URL: {{ .Values.authProxy.publicUrl | quote }}
+  {{- end }}
   {{- end }}
   {{- if .Values.userKey }}
   BOND_MCPS_USER_ID: {{ .Values.userKey | quote }}

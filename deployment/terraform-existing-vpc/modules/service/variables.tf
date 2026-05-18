@@ -63,6 +63,12 @@ variable "auth_proxy_port" {
   default = 8000
 }
 
+variable "auth_proxy_public_url" {
+  type        = string
+  default     = ""
+  description = "Public origin of the auth proxy (e.g. https://auth.mcps.example.com). Injected as BOND_AUTH_PROXY_PUBLIC_URL — auth/proxy_client.py builds OAuth redirect URIs off this."
+}
+
 variable "encryption_key_secret_name" {
   type        = string
   description = "Full Secrets Manager name (e.g. bond-mcps-dev-encryption-key) of the AES-256 key."

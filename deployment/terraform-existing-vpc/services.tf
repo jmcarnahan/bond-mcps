@@ -30,6 +30,7 @@ module "service" {
 
   auth_proxy_internal_host = local.auth_proxy_key != null ? "${local.auth_proxy_key}.${kubernetes_namespace.bond_mcps.metadata[0].name}.svc.cluster.local" : ""
   auth_proxy_port          = 8000
+  auth_proxy_public_url    = local.auth_proxy_hostname != null ? "https://${local.auth_proxy_hostname}" : ""
 
   encryption_key_secret_name = aws_secretsmanager_secret.encryption_key.name
   db_credentials_secret_name = aws_secretsmanager_secret.db_credentials.name
