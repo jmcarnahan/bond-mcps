@@ -104,7 +104,9 @@ public key of whichever service signs identity JWTs (typically the bond-ai
 backend). The shape:
 
 ```bash
-# PEM has newlines; build the JSON safely with jq:
+# PEM must use Unix line endings. If the file came from Windows, strip CR
+# first or pyjwt rejects the key with a confusing parse error:
+#   tr -d '\r' < cert.pem > cert.lf.pem
 jq -Rsn --rawfile pem /path/to/bond-ai-jwt-public.pem \
    '{BOND_MCPS_JWT_PUBLIC_KEY: $pem}' > /tmp/jwt-payload.json
 
@@ -216,6 +218,65 @@ See `outputs.tf` for the full list. Highlights:
 | `ecr_repository_urls` | CI push targets |
 | `needs_scaling_work_services` | Currently `["auth"]` — single-replica caveat |
 | `shared_alb_dns_name` | The ALB every service shares (resolves after first apply) |
+
+## Aurora connection budget
+
+The Postgres token DB sits behind Aurora Serverless v2. Connection caps
+scale roughly linearly with ACU:
+
+| ACU | ~max connections | Use |
+|---|---|---|
+| 0.5 | 56 | dev only — set explicitly in `environments/dev.tfvars` |
+| 1.0 | 113 | **default** — comfortable for all current services |
+| 2.0 | 226 | auto-scaled ceiling during bursts |
+
+App-side pool sizing (`auth/db/session.py`):
+- `pool_size = 3` + `max_overflow = 2` → 5 conns max per process
+- 4 MCPs × 2 replicas + auth × 1 = 9 worker processes
+- Peak: 9 × 5 = 45 connections
+
+The 1.0 ACU default leaves >2× headroom for preflight Jobs, ad-hoc
+operator queries, and burst load before auto-scaling kicks in (cold
+scale-up takes ~30s, so a higher floor matters for spikes).
+
+Tuning knobs:
+- `var.aurora_min_capacity` and `var.aurora_max_capacity` in tfvars
+- `pool_size` / `max_overflow` in `auth/auth/db/session.py`
+
+## Post-apply cleanup: rotating cluster-admin access
+
+`module.eks` is configured with `enable_cluster_creator_admin_permissions
+= true`, which grants `system:masters` to the IAM principal that ran
+`terraform apply`. This is convenient for first deploy but leaves a
+permanent grant — even if that user later leaves the team. After the
+deploy is stable, remove the access entry:
+
+```bash
+# Discover the entry created at cluster bootstrap
+aws eks list-access-entries --cluster-name bond-mcps-dev-eks --region us-west-2
+
+# Remove the IAM principal you no longer want to retain admin
+aws eks delete-access-entry \
+  --cluster-name bond-mcps-dev-eks \
+  --region us-west-2 \
+  --principal-arn arn:aws:iam::ACCOUNT:user/USERNAME
+
+# Replace with a tighter role-bound entry as needed (eks_access_entry resource).
+```
+
+## Cross-AZ traffic notes
+
+Pods are scheduled randomly across the two private subnets (different
+AZs). MCP pods calling the auth proxy in the other AZ pay ~$0.01/GB for
+cross-zone traffic. For OAuth flows (KB-scale payloads), this is
+negligible. For high-volume tool traffic, monitor:
+
+- VPC Flow Logs → CloudWatch Logs Insights filter
+  `pkt-dst-aws-zone != pkt-src-aws-zone`
+- Cost Explorer "Region" filter for `Data Transfer-Regional Bytes`
+
+Pin the auth proxy to one AZ via `nodeSelector` if costs grow material —
+the chart's `nodeSelector` value is already wired.
 
 ## Known limitations (v1)
 

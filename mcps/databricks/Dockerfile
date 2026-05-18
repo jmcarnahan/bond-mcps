@@ -23,7 +23,7 @@ RUN poetry config virtualenvs.create false && \
 COPY dbx/ ./dbx/
 COPY databricks_mcp.py ./
 
-RUN pip install --no-cache-dir "psycopg[binary]>=3.3,<4.0"
+# psycopg[binary] comes in transitively via bond-auth's main deps.
 
 RUN useradd --create-home --uid 1000 app && \
     chown -R app:app /app /auth

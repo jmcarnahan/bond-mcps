@@ -25,10 +25,8 @@ RUN poetry config virtualenvs.create false && \
 COPY github/ ./github/
 COPY github_mcp.py ./
 
-# psycopg-binary for Aurora Postgres token DB (kept out of pyproject's main
-# deps so local SQLite-only dev stays lean; required at runtime — see
-# auth/Dockerfile for rationale).
-RUN pip install --no-cache-dir "psycopg[binary]>=3.3,<4.0"
+# psycopg[binary] comes in transitively via bond-auth's main deps; no
+# separate install needed.
 
 # Non-root runtime.
 RUN useradd --create-home --uid 1000 app && \

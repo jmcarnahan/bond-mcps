@@ -25,12 +25,10 @@ RUN poetry config virtualenvs.create false && \
 
 COPY auth/ ./auth/
 
-# Real install registers the `bond-mcps` console script.
+# Real install registers the `bond-mcps` console script. psycopg[binary]
+# is pulled in via auth/pyproject.toml main deps, so the Aurora driver
+# is available without a separate pip install.
 RUN poetry install --only main --no-interaction --no-ansi
-
-# psycopg-binary for Aurora Postgres. Kept out of pyproject's main deps so
-# local SQLite-only dev stays lean; required at runtime in containers.
-RUN pip install --no-cache-dir "psycopg[binary]>=3.3,<4.0"
 
 # Non-root runtime user.
 RUN useradd --create-home --uid 1000 app && chown -R app:app /app

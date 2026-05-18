@@ -10,10 +10,13 @@ sqlalchemy = ">=2.0,<3.0"
 alembic = ">=1.13,<2.0"
 cryptography = ">=43.0,<46.0"
 pyjwt = {version = ">=2.12.0", extras = ["crypto"]}
+# psycopg is the runtime driver for postgresql+psycopg:// URLs (Aurora deploys).
+# `binary` extra bundles libpq; no apt deps in containers. ~7MB wheel; the
+# convenience of not needing a Dockerfile pip install outweighs the cost.
+psycopg = {extras = ["binary"], version = "^3.3.4"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"
-psycopg = {extras = ["binary"], version = "^3.3.4"}
 
 [tool.poetry.scripts]
 bond-mcps = "auth.cli:main"
