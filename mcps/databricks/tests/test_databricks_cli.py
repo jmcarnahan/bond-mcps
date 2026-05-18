@@ -1,7 +1,6 @@
 """Tests for databricks_cli.py — CLI subcommands with mocked client."""
 
 import sys
-from io import StringIO
 from unittest.mock import patch
 
 import pytest
@@ -17,7 +16,6 @@ def _env(monkeypatch):
 
 
 def _run_cli(argv, capsys):
-    """Invoke databricks_cli.main() with the given argv, return captured output."""
     from databricks_cli import main
     old_argv = sys.argv[:]
     sys.argv = ["databricks-cli", *argv]
@@ -30,7 +28,7 @@ def _run_cli(argv, capsys):
 
 class TestWhoami:
     def test_pat_mode(self, capsys):
-        result = {"columns": ["user"], "rows": [["alice@example.com"]]}
+        result = {"columns": ["user"], "rows": [["alice@example.com"]], "truncated": False}
         with patch("databricks_cli.db.run_query", return_value=result):
             out = _run_cli(["whoami"], capsys)
         assert "PAT" in out.out
@@ -40,7 +38,7 @@ class TestWhoami:
     def test_oauth_mode(self, monkeypatch, capsys):
         monkeypatch.delenv("DATABRICKS_ACCESS_TOKEN", raising=False)
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", "id")
-        result = {"columns": ["user"], "rows": [["bob@example.com"]]}
+        result = {"columns": ["user"], "rows": [["bob@example.com"]], "truncated": False}
         with patch("databricks_cli.db.run_query", return_value=result):
             out = _run_cli(["whoami"], capsys)
         assert "OAuth" in out.out
@@ -57,19 +55,25 @@ class TestWhoami:
 
 class TestQuery:
     def test_prints_columns_and_rows(self, capsys):
-        result = {"columns": ["id", "name"], "rows": [[1, "alpha"], [2, "beta"]]}
+        result = {"columns": ["id", "name"], "rows": [[1, "alpha"], [2, "beta"]], "truncated": False}
         with patch("databricks_cli.db.run_query", return_value=result):
             out = _run_cli(["query", "SELECT id, name FROM t"], capsys)
-        assert "id" in out.out and "name" in out.out
+        # Pipe-delimited (matches MCP server formatting).
+        assert "id|name" in out.out
         assert "alpha" in out.out
         assert "(2 row(s))" in out.out
 
     def test_none_values_rendered_empty(self, capsys):
-        result = {"columns": ["x"], "rows": [[None]]}
+        result = {"columns": ["x"], "rows": [[None]], "truncated": False}
         with patch("databricks_cli.db.run_query", return_value=result):
             out = _run_cli(["query", "SELECT NULL"], capsys)
-        # None becomes empty string in output (no 'None' literal)
         assert "None" not in out.out
+
+    def test_truncated_marker_in_row_count(self, capsys):
+        result = {"columns": ["x"], "rows": [[i] for i in range(3)], "truncated": True}
+        with patch("databricks_cli.db.run_query", return_value=result):
+            out = _run_cli(["query", "SELECT x FROM big"], capsys)
+        assert "truncated" in out.out
 
 
 class TestList:
@@ -96,11 +100,7 @@ class TestList:
 
 class TestLogout:
     def test_clears_existing_cache(self, tmp_path, monkeypatch, capsys):
-        # Point TokenStore at a temp dir with a fake cache file
-        from auth import TokenStore
-        monkeypatch.setattr(
-            "auth.token_store.DEFAULT_CACHE_DIR", tmp_path,
-        )
+        monkeypatch.setattr("auth.token_store.DEFAULT_CACHE_DIR", tmp_path)
         cache_file = tmp_path / "databricks.json"
         cache_file.write_text('{"access_token": "x"}')
 
@@ -109,9 +109,46 @@ class TestLogout:
         assert "Cleared" in out.out
 
     def test_warns_when_pat_env_still_set(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr(
-            "auth.token_store.DEFAULT_CACHE_DIR", tmp_path,
-        )
-        # DATABRICKS_ACCESS_TOKEN already set by the autouse fixture
+        monkeypatch.setattr("auth.token_store.DEFAULT_CACHE_DIR", tmp_path)
         out = _run_cli(["logout"], capsys)
         assert "DATABRICKS_ACCESS_TOKEN" in out.out
+
+
+class TestFriendlyErrors:
+    """Round-2 fix: CLI must surface the same friendly messages as the MCP.
+    Previously the CLI printed raw DatabricksError messages, which would have
+    given a user with a sql-scope-missing PAT a connector stack trace instead
+    of the helpful "your PAT may be missing the `sql` scope" guidance."""
+
+    def test_unauthorized_in_pat_mode_hints_sql_scope(self, capsys):
+        from dbx.client import DatabricksError
+        with patch("databricks_cli.db.run_query",
+                   side_effect=DatabricksError("HTTP 401", error_code="Unauthorized")):
+            with pytest.raises(SystemExit):
+                _run_cli(["query", "SELECT 1"], capsys)
+        err = capsys.readouterr().err
+        assert "DATABRICKS_ACCESS_TOKEN" in err
+        assert "sql" in err.lower()
+
+    def test_unauthorized_in_oauth_mode_hints_login(self, monkeypatch, capsys):
+        from dbx.client import DatabricksError
+        monkeypatch.delenv("DATABRICKS_ACCESS_TOKEN", raising=False)
+        monkeypatch.setenv("DATABRICKS_CLIENT_ID", "id")
+        with patch("databricks_cli.db.run_query",
+                   side_effect=DatabricksError("HTTP 401", error_code="Unauthorized")):
+            with pytest.raises(SystemExit):
+                _run_cli(["query", "SELECT 1"], capsys)
+        err = capsys.readouterr().err
+        assert "make login-databricks" in err
+
+    def test_sql_error_rendered_with_fence(self, capsys):
+        from dbx.client import DatabricksError
+        with patch("databricks_cli.db.run_query",
+                   side_effect=DatabricksError(
+                       "TABLE_OR_VIEW_NOT_FOUND: x.y",
+                       error_code="SQLError")):
+            with pytest.raises(SystemExit):
+                _run_cli(["query", "SELECT * FROM x.y"], capsys)
+        err = capsys.readouterr().err
+        assert "SQL error" in err
+        assert "TABLE_OR_VIEW_NOT_FOUND" in err

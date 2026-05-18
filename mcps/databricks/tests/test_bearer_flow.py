@@ -75,8 +75,13 @@ async def test_bearer_header_reaches_sql_connect(monkeypatch):
     assert "credentials_provider" not in captured, \
         "credentials_provider callback present — could fire from worker " \
         "thread with stale context."
+    # BOTH telemetry flags required: force_enable_telemetry=True overrides
+    # enable_telemetry=False (telemetry_client.py:is_telemetry_enabled).
     assert captured.get("enable_telemetry") is False, \
         "Telemetry enabled — background thread could leak auth identity."
+    assert captured.get("force_enable_telemetry") is False, \
+        "force_enable_telemetry not set False — a config layer that flips " \
+        "it on would silently re-enable the leaking daemon thread."
 
 
 async def test_pat_used_when_no_bearer_header(monkeypatch):

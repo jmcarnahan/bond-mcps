@@ -13,14 +13,22 @@ The auth chain is split across an async/sync boundary on purpose:
     can be safely called from a worker thread (`asyncio.to_thread`) without
     losing the bearer context.
 
-Telemetry is disabled (`enable_telemetry=False`) so the connector does not
-spawn a background daemon thread that would call our auth path with no
-request context — that path would either fail silently or attribute telemetry
-to whatever PAT/OAuth happens to be set on the server process, leaking
-identity in a multi-tenant Bond-AI deployment.
+Telemetry is disabled (`enable_telemetry=False` AND `force_enable_telemetry=
+False`) so the connector does not spawn a background daemon thread that would
+call our auth path with no request context — that path would either fail
+silently or attribute telemetry to whatever PAT/OAuth happens to be set on
+the server process, leaking identity in a multi-tenant Bond-AI deployment.
+Both flags are needed because `force_enable_telemetry=True` overrides
+`enable_telemetry=False` (see databricks/sql/telemetry/telemetry_client.py
+`is_telemetry_enabled`).
 
-A 5-minute socket timeout caps runaway queries instead of blocking the MCP
-indefinitely.
+`_socket_timeout=300` caps each individual HTTP request to the warehouse at
+5 minutes. This is NOT a query-duration timeout — a Databricks query
+typically makes many short polling requests (ExecuteStatement, repeated
+GetOperationStatus polls, FetchResults chunks), and each one is well under
+the limit on its own. What this prevents is a single HTTP request hanging
+at the TCP layer (a wedged load balancer, a stuck thrift call). Real query
+timeouts are enforced by the MCP tool layer via `asyncio.wait_for`.
 """
 
 import logging
@@ -41,8 +49,10 @@ logger = logging.getLogger(__name__)
 # smaller preview number.
 _MAX_FETCH_ROWS = 5000
 
-# Per-call socket timeout (seconds). Long enough for warehouse cold-starts
-# (~30-60s) plus modest analytical queries; short enough to avoid hangs.
+# Per-HTTP-request socket timeout (seconds). Applies to each connect/read on
+# the connector's internal HTTP calls, NOT to total query duration. A long
+# query that makes many short polling calls is unaffected by this setting.
+# Use the MCP tool layer's asyncio.wait_for wrapper for total-duration caps.
 _SOCKET_TIMEOUT_S = 300
 
 
@@ -97,7 +107,10 @@ def _connect(token: str | None):
         http_path=http_path,
         access_token=token,
         user_agent_entry="bond-ai-databricks-mcp",
+        # Both telemetry flags are required: force_enable_telemetry=True
+        # overrides enable_telemetry=False (telemetry_client.py:121).
         enable_telemetry=False,
+        force_enable_telemetry=False,
         _socket_timeout=_SOCKET_TIMEOUT_S,
     )
 
