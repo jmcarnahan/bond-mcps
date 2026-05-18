@@ -10,6 +10,16 @@ Replicas:      {{ .Values.replicas }}
 Migrations:    Alembic runs as initContainer on every pod start. Check status with:
   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "mcp-service.fullname" . }} -c db-migrate
 {{- end }}
+{{- if .Values.preflight.enabled }}
+
+Preflight:     `bond-mcps doctor` runs as initContainer (DB, schema, encryption, user_key).
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "mcp-service.fullname" . }} -c preflight
+{{- end }}
+{{- if not .Values.userKey }}
+
+WARNING:       userKey ("" by default) becomes BOND_MCPS_USER_ID. REQUIRED on Postgres
+               (auth/cli.py:113). Pods will crash in preflight until you set it.
+{{- end }}
 
 If pods are pending, confirm Secrets Manager values are seeded:
   aws secretsmanager get-secret-value --secret-id {{ .Values.secrets.encryptionKey.secretsManagerName }} --query SecretString --output text

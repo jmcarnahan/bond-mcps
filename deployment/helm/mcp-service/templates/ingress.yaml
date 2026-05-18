@@ -15,9 +15,6 @@ metadata:
     alb.ingress.kubernetes.io/group.order: {{ .Values.ingress.groupOrder | quote }}
     alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.ingress.healthCheckPath | quote }}
     alb.ingress.kubernetes.io/success-codes: {{ .Values.ingress.successCodes | quote }}
-    {{- with .Values.ingress.extraAnnotations }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:

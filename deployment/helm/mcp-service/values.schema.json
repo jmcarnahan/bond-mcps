@@ -13,11 +13,11 @@
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
       }
     },
-    "command": { "type": "array", "items": { "type": "string" } },
-    "args":    { "type": "array", "items": { "type": "string" } },
-    "port":    { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "command":  { "type": "array", "items": { "type": "string" } },
+    "port":     { "type": "integer", "minimum": 1, "maximum": 65535 },
     "replicas": { "type": "integer", "minimum": 0 },
-    "env":     { "type": "object" },
+    "env":      { "type": "object" },
+    "userKey":  { "type": "string" },
     "authProxy": {
       "type": "object",
       "properties": {
@@ -45,15 +45,15 @@
     "ingress": {
       "type": "object",
       "properties": {
-        "enabled":        { "type": "boolean" },
-        "host":           { "type": "string" },
-        "className":      { "type": "string" },
-        "certificateArn": { "type": "string" },
-        "groupName":      { "type": "string" },
-        "groupOrder":     { "type": "integer" },
-        "scheme":         { "type": "string", "enum": ["internet-facing", "internal"] },
+        "enabled":         { "type": "boolean" },
+        "host":            { "type": "string" },
+        "className":       { "type": "string" },
+        "certificateArn":  { "type": "string" },
+        "groupName":       { "type": "string" },
+        "groupOrder":      { "type": "integer" },
+        "scheme":          { "type": "string", "enum": ["internet-facing", "internal"] },
         "healthCheckPath": { "type": "string" },
-        "successCodes":   { "type": "string" }
+        "successCodes":    { "type": "string" }
       }
     },
     "probes": {
@@ -70,11 +70,18 @@
         "command": { "type": "array", "items": { "type": "string" } }
       }
     },
-    "pdb": {
+    "preflight": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "minAvailable": { "type": ["integer", "string"] }
+        "command": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "pdb": {
+      "type": "object",
+      "properties": {
+        "enabled":      { "type": "boolean" },
+        "minAvailable": { "type": "integer", "minimum": 0 }
       }
     }
   },
@@ -90,8 +97,8 @@
     "probeBlock": {
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["http", "tcp"] },
-        "path": { "type": "string" },
+        "type":                { "type": "string", "enum": ["http", "tcp"] },
+        "path":                { "type": "string" },
         "initialDelaySeconds": { "type": "integer", "minimum": 0 },
         "periodSeconds":       { "type": "integer", "minimum": 1 }
       }
