@@ -12,7 +12,6 @@ image:
 # Override the image CMD only if needed. Both auth and MCP Dockerfiles already
 # bind to 0.0.0.0:8000, so leaving this empty is correct in the default case.
 command: []
-args: []
 
 # Container port. All current images listen on 8000 internally.
 port: 8000
@@ -30,10 +29,28 @@ resources:
 # Non-sensitive env vars rendered into the ConfigMap.
 # When authProxy.inject=true, AUTH_PROXY_HOST + BOND_AUTH_PROXY_PORT are merged in
 # automatically so the operator does not have to repeat them per MCP.
+#
+# NEVER set BOND_MCPS_SKIP_STARTUP_VERIFY here — it defeats the fail-fast
+# guarantee in auth/auth/startup.py.
 env: {}
 
-# For MCP services. Set inject: true and host: to the in-cluster DNS of the auth
-# proxy Service. The auth proxy itself sets inject: false.
+# === BOND_MCPS_USER_ID — multi-tenancy boundary ===
+# Owner identifier for cached tokens in the encrypted DB.
+# REQUIRED on Postgres deployments — empty value crashes pods at startup
+# (auth/auth/cli.py:113, auth/auth/startup.py:55).
+#
+# CAVEAT (read before deploying multi-tenant): today this is one value per
+# pod, NOT per request. All API calls from this pod read and write the same
+# token DB row. Implications:
+#   - Single-tenant deploy: fine. Use any stable string (e.g. "bond-mcps-dev").
+#   - Multi-tenant deploy: BROKEN. Tokens are shared across users. The fix is
+#     to make the MCPs derive user_key from the incoming Bearer JWT's `sub`
+#     claim (proxy_client.py + per-MCP auth modules). The env shape here
+#     does not change when that fix lands; only application code does.
+userKey: ""
+
+# For MCP services. Set inject: true and host: to the in-cluster DNS of the
+# auth proxy Service. The auth proxy itself sets inject: false.
 authProxy:
   inject: false
   host: ""                     # e.g. auth.bond-mcps.svc.cluster.local
@@ -42,8 +59,8 @@ authProxy:
 # Secrets are sourced from AWS Secrets Manager via External Secrets Operator.
 # Each enabled entry renders one ExternalSecret that materialises a k8s Secret
 # named "<fullname>-<key>". That Secret is consumed by the Deployment via envFrom,
-# so the SM JSON keys MUST equal the desired env var names (except `db`, which uses
-# templating to assemble BOND_MCPS_DB_URL from username/password/host/port/dbname).
+# so the SM JSON keys MUST equal the desired env var names (except `db`, which
+# uses templating to assemble BOND_MCPS_DB_URL from username/password/host/port/dbname).
 secrets:
   encryptionKey:
     enabled: true
@@ -53,6 +70,9 @@ secrets:
     enabled: true
     secretsManagerName: ""     # e.g. bond-mcps-dev-db-credentials
     # JSON shape: {"username","password","host","port","dbname"} → templated into URL.
+    # Default `require` is permissive (accepts any cert). For prod hardening,
+    # set to `verify-full` AND mount the RDS root CA bundle (chart does not
+    # handle the volume mount today — v2 work).
     sslmode: require
   oauth:
     enabled: false
@@ -63,7 +83,10 @@ secrets:
 # Reference to the ClusterSecretStore created by external-secrets.tf.
 externalSecrets:
   clusterSecretStoreName: bond-mcps-aws-sm
-  refreshInterval: 1h
+  # 5m is a deliberate compromise: fast enough that rotating a leaked secret
+  # propagates quickly; slow enough that AWS SM API costs stay negligible
+  # (4 services × ~3 secrets × 12 reads/hour = ~144 calls/hour).
+  refreshInterval: 5m
 
 serviceAccount:
   create: true
@@ -79,7 +102,6 @@ ingress:
   scheme: internet-facing
   healthCheckPath: /health     # auth serves /health; MCPs fall back to TCP target health
   successCodes: "200-299"
-  extraAnnotations: {}
 
 probes:
   liveness:
@@ -93,12 +115,26 @@ probes:
     initialDelaySeconds: 5
     periodSeconds: 10
 
-# Database migrations. Set enabled: true ONLY for the auth service. When enabled,
-# an initContainer runs `bond-mcps migrate-db` on every pod start using the same
-# image and DB secret as the main container. Alembic is idempotent under races.
+# === Database migrations ===
+# Enable ONLY for the auth service. When true, an initContainer runs Alembic
+# (`bond-mcps migrate-db`) on every pod start. Alembic is idempotent under
+# concurrent runs; safe even with multiple replicas.
 migrations:
   enabled: false
   command: ["bond-mcps", "migrate-db"]
+
+# === Startup pre-flight check ===
+# Enable for ALL services. Runs `bond-mcps doctor` (auth/auth/cli.py:81) to
+# verify: BOND_MCPS_DB_URL reachable, schema at Alembic head, encryption key
+# round-trips, and (on Postgres) BOND_MCPS_USER_ID is set. Container fails
+# fast on misconfig instead of accepting traffic and erroring per request.
+#
+# On first install, MCP doctor checks fail until the auth service has finished
+# `migrate-db`. K8s restarts the initContainer with exponential backoff;
+# expect 1-2 minutes of cold-start retries before MCPs are Ready.
+preflight:
+  enabled: true
+  command: ["bond-mcps", "doctor"]
 
 pdb:
   enabled: false

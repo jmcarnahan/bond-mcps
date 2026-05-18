@@ -24,8 +24,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "mcp-service.serviceAccountName" . }}
-      {{- if .Values.migrations.enabled }}
+      {{- if or .Values.migrations.enabled .Values.preflight.enabled }}
       initContainers:
+        {{- if .Values.migrations.enabled }}
         - name: db-migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -35,6 +36,18 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits:   { cpu: 500m, memory: 512Mi }
+        {{- end }}
+        {{- if .Values.preflight.enabled }}
+        - name: preflight
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: {{ toJson .Values.preflight.command }}
+          envFrom:
+            {{- include "mcp-service.envFrom" . | nindent 12 }}
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+        {{- end }}
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -42,9 +55,6 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.command }}
           command: {{ toJson . }}
-          {{- end }}
-          {{- with .Values.args }}
-          args: {{ toJson . }}
           {{- end }}
           ports:
             - name: http
