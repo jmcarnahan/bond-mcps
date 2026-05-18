@@ -15,9 +15,10 @@
     },
     "command":  { "type": "array", "items": { "type": "string" } },
     "port":     { "type": "integer", "minimum": 1, "maximum": 65535 },
-    "replicas": { "type": "integer", "minimum": 0 },
-    "env":      { "type": "object" },
-    "userKey":  { "type": "string" },
+    "replicas":    { "type": "integer", "minimum": 0 },
+    "isAuthProxy": { "type": "boolean" },
+    "env":         { "type": "object" },
+    "userKey":     { "type": "string" },
     "authProxy": {
       "type": "object",
       "properties": {
@@ -95,6 +96,13 @@
       "properties": {
         "enabled":      { "type": "boolean" },
         "minAvailable": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled":               { "type": "boolean" },
+        "albControllerSelector": { "type": "object" }
       }
     }
   },

@@ -18,6 +18,13 @@ port: 8000
 
 replicas: 1
 
+# Set true ONLY for the auth proxy service. Used by _helpers.tpl to
+# hard-fail when replicas > 1: auth holds in-memory pending OAuth state
+# (auth/proxy_server.py STATE_TTL), so a second replica would silently
+# break OAuth callbacks because the redirect could land on a pod that
+# doesn't have the matching state row.
+isAuthProxy: false
+
 resources:
   requests:
     cpu: 100m
@@ -166,6 +173,20 @@ preflight:
 pdb:
   enabled: false
   minAvailable: 1
+
+# === NetworkPolicy ===
+# When enabled, the chart adds a default-deny-ingress NetworkPolicy plus
+# explicit allows for the ALB controller's selector. Egress is left open
+# (DNS, Aurora, AWS APIs are all needed). Off by default to avoid
+# surprising operators on first install; flip to true once you've
+# verified pod-to-pod traffic patterns.
+networkPolicy:
+  enabled: false
+  # Selector for the ALB controller's pods. Default matches the upstream
+  # chart's labels; adjust if you customized the install.
+  albControllerSelector:
+    matchLabels:
+      app.kubernetes.io/name: aws-load-balancer-controller
 
 podAnnotations: {}
 podLabels: {}

@@ -21,10 +21,11 @@ locals {
       pullPolicy = "IfNotPresent"
     }
 
-    port     = var.container_port
-    replicas = var.replicas
-    env      = var.extra_env
-    userKey  = var.user_key
+    port        = var.container_port
+    replicas    = var.replicas
+    isAuthProxy = var.is_auth_proxy
+    env         = var.extra_env
+    userKey     = var.user_key
 
     authProxy = {
       # The auth service itself doesn't need injection; everyone else does.

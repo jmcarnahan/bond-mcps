@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "mcp-service.fullname" . }}-test-connection
+  labels:
+    {{- include "mcp-service.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: curlimages/curl:8.10.1
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          URL="http://{{ include "mcp-service.fullname" . }}:{{ .Values.port }}{{- if eq .Values.probes.readiness.type "http" -}}{{ .Values.probes.readiness.path }}{{- else -}}/healthz{{- end -}}"
+          echo "Probing $URL ..."
+          {{- if eq .Values.probes.readiness.type "http" }}
+          # HTTP probe: expect 200.
+          curl -fsS --max-time 10 "$URL"
+          {{- else }}
+          # TCP probe: just confirm the port accepts a connection.
+          curl -fsS --max-time 10 -o /dev/null --resolve "{{ include "mcp-service.fullname" . }}:{{ .Values.port }}:127.0.0.1" "$URL" || \
+            curl -fsS --max-time 10 -o /dev/null "$URL"
+          {{- end }}
+          echo "OK"

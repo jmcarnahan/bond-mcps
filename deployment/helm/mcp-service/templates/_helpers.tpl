@@ -1,4 +1,17 @@
 {{/*
+Hard-fail install/upgrade when the auth proxy is asked to run with more
+than one replica. The proxy holds 5-min in-memory pending state; a second
+replica would route OAuth callbacks to the wrong pod. Called from
+deployment.yaml so the check actually executes (module-level code in
+_*.tpl partials is not evaluated by Helm).
+*/}}
+{{- define "mcp-service.validateAuthProxyReplicas" -}}
+{{- if and .Values.isAuthProxy (gt (int .Values.replicas) 1) -}}
+{{- fail "isAuthProxy services must have replicas: 1 — auth/proxy_server.py keeps pending OAuth state in-memory. Move PendingAuth into the DB (plan section J) before scaling. Override only after that lands." -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Expand the name of the chart (overridable via nameOverride).
 */}}
 {{- define "mcp-service.name" -}}
