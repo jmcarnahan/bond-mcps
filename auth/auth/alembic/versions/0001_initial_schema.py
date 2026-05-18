@@ -24,12 +24,18 @@ def upgrade() -> None:
         sa.Column("access_token_encrypted", sa.LargeBinary(), nullable=False),
         sa.Column("refresh_token_encrypted", sa.LargeBinary(), nullable=True),
         sa.Column("refresh_token_key_version", sa.Integer(), nullable=True),
-        sa.Column("expires_at", sa.DateTime(), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("scopes", sa.String(), nullable=True),
         sa.Column("extra_metadata", sa.JSON(), nullable=False),
         sa.Column("key_version", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.PrimaryKeyConstraint("user_key", "provider"),
     )
     op.create_table(
@@ -37,8 +43,14 @@ def upgrade() -> None:
         sa.Column("user_key", sa.String(), nullable=False),
         sa.Column("cache_data_encrypted", sa.LargeBinary(), nullable=False),
         sa.Column("key_version", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.PrimaryKeyConstraint("user_key"),
     )
 

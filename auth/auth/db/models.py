@@ -6,6 +6,10 @@ getpass.getuser().
 
 LargeBinary columns hold raw `nonce || ciphertext`. Encryption is done in
 the repository layer; the model is unaware of encryption semantics.
+
+All DateTime columns use ``timezone=True`` so timestamps are unambiguous
+across SQLite (which stores them as TEXT in UTC) and Postgres (which uses
+TIMESTAMP WITH TIME ZONE — no implicit server-TZ conversion).
 """
 
 from sqlalchemy import (
@@ -30,13 +34,13 @@ class ProviderToken(Base):
     access_token_encrypted = Column(LargeBinary, nullable=False)
     refresh_token_encrypted = Column(LargeBinary, nullable=True)
     refresh_token_key_version = Column(Integer, nullable=True)
-    expires_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
     scopes = Column(String, nullable=True)
     extra_metadata = Column(JSON, nullable=False, default=dict)
     key_version = Column(Integer, nullable=False, default=1)
-    created_at = Column(DateTime, default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(
-        DateTime, default=func.now(), onupdate=func.now(), nullable=False
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
     def __repr__(self) -> str:
@@ -52,9 +56,9 @@ class MsalTokenCache(Base):
     user_key = Column(String, primary_key=True)
     cache_data_encrypted = Column(LargeBinary, nullable=False)
     key_version = Column(Integer, nullable=False, default=1)
-    created_at = Column(DateTime, default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(
-        DateTime, default=func.now(), onupdate=func.now(), nullable=False
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
     def __repr__(self) -> str:

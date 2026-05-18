@@ -37,9 +37,45 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+# Markers used to recognise a real dev checkout. If none of these is present
+# at the resolved repo_root, the auth package was likely installed (wheel,
+# editable into another project, etc.) and the default DB path is meaningless.
+_DEV_CHECKOUT_MARKERS = ("Makefile", "pyproject.toml")
+
+
+def _is_dev_checkout(root: Path) -> bool:
+    return any((root / m).exists() for m in _DEV_CHECKOUT_MARKERS)
+
+
+class DeploymentConfigError(RuntimeError):
+    """Raised when BOND_MCPS_DB_URL is unset and there is no sensible default.
+
+    This catches the deployment failure mode where the auth package is
+    installed into a container or serverless runtime (e.g., Lambda
+    /var/runtime/site-packages/auth/) and ``_repo_root()`` resolves to
+    somewhere inside the Python install instead of an actual bond-mcps
+    checkout — silently writing a SQLite file into site-packages would
+    be a confusing way to fail.
+    """
+
+
 def default_db_url() -> str:
-    db_path = _repo_root() / "tokens.db"
-    return f"sqlite:///{db_path}"
+    """Return the default SQLite URL for a dev checkout.
+
+    Raises DeploymentConfigError if the auth package isn't running from a
+    dev checkout (no Makefile / pyproject.toml at the resolved repo root).
+    For deployed setups, set BOND_MCPS_DB_URL explicitly.
+    """
+    root = _repo_root()
+    if not _is_dev_checkout(root):
+        raise DeploymentConfigError(
+            f"BOND_MCPS_DB_URL is unset and the default SQLite path "
+            f"({root / 'tokens.db'}) does not appear to be inside a "
+            f"bond-mcps dev checkout. Set BOND_MCPS_DB_URL explicitly — "
+            f"for AWS deployments, use a postgresql:// URL pointing at "
+            f"your Aurora cluster with sslmode=verify-full."
+        )
+    return f"sqlite:///{root / 'tokens.db'}"
 
 
 def validate_db_url(url: str) -> None:
@@ -96,7 +132,9 @@ def _make_engine(url: str) -> Engine:
             try:
                 # busy_timeout must be set FIRST so subsequent statements
                 # wait for the lock instead of failing immediately.
-                cursor.execute("PRAGMA busy_timeout=5000")
+                # 30s is sized for the MSAL silent-acquire path which holds
+                # the SQLite write lock during a Microsoft network call.
+                cursor.execute("PRAGMA busy_timeout=30000")
                 # WAL mode is persistent. Only switch if not already WAL,
                 # to avoid an EXCLUSIVE-lock race when N processes connect
                 # to a brand-new DB simultaneously.
@@ -126,7 +164,9 @@ def _make_engine(url: str) -> Engine:
                     logger.warning("Could not chmod %s to 0600: %s", path, e)
         return engine
 
-    # Non-SQLite (Postgres / Aurora)
+    # Non-SQLite (Postgres / Aurora). connect_timeout bounds the wait on a
+    # cold Aurora Serverless v2 cluster wake; without it psycopg waits
+    # forever and container health checks time out into a restart loop.
     return create_engine(
         url,
         echo=False,
@@ -134,6 +174,7 @@ def _make_engine(url: str) -> Engine:
         max_overflow=5,
         pool_pre_ping=True,
         pool_recycle=3600,
+        connect_args={"connect_timeout": 30},
         future=True,
     )
 

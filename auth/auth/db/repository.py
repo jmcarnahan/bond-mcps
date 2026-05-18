@@ -19,7 +19,9 @@ import os
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from auth import encryption
@@ -62,10 +64,18 @@ class TokenRepository:
         self._resolver = resolver or _default_resolver()
 
     @contextmanager
-    def _session(self, *, lock_for_write: bool = False) -> Iterator[Session]:
+    def _session(self, *, begin_immediate_on_sqlite: bool = False) -> Iterator[Session]:
+        """Open a session with optional SQLite write-lock promotion.
+
+        Note: ``begin_immediate_on_sqlite`` only affects SQLite. On Postgres
+        a transaction begin without explicit locking is non-blocking; for
+        concurrency safety on Postgres, callers either use the dialect-aware
+        upsert helpers (save_token / save_msal_cache) or take an explicit
+        row lock via ``locked_token`` / ``locked_msal_cache``.
+        """
         session = self._session_factory()
         try:
-            if lock_for_write:
+            if begin_immediate_on_sqlite:
                 self._begin_immediate(session)
             yield session
             session.commit()
@@ -77,16 +87,31 @@ class TokenRepository:
 
     @staticmethod
     def _begin_immediate(session: Session) -> None:
-        """Promote the implicit transaction to a write lock when possible.
+        """SQLite-only: promote the implicit transaction to a write lock.
 
-        SQLite: BEGIN IMMEDIATE acquires RESERVED, serializing concurrent
-        writers and preventing two refreshers from racing on the same row.
-        Postgres: no-op here; per-row locking happens via SELECT...FOR UPDATE
-        inside the body of the locked operation.
+        Acquires RESERVED, serializing concurrent writers. No-op on Postgres.
         """
         bind = session.get_bind()
         if bind.dialect.name == "sqlite":
             session.execute(text("BEGIN IMMEDIATE"))
+
+    @staticmethod
+    def _dialect_insert(session: Session, table_cls):
+        """Return a dialect-aware INSERT statement supporting ON CONFLICT.
+
+        Both SQLite (3.24+) and Postgres support INSERT ... ON CONFLICT DO
+        UPDATE. The two dialects' SQLAlchemy modules expose this differently,
+        so we pick the right one per dialect.
+        """
+        name = session.get_bind().dialect.name
+        if name == "sqlite":
+            return sqlite_insert(table_cls)
+        if name in ("postgresql", "postgres"):
+            return pg_insert(table_cls)
+        raise NotImplementedError(
+            f"Upsert is not implemented for dialect: {name}. "
+            "Supported dialects: sqlite, postgresql."
+        )
 
     # ---- ProviderToken CRUD --------------------------------------------------
 
@@ -103,52 +128,96 @@ class TokenRepository:
             return self._decode_row(row)
 
     def save_token(self, user_key: str, provider: str, data: dict) -> None:
-        """Upsert a token row. `data` matches the historical dict shape."""
+        """Upsert a token row using dialect-aware ON CONFLICT DO UPDATE.
+
+        Concurrency-safe on both SQLite (atomic INSERT-or-REPLACE under the
+        IMMEDIATE write lock) and Postgres (atomic INSERT ... ON CONFLICT
+        DO UPDATE — no IntegrityError race).
+        """
         access_token = data.get("access_token")
         if not access_token:
             raise ValueError("save_token requires 'access_token' in data")
 
-        access_pt = _to_bytes(access_token)
+        values = self._encode_provider_token_values(user_key, provider, data)
+        with self._session(begin_immediate_on_sqlite=True) as s:
+            self._upsert_provider_token(s, user_key, provider, values)
+
+    def clear_token(self, user_key: str, provider: str) -> None:
+        """Delete the token row if it exists. Idempotent under concurrency
+        (a concurrent DELETE either races and finds the row, or finds it
+        already gone — both return successfully)."""
+        with self._session(begin_immediate_on_sqlite=True) as s:
+            row = s.get(ProviderToken, (user_key, provider))
+            if row is not None:
+                s.delete(row)
+
+    def _encode_provider_token_values(
+        self, user_key: str, provider: str, data: dict
+    ) -> dict:
+        """Encrypt and shape a token-data dict into column values for upsert."""
         access_blob, key_version = encryption.encrypt(
-            access_pt,
+            _to_bytes(data["access_token"]),
             user_key=user_key,
             provider=provider,
             field="access_token",
             resolver=self._resolver,
         )
-
-        refresh_token = data.get("refresh_token")
         refresh_blob, refresh_version = encryption.encrypt_optional(
-            _to_bytes_or_none(refresh_token),
+            _to_bytes_or_none(data.get("refresh_token")),
             user_key=user_key,
             provider=provider,
             field="refresh_token",
             resolver=self._resolver,
         )
-
-        expires_at = _coerce_expires_at(data.get("expires_at"))
         scopes = data.get("scopes")
-        scopes_str = scopes if isinstance(scopes, str) or scopes is None else " ".join(scopes)
+        scopes_str = (
+            scopes if isinstance(scopes, str) or scopes is None else " ".join(scopes)
+        )
         extras = {k: v for k, v in data.items() if k not in _RESERVED_FIELDS}
+        return {
+            "access_token_encrypted": access_blob,
+            "refresh_token_encrypted": refresh_blob,
+            "refresh_token_key_version": refresh_version,
+            "expires_at": _coerce_expires_at(data.get("expires_at")),
+            "scopes": scopes_str,
+            "extra_metadata": extras,
+            "key_version": key_version,
+        }
 
-        with self._session(lock_for_write=True) as s:
-            row = s.get(ProviderToken, (user_key, provider))
-            if row is None:
-                row = ProviderToken(user_key=user_key, provider=provider)
-                s.add(row)
-            row.access_token_encrypted = access_blob
-            row.refresh_token_encrypted = refresh_blob
-            row.refresh_token_key_version = refresh_version
-            row.expires_at = expires_at
-            row.scopes = scopes_str
-            row.extra_metadata = extras
-            row.key_version = key_version
+    def _upsert_provider_token(
+        self, session: Session, user_key: str, provider: str, values: dict
+    ) -> None:
+        """Dialect-aware INSERT ... ON CONFLICT (user_key, provider) DO UPDATE.
 
-    def clear_token(self, user_key: str, provider: str) -> None:
-        with self._session(lock_for_write=True) as s:
-            row = s.get(ProviderToken, (user_key, provider))
-            if row is not None:
-                s.delete(row)
+        Sets updated_at via func.now() so the column reflects the upsert
+        time, since ORM ``onupdate`` only fires for ORM-style mutations.
+        """
+        stmt = self._dialect_insert(session, ProviderToken).values(
+            user_key=user_key, provider=provider, **values
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["user_key", "provider"],
+            set_={**values, "updated_at": func.now()},
+        )
+        session.execute(stmt)
+
+    def _upsert_msal_cache(
+        self, session: Session, user_key: str, cache_blob: bytes, key_version: int
+    ) -> None:
+        stmt = self._dialect_insert(session, MsalTokenCache).values(
+            user_key=user_key,
+            cache_data_encrypted=cache_blob,
+            key_version=key_version,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["user_key"],
+            set_={
+                "cache_data_encrypted": cache_blob,
+                "key_version": key_version,
+                "updated_at": func.now(),
+            },
+        )
+        session.execute(stmt)
 
     @contextmanager
     def locked_token(self, user_key: str, provider: str) -> Iterator["LockedToken"]:
@@ -198,6 +267,7 @@ class TokenRepository:
             ).decode("utf-8")
 
     def save_msal_cache(self, user_key: str, cache_json: str) -> None:
+        """Upsert the MSAL serialized cache blob for a user."""
         blob, version = encryption.encrypt(
             cache_json.encode("utf-8"),
             user_key=user_key,
@@ -205,16 +275,11 @@ class TokenRepository:
             field="cache_data",
             resolver=self._resolver,
         )
-        with self._session(lock_for_write=True) as s:
-            row = s.get(MsalTokenCache, user_key)
-            if row is None:
-                row = MsalTokenCache(user_key=user_key)
-                s.add(row)
-            row.cache_data_encrypted = blob
-            row.key_version = version
+        with self._session(begin_immediate_on_sqlite=True) as s:
+            self._upsert_msal_cache(s, user_key, blob, version)
 
     def clear_msal_cache(self, user_key: str) -> None:
-        with self._session(lock_for_write=True) as s:
+        with self._session(begin_immediate_on_sqlite=True) as s:
             row = s.get(MsalTokenCache, user_key)
             if row is not None:
                 s.delete(row)
@@ -335,43 +400,42 @@ class LockedToken:
         return time.time() >= (expires_at - buffer_seconds)
 
     def update(self, new_data: dict) -> None:
-        """Persist refreshed token data while still inside the lock."""
-        access_token = new_data.get("access_token")
-        if not access_token:
+        """Persist refreshed token data while still inside the lock.
+
+        Uses the same upsert helper as save_token so it's safe even on
+        Postgres if the row didn't exist at lock acquisition time (which
+        would defeat SELECT...FOR UPDATE — a non-existent row can't be
+        row-locked).
+        """
+        if not new_data.get("access_token"):
             raise ValueError("update() requires 'access_token' in new_data")
 
-        access_blob, key_version = encryption.encrypt(
-            _to_bytes(access_token),
-            user_key=self._user_key,
-            provider=self._provider,
-            field="access_token",
-            resolver=self._repo._resolver,
+        # Preserve extras from the prior row that the refresh response
+        # didn't supply (e.g., Atlassian cloud_id), but let new_data win
+        # for any keys it explicitly provides.
+        prior_extras = (
+            dict(self._row.extra_metadata or {}) if self._row is not None else {}
         )
-        refresh_blob, refresh_version = encryption.encrypt_optional(
-            _to_bytes_or_none(new_data.get("refresh_token")),
-            user_key=self._user_key,
-            provider=self._provider,
-            field="refresh_token",
-            resolver=self._repo._resolver,
-        )
-        expires_at = _coerce_expires_at(new_data.get("expires_at"))
-        scopes = new_data.get("scopes")
-        scopes_str = scopes if isinstance(scopes, str) or scopes is None else " ".join(scopes)
-        extras = {k: v for k, v in new_data.items() if k not in _RESERVED_FIELDS}
+        new_extras = {k: v for k, v in new_data.items() if k not in _RESERVED_FIELDS}
+        merged = {**new_data}  # don't mutate caller's dict
+        # Place merged extras back into the data dict for re-encoding.
+        for k, v in {**prior_extras, **new_extras}.items():
+            merged[k] = v
 
-        if self._row is None:
-            self._row = ProviderToken(user_key=self._user_key, provider=self._provider)
-            self._session.add(self._row)
-        self._row.access_token_encrypted = access_blob
-        self._row.refresh_token_encrypted = refresh_blob
-        self._row.refresh_token_key_version = refresh_version
-        self._row.expires_at = expires_at
-        self._row.scopes = scopes_str
-        # Preserve old extras keys not in new_data unless new_data overrides them
-        merged_extras = dict(self._row.extra_metadata or {})
-        merged_extras.update(extras)
-        self._row.extra_metadata = merged_extras
-        self._row.key_version = key_version
+        values = self._repo._encode_provider_token_values(
+            self._user_key, self._provider, merged
+        )
+        self._repo._upsert_provider_token(
+            self._session, self._user_key, self._provider, values
+        )
+        # The upsert bypasses the ORM, so the session's identity map still
+        # holds the stale snapshot of self._row. Expire it (if cached) and
+        # re-read from the DB so locked.data reflects the just-written row.
+        if self._row is not None:
+            self._session.expire(self._row)
+        self._row = self._session.get(
+            ProviderToken, (self._user_key, self._provider)
+        )
         self._data = self._repo._decode_row(self._row)
 
 
@@ -425,11 +489,9 @@ class LockedMsalCache:
             field="cache_data",
             resolver=self._repo._resolver,
         )
-        if self._row is None:
-            self._row = MsalTokenCache(user_key=self._user_key)
-            self._session.add(self._row)
-        self._row.cache_data_encrypted = blob_bytes
-        self._row.key_version = version
+        self._repo._upsert_msal_cache(
+            self._session, self._user_key, blob_bytes, version
+        )
 
 
 def _to_bytes(s: str | bytes) -> bytes:
@@ -445,24 +507,36 @@ def _to_bytes_or_none(s: str | bytes | None) -> bytes | None:
 
 
 def _coerce_expires_at(value) -> _dt.datetime | None:
-    """Accept a unix-epoch float, an ISO datetime string, or a datetime; return naive UTC datetime."""
+    """Accept a unix-epoch float, an ISO datetime string, or a datetime; return tz-aware UTC datetime.
+
+    All DB columns are TIMESTAMP WITH TIME ZONE, so we always write tz-aware
+    values. Naive inputs are interpreted as UTC.
+    """
     if value is None:
         return None
     if isinstance(value, _dt.datetime):
-        return value.astimezone(_dt.timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+        if value.tzinfo is None:
+            return value.replace(tzinfo=_dt.timezone.utc)
+        return value.astimezone(_dt.timezone.utc)
     if isinstance(value, (int, float)):
-        return _dt.datetime.fromtimestamp(float(value), tz=_dt.timezone.utc).replace(tzinfo=None)
+        return _dt.datetime.fromtimestamp(float(value), tz=_dt.timezone.utc)
     if isinstance(value, str):
         try:
             dt = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
-        return dt.astimezone(_dt.timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=_dt.timezone.utc)
+        return dt.astimezone(_dt.timezone.utc)
     return None
 
 
 def _to_epoch(dt: _dt.datetime) -> float:
-    """Convert a (possibly naive) UTC datetime back to a unix-epoch float."""
+    """Convert a datetime (tz-aware or naive) to a unix-epoch float.
+
+    Naive datetimes are interpreted as UTC for backward compatibility with
+    SQLite TEXT-stored timestamps that may come back naive on some drivers.
+    """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=_dt.timezone.utc)
     return dt.timestamp()

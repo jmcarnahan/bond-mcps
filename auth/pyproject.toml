@@ -12,6 +12,7 @@ cryptography = ">=43.0,<46.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"
+psycopg = {extras = ["binary"], version = "^3.3.4"}
 
 [tool.poetry.scripts]
 bond-mcps = "auth.cli:main"
