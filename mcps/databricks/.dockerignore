@@ -3,7 +3,6 @@
 *.pyc
 .pytest_cache/
 tests/
-deployment.legacy/
 *.egg-info/
 dist/
 build/
@@ -11,5 +10,3 @@ Dockerfile
 .dockerignore
 .env
 .env.*
-atlassian_cli.py
-README.md
