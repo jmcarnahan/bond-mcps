@@ -1,0 +1,18 @@
+{{ include "mcp-service.fullname" . }} installed.
+
+URL:           https://{{ .Values.ingress.host }}
+In-cluster:    {{ include "mcp-service.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.port }}
+Image:         {{ .Values.image.repository }}:{{ .Values.image.tag }}
+Replicas:      {{ .Values.replicas }}
+
+{{- if .Values.migrations.enabled }}
+
+Migrations:    Alembic runs as initContainer on every pod start. Check status with:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "mcp-service.fullname" . }} -c db-migrate
+{{- end }}
+
+If pods are pending, confirm Secrets Manager values are seeded:
+  aws secretsmanager get-secret-value --secret-id {{ .Values.secrets.encryptionKey.secretsManagerName }} --query SecretString --output text
+{{- if .Values.secrets.oauth.enabled }}
+  aws secretsmanager get-secret-value --secret-id {{ .Values.secrets.oauth.secretsManagerName }} --query SecretString --output text
+{{- end }}
