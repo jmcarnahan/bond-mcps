@@ -1,5 +1,9 @@
 # AWS Load Balancer Controller. Installed via the official chart.
-# IRSA role from iam.tf is attached via the SA annotation Helm renders.
+# IRSA role from iam.tf is attached via the SA annotation in chart values.
+#
+# Values are passed as a single yamlencode block rather than dozens of
+# `set` entries — avoids the dot-escape pitfall on annotation keys and
+# matches the pattern used in modules/service/main.tf.
 
 resource "helm_release" "alb_controller" {
   name       = "aws-load-balancer-controller"
@@ -11,22 +15,16 @@ resource "helm_release" "alb_controller" {
   wait    = true
   timeout = 600
 
-  set {
-    name  = "clusterName"
-    value = module.eks.cluster_name
-  }
-  set {
-    name  = "serviceAccount.create"
-    value = "true"
-  }
-  set {
-    name  = "serviceAccount.name"
-    value = "aws-load-balancer-controller"
-  }
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = module.alb_controller_irsa.iam_role_arn
-  }
+  values = [yamlencode({
+    clusterName = module.eks.cluster_name
+    serviceAccount = {
+      create = true
+      name   = "aws-load-balancer-controller"
+      annotations = {
+        "eks.amazonaws.com/role-arn" = module.alb_controller_irsa.iam_role_arn
+      }
+    }
+  })]
 
   depends_on = [
     module.eks,

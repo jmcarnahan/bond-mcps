@@ -1,6 +1,10 @@
 # External Secrets Operator + a single ClusterSecretStore pointing at AWS SM
 # in this account/region. The chart's ExternalSecret resources reference the
 # store by name ("bond-mcps-aws-sm") via .Values.externalSecrets.clusterSecretStoreName.
+#
+# Helm values are passed as a yamlencode block (same pattern as
+# modules/service/main.tf) so annotation keys with dots don't need
+# backslash-escaping.
 
 resource "helm_release" "external_secrets" {
   name       = "external-secrets"
@@ -12,22 +16,16 @@ resource "helm_release" "external_secrets" {
   wait    = true
   timeout = 600
 
-  set {
-    name  = "installCRDs"
-    value = "true"
-  }
-  set {
-    name  = "serviceAccount.create"
-    value = "true"
-  }
-  set {
-    name  = "serviceAccount.name"
-    value = "external-secrets"
-  }
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = module.external_secrets_irsa.iam_role_arn
-  }
+  values = [yamlencode({
+    installCRDs = true
+    serviceAccount = {
+      create = true
+      name   = "external-secrets"
+      annotations = {
+        "eks.amazonaws.com/role-arn" = module.external_secrets_irsa.iam_role_arn
+      }
+    }
+  })]
 
   depends_on = [
     kubernetes_namespace.external_secrets,
