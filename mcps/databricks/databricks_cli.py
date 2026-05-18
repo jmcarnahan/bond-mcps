@@ -22,6 +22,8 @@ Usage:
 """
 
 import argparse
+import csv
+import io
 import os
 import sys
 
@@ -47,6 +49,23 @@ def _print_auth_mode() -> AuthSource:
     return source
 
 
+def _format_table(header, rows) -> str:
+    """Pipe-delimited table, matching the MCP server's output format."""
+    buf = io.StringIO()
+    writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(header)
+    writer.writerows(rows)
+    return buf.getvalue().rstrip("\r\n")
+
+
+def _stringify(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
 def cmd_whoami(args):
     source = _print_auth_mode()
     if source is AuthSource.PAT:
@@ -64,11 +83,14 @@ def cmd_query(args):
     if not columns:
         print("(no result set)")
         return
-    print("  ".join(columns))
-    print("  ".join("-" * len(c) for c in columns))
-    for row in rows:
-        print("  ".join("" if v is None else str(v) for v in row))
-    print(f"\n({len(rows)} row(s))")
+    table = _format_table(
+        columns, [[_stringify(v) for v in row] for row in rows]
+    )
+    print(table)
+    suffix = ""
+    if result.get("truncated"):
+        suffix = " — truncated; refine with LIMIT"
+    print(f"\n({len(rows)} row(s){suffix})")
 
 
 def cmd_catalogs(args):

@@ -1,14 +1,26 @@
 """
 Databricks SQL client wrapper.
 
-Wraps databricks-sql-connector with a credentials_provider callback so token
-refresh is transparent — the connector calls back per HTTP request, and the
-callback re-resolves the token (cached/refreshed for OAuth, returned as-is
-for PAT or backend Bearer).
+The auth chain is split across an async/sync boundary on purpose:
 
-One connection per query is intentional: MCP usage is interactive, low-QPS,
-and pooling would re-introduce the token-expiry-vs-pool race that PAT-only
-code paths never had to worry about.
+  * `resolve_token_now()` runs SYNCHRONOUSLY in the FastMCP tool's call frame,
+    where the request's `Authorization: Bearer` header is reachable via the
+    contextvar `fastmcp.server.dependencies.get_http_headers`. This is the
+    only safe place to read the request-scoped token.
+
+  * `run_query(..., token=...)` (and the other tool-backed helpers) take the
+    pre-resolved token and pass it to `sql.connect(access_token=token)`. They
+    can be safely called from a worker thread (`asyncio.to_thread`) without
+    losing the bearer context.
+
+Telemetry is disabled (`enable_telemetry=False`) so the connector does not
+spawn a background daemon thread that would call our auth path with no
+request context — that path would either fail silently or attribute telemetry
+to whatever PAT/OAuth happens to be set on the server process, leaking
+identity in a multi-tenant Bond-AI deployment.
+
+A 5-minute socket timeout caps runaway queries instead of blocking the MCP
+indefinitely.
 """
 
 import logging
@@ -16,12 +28,22 @@ import os
 from typing import Any
 
 from databricks import sql
-from databricks.sql.exc import Error as DatabricksSQLError
+from databricks.sql import exc as dbexc
 
 from dbx.auth import AuthSource, get_auth_source, get_databricks_token
 from dbx.local_auth import host_without_scheme
 
 logger = logging.getLogger(__name__)
+
+# Hard cap on rows pulled from the warehouse per call. Protects the MCP from
+# OOM on `SELECT * FROM <huge>` while still leaving headroom for ad-hoc admin
+# queries. Display formatting in databricks_mcp._format_result caps to a
+# smaller preview number.
+_MAX_FETCH_ROWS = 5000
+
+# Per-call socket timeout (seconds). Long enough for warehouse cold-starts
+# (~30-60s) plus modest analytical queries; short enough to avoid hangs.
+_SOCKET_TIMEOUT_S = 300
 
 
 class DatabricksError(Exception):
@@ -48,61 +70,106 @@ def _require_env() -> tuple[str, str]:
     return host, http_path
 
 
-def _credentials_provider():
-    """Build the header_factory callable expected by databricks-sql-connector.
+def resolve_token_now() -> tuple[str, AuthSource]:
+    """Resolve a Databricks token in the current call context.
 
-    The connector invokes the returned factory on every HTTP request, so
-    OAuth refresh happens transparently via TokenStore.
+    Call this from the async tool body BEFORE handing off to `asyncio.to_thread`
+    so the FastMCP request's Bearer header (if any) is captured.
     """
-
-    def header_factory():
-        token = get_databricks_token()
-        return {"Authorization": f"Bearer {token}"}
-
-    return header_factory
+    source = get_auth_source()
+    token = get_databricks_token()
+    return token, source
 
 
-def _connect():
+def _connect(token: str | None):
+    """Open a SQL connection.
+
+    If `token` is provided, it is used verbatim as the Bearer credential
+    (no callback, no refresh). If None, `get_databricks_token()` is called
+    once at connect time — only safe when running synchronously in a context
+    where FastMCP's request contextvar is alive.
+    """
     host, http_path = _require_env()
+    if token is None:
+        token = get_databricks_token()
     return sql.connect(
         server_hostname=host_without_scheme(host),
         http_path=http_path,
-        credentials_provider=_credentials_provider,
+        access_token=token,
         user_agent_entry="bond-ai-databricks-mcp",
+        enable_telemetry=False,
+        _socket_timeout=_SOCKET_TIMEOUT_S,
     )
 
 
 def _classify_error(exc: Exception) -> DatabricksError:
-    """Map low-level errors to friendly DatabricksError codes."""
+    """Map a connector / network exception to a DatabricksError with a
+    coarse error_code.
+
+    Auth markers (401/403/etc.) are checked across exception types because
+    the connector wraps HTTP errors inconsistently. "Unreachable" is reserved
+    for STRONG network signals only — transient server-side errors (e.g.
+    deadlocks wrapped as RequestError) are surfaced as SQLError so the user
+    sees the actual server message instead of a misleading "can't reach"
+    note.
+    """
     msg = str(exc)
     lower = msg.lower()
+
+    # 1. Connector's own SQL error types — server-side execution failures.
+    if isinstance(exc, (dbexc.ServerOperationError, dbexc.ProgrammingError)):
+        return DatabricksError(msg, error_code="SQLError")
+
+    # 2. Auth markers across all exception types. Connector wraps HTTP 401/403
+    # inside RequestError / OperationalError / etc., so type alone is unreliable.
     if "401" in msg or "unauthorized" in lower or "invalid_grant" in lower:
         return DatabricksError(msg, error_code="Unauthorized")
     if "403" in msg or "forbidden" in lower or "permission" in lower:
         return DatabricksError(msg, error_code="Forbidden")
-    if "could not resolve" in lower or "name or service not known" in lower \
-            or "connection refused" in lower:
+
+    # 3. Strong network signals only. RequestError without these markers is
+    # NOT automatically "unreachable" — the connector also surfaces transient
+    # backend errors (e.g. deadlocks) as RequestError.
+    network_markers = (
+        "could not resolve", "name or service not known", "connection refused",
+        "connection reset", "name resolution", "no route to host",
+        "network is unreachable",
+    )
+    if isinstance(exc, (ConnectionError, OSError)) \
+            or any(m in lower for m in network_markers):
         return DatabricksError(msg, error_code="Unreachable")
-    if isinstance(exc, DatabricksSQLError):
+
+    # 4. Anything from the connector hierarchy that didn't match above is a
+    # server-side issue worth surfacing verbatim (deadlocks, timeouts, retry
+    # exhaustion on a remote operation, etc.).
+    if isinstance(exc, dbexc.Error):
         return DatabricksError(msg, error_code="SQLError")
     return DatabricksError(msg, error_code="Unknown")
 
 
-def run_query(query: str) -> dict[str, Any]:
+def run_query(query: str, *, token: str | None = None) -> dict[str, Any]:
     """Execute a SQL query and return columns + rows.
 
+    Caps fetched rows at `_MAX_FETCH_ROWS`. Sets `truncated=True` when the
+    cursor still had more rows past the cap.
+
     Returns:
-        {"columns": [str, ...], "rows": [[val, ...], ...]}
+        {"columns": [str, ...], "rows": [[val, ...], ...], "truncated": bool}
     """
     try:
-        with _connect() as conn:
+        with _connect(token) as conn:
             with conn.cursor() as cur:
                 cur.execute(query)
-                rows = cur.fetchall()
+                # Pull one extra so we can detect-and-discard the (n+1)th row
+                # without doing a second round trip if we hit exactly cap.
+                fetched = cur.fetchmany(_MAX_FETCH_ROWS + 1)
+                truncated = len(fetched) > _MAX_FETCH_ROWS
+                rows = fetched[:_MAX_FETCH_ROWS]
                 columns = [d[0] for d in (cur.description or [])]
         return {
             "columns": columns,
             "rows": [list(r) for r in rows],
+            "truncated": truncated,
         }
     except DatabricksError:
         raise
@@ -110,23 +177,25 @@ def run_query(query: str) -> dict[str, Any]:
         raise _classify_error(exc) from exc
 
 
-def list_catalogs() -> list[str]:
-    result = run_query("SHOW CATALOGS")
+def list_catalogs(*, token: str | None = None) -> list[str]:
+    result = run_query("SHOW CATALOGS", token=token)
     return [row[0] for row in result["rows"]]
 
 
-def list_schemas(catalog: str) -> list[str]:
+def list_schemas(catalog: str, *, token: str | None = None) -> list[str]:
     catalog_quoted = _quote_identifier(catalog)
-    result = run_query(f"SHOW SCHEMAS IN {catalog_quoted}")
-    # SHOW SCHEMAS returns one column (databaseName / namespace)
+    result = run_query(f"SHOW SCHEMAS IN {catalog_quoted}", token=token)
     return [row[0] for row in result["rows"]]
 
 
-def list_tables(catalog: str, schema: str) -> list[dict[str, str]]:
+def list_tables(
+    catalog: str, schema: str, *, token: str | None = None
+) -> list[dict[str, str]]:
     catalog_quoted = _quote_identifier(catalog)
     schema_quoted = _quote_identifier(schema)
-    result = run_query(f"SHOW TABLES IN {catalog_quoted}.{schema_quoted}")
-    # SHOW TABLES columns: database, tableName, isTemporary
+    result = run_query(
+        f"SHOW TABLES IN {catalog_quoted}.{schema_quoted}", token=token
+    )
     out = []
     for row in result["rows"]:
         out.append({
