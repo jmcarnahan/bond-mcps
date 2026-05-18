@@ -11,20 +11,21 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
+      # Pinned to a specific patch tag for reproducibility. Bump
+      # intentionally on CVE fix releases; the major-only `:8` tag
+      # drifts and would make `helm test` non-deterministic.
       image: curlimages/curl:8.10.1
       command:
         - sh
         - -c
         - |
           set -e
-          URL="http://{{ include "mcp-service.fullname" . }}:{{ .Values.port }}{{- if eq .Values.probes.readiness.type "http" -}}{{ .Values.probes.readiness.path }}{{- else -}}/healthz{{- end -}}"
-          echo "Probing $URL ..."
-          {{- if eq .Values.probes.readiness.type "http" }}
-          # HTTP probe: expect 200.
-          curl -fsS --max-time 10 "$URL"
-          {{- else }}
-          # TCP probe: just confirm the port accepts a connection.
-          curl -fsS --max-time 10 -o /dev/null --resolve "{{ include "mcp-service.fullname" . }}:{{ .Values.port }}:127.0.0.1" "$URL" || \
-            curl -fsS --max-time 10 -o /dev/null "$URL"
-          {{- end }}
+          # In-cluster DNS resolves the service name to its ClusterIP, so
+          # plain curl works. The probe path follows the chart's readiness
+          # config — every service exposes either /health (auth) or
+          # /healthz (MCPs) at .Values.probes.readiness.path.
+          URL="http://{{ include "mcp-service.fullname" . }}:{{ .Values.port }}{{ .Values.probes.readiness.path }}"
+          echo "Probing $URL"
+          curl -fsS --max-time 30 "$URL"
+          echo
           echo "OK"

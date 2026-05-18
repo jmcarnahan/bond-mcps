@@ -1,4 +1,7 @@
 {{- if .Values.networkPolicy.enabled -}}
+{{- if not .Values.networkPolicy.vpcCidr -}}
+{{- fail "networkPolicy.enabled = true but networkPolicy.vpcCidr is unset. ALB target-type=ip sends traffic from ALB ENIs in the VPC's subnets to pod IPs; without a CIDR-based allow rule, the policy will drop ALB health checks AND data-plane traffic. Pass vpcCidr from Terraform (data.aws_vpc.existing.cidr_block via modules/service/main.tf)." -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -13,27 +16,30 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow inbound from the ALB controller's pods (data plane reaches
-    # service pods via Pod IPs since target-type: ip).
+    # Allow inbound from anywhere in the VPC CIDR on the service port.
+    # This covers two real sources:
+    #   - ALB → pod: ALB ENIs sit in the VPC's public subnets (when
+    #     scheme=internet-facing) or private subnets (internal). With
+    #     target-type=ip, the ALB sends traffic from its ENI's IP
+    #     directly to the pod IP. Source IP is in the VPC CIDR.
+    #   - Pod → pod: MCPs poll the auth proxy at its in-cluster Service
+    #     DNS. Source IP is the calling pod's IP, also in the VPC CIDR
+    #     (or in the CNI's pod CIDR, which for the default AWS VPC CNI
+    #     is the VPC CIDR).
+    # An ipBlock allow is correct at L4 — podSelector wouldn't catch ALB
+    # traffic since there's no "ALB pod" in the data path.
     - from:
-        - podSelector:
-            {{- toYaml .Values.networkPolicy.albControllerSelector | nindent 12 }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.port }}
-    # Allow inbound from sibling bond-mcps pods (MCPs poll the auth proxy).
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/part-of: bond-mcps
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.vpcCidr | quote }}
       ports:
         - protocol: TCP
           port: {{ .Values.port }}
   egress:
-    # Egress is intentionally open: pods need DNS, Aurora, AWS APIs
-    # (SM, STS), the auth proxy's in-cluster DNS, and provider OAuth
-    # endpoints. NetworkPolicy at L4 can't gracefully express
-    # "everything except known-bad", so we deny-ingress + allow-egress
-    # rather than fight a moving target.
+    # Egress is intentionally open. L4 NetworkPolicy can't gracefully
+    # express the actual policy we want (DNS + Aurora + AWS APIs + the
+    # auth proxy + provider OAuth endpoints), and tightening it without
+    # the full destination list creates fragile breakage. Egress is
+    # restricted instead via AWS Security Groups (aurora SG ingress from
+    # node SG) and IAM (IRSA roles scoped to specific SM secrets).
     - {}
 {{- end -}}

@@ -28,6 +28,7 @@ from typing import Sequence
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -68,7 +69,6 @@ mcp = FastMCP("Atlassian MCP Server", lifespan=_lifespan)
 # `bond-mcps doctor`. Used by k8s probes + the ALB target-group healthcheck.
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request):
-    from starlette.responses import JSONResponse
     return JSONResponse({"status": "ok"})
 
 

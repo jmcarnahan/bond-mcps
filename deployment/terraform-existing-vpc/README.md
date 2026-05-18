@@ -16,7 +16,15 @@ push.
   target region
 - **Terraform >= 1.5** (1.5.7 verified)
 - **AWS CLI v2** — used by the kubernetes/helm/kubectl providers' exec auth,
-  and for `aws secretsmanager put-secret-value`
+  by `aws secretsmanager put-secret-value`, and by the plan-time seed checks
+  in `eks-validate.tf` + the ALB-discovery polling in `eks-domain.tf`
+- **IAM permissions for the apply principal** beyond plain EKS+RDS+ECR+SM:
+  - `secretsmanager:GetSecretValue` on `bond-mcps-${env}-*` (for the
+    `data.external` placeholder checks in `eks-validate.tf`)
+  - `tag:GetResources` (for the resource-groups-tagging-api lookup that
+    discovers the shared ALB after first apply)
+  - Standard EKS module permissions: see [terraform-aws-modules/eks
+    minimum IAM policy](https://github.com/terraform-aws-modules/terraform-aws-eks#permissions)
 - **An existing VPC** with at least 2 private subnets in different AZs
 - **A Route53 hosted zone** owning `var.base_domain`
 - **Each MCP's OAuth app pre-registered** with its provider — callback URL
@@ -224,18 +232,21 @@ See `outputs.tf` for the full list. Highlights:
 The Postgres token DB sits behind Aurora Serverless v2. Connection caps
 scale roughly linearly with ACU:
 
-| ACU | ~max connections | Use |
-|---|---|---|
-| 0.5 | 56 | dev only — set explicitly in `environments/dev.tfvars` |
-| 1.0 | 113 | **default** — comfortable for all current services |
-| 2.0 | 226 | auto-scaled ceiling during bursts |
+Aurora Postgres' default `max_connections` is computed from instance
+memory (~`DBInstanceClassMemory / 9.5 MiB`). For Serverless v2:
 
-App-side pool sizing (`auth/db/session.py`):
+| ACU | Memory  | ~max connections | Use |
+|-----|---------|------------------|---|
+| 0.5 | ~1 GiB  | ~100             | dev only — set explicitly in `environments/dev.tfvars` |
+| 1.0 | ~2 GiB  | ~225             | **default** — comfortable for all current services |
+| 2.0 | ~4 GiB  | ~450             | auto-scaled ceiling during bursts |
+
+App-side pool sizing (`auth/auth/db/session.py`):
 - `pool_size = 3` + `max_overflow = 2` → 5 conns max per process
 - 4 MCPs × 2 replicas + auth × 1 = 9 worker processes
 - Peak: 9 × 5 = 45 connections
 
-The 1.0 ACU default leaves >2× headroom for preflight Jobs, ad-hoc
+The 1.0 ACU default leaves ~5× headroom for preflight Jobs, ad-hoc
 operator queries, and burst load before auto-scaling kicks in (cold
 scale-up takes ~30s, so a higher floor matters for spikes).
 
@@ -275,8 +286,20 @@ negligible. For high-volume tool traffic, monitor:
   `pkt-dst-aws-zone != pkt-src-aws-zone`
 - Cost Explorer "Region" filter for `Data Transfer-Regional Bytes`
 
-Pin the auth proxy to one AZ via `nodeSelector` if costs grow material —
-the chart's `nodeSelector` value is already wired.
+Pin the auth proxy to one AZ via `nodeSelector` if costs grow material.
+The chart's `nodeSelector` value is wired through; set it in tfvars by
+adding to the service's `extra_env` (no — wrong place; use chart values
+through future tfvars knob). For now, post-apply patch:
+
+```bash
+kubectl -n bond-mcps patch deploy/auth --type=strategic -p '{
+  "spec":{"template":{"spec":{"nodeSelector":{
+    "topology.kubernetes.io/zone": "us-west-2a"
+  }}}}
+}'
+```
+
+Or upgrade the chart with `--set nodeSelector."topology\\.kubernetes\\.io/zone"=us-west-2a`.
 
 ## Known limitations (v1)
 

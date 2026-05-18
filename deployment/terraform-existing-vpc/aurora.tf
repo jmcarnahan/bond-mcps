@@ -57,6 +57,10 @@ resource "aws_rds_cluster" "bond_mcps" {
   # the value gets baked in at create and re-used on destroy. A re-created
   # cluster gets a new timestamp, so destroy → recreate → destroy doesn't
   # collide on the snapshot name.
+  #
+  # UX caveat: between successive `terraform plan` runs (before any apply),
+  # the proposed identifier shifts as timestamp() advances. After first
+  # apply, ignore_changes filters the diff and the stored value is stable.
   final_snapshot_identifier = var.aurora_deletion_protection ? "${local.name_prefix}-aurora-final-${formatdate("YYYYMMDDhhmmss", timestamp())}" : null
 
   serverlessv2_scaling_configuration {
