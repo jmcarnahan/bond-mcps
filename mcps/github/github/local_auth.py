@@ -55,8 +55,8 @@ def get_local_token() -> str:
         )
     client_secret = os.environ.get("GITHUB_CLIENT_SECRET", "")
 
-    from auth import TokenStore
-    store = TokenStore("github")
+    from auth import TokenStore, resolve_user_key_for_request
+    store = TokenStore("github", user_key=resolve_user_key_for_request())
 
     # 1. Try cached token
     cached = store.get_token()

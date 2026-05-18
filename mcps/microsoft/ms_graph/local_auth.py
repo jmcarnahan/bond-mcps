@@ -65,9 +65,16 @@ def _get_repo():
 
 
 def _user_key() -> str:
-    from auth.token_store import current_user_key
+    """Resolve the user_key for the current MSAL operation.
 
-    return current_user_key()
+    Inside an HTTP request, this honours the per-request identity JWT when
+    BOND_MCPS_JWT_PUBLIC_KEY is set (multi-tenant mode). Outside a request
+    context (CLIs, tests) it falls back to the env-based user_key — the
+    resolver handles both transparently.
+    """
+    from auth.token_store import resolve_user_key_for_request
+
+    return resolve_user_key_for_request()
 
 
 def _load_token_cache() -> msal.SerializableTokenCache:
