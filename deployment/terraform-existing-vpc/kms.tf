@@ -36,6 +36,13 @@ resource "aws_kms_key" "eks" {
   deletion_window_in_days = 30
   enable_key_rotation     = true
   tags                    = { Name = "${local.name_prefix}-eks" }
+
+  # Implicit gate: module.eks references this key in encryption_config, so
+  # making the key wait on terraform_data.deploy_invariants makes the whole
+  # cluster wait. We can't put depends_on directly on module.eks because
+  # module depends_on cascades into the EKS module's submodule count{}
+  # logic and breaks plan evaluation.
+  depends_on = [terraform_data.deploy_invariants]
 }
 
 resource "aws_kms_alias" "eks" {

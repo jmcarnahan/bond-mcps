@@ -1,9 +1,14 @@
 {{/*
 Hard-fail install/upgrade when the auth proxy is asked to run with more
 than one replica. The proxy holds 5-min in-memory pending state; a second
-replica would route OAuth callbacks to the wrong pod. Called from
-deployment.yaml so the check actually executes (module-level code in
-_*.tpl partials is not evaluated by Helm).
+replica would route OAuth callbacks to the wrong pod.
+
+ACTIVATION: this define is only effective because deployment.yaml does
+    {{ include "mcp-service.validateAuthProxyReplicas" . }}
+at its top. Module-level template code in _*.tpl partials is NOT
+evaluated by Helm — only `define` blocks invoked via `include`. If
+deployment.yaml is ever removed or the include line is dropped, this
+guard silently stops firing. Keep both ends wired together.
 */}}
 {{- define "mcp-service.validateAuthProxyReplicas" -}}
 {{- if and .Values.isAuthProxy (gt (int .Values.replicas) 1) -}}

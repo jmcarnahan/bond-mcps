@@ -101,8 +101,8 @@
     "networkPolicy": {
       "type": "object",
       "properties": {
-        "enabled":               { "type": "boolean" },
-        "albControllerSelector": { "type": "object" }
+        "enabled": { "type": "boolean" },
+        "vpcCidr": { "type": "string" }
       }
     }
   },

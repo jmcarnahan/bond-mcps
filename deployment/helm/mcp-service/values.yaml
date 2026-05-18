@@ -175,18 +175,20 @@ pdb:
   minAvailable: 1
 
 # === NetworkPolicy ===
-# When enabled, the chart adds a default-deny-ingress NetworkPolicy plus
-# explicit allows for the ALB controller's selector. Egress is left open
-# (DNS, Aurora, AWS APIs are all needed). Off by default to avoid
-# surprising operators on first install; flip to true once you've
-# verified pod-to-pod traffic patterns.
+# When enabled, the chart adds a default-deny-ingress NetworkPolicy that
+# permits inbound TCP on .Values.port from the entire VPC CIDR — that
+# covers both ALB → pod traffic (ALB ENIs live in public VPC subnets)
+# and intra-cluster pod-to-pod traffic (MCPs polling the auth proxy).
+# Egress is left open: pods need DNS, Aurora, AWS APIs, and provider
+# OAuth endpoints; tightening at L4 is brittle, so we rely on Security
+# Groups + IAM for egress restrictions instead.
+#
+# Off by default. Enabling requires vpcCidr be set (Terraform passes
+# data.aws_vpc.existing.cidr_block via modules/service); the template
+# fails fast if you enable the policy without it.
 networkPolicy:
   enabled: false
-  # Selector for the ALB controller's pods. Default matches the upstream
-  # chart's labels; adjust if you customized the install.
-  albControllerSelector:
-    matchLabels:
-      app.kubernetes.io/name: aws-load-balancer-controller
+  vpcCidr: ""
 
 podAnnotations: {}
 podLabels: {}

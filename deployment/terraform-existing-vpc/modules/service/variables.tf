@@ -14,6 +14,16 @@ variable "ingress_scheme" {
   description = "ALB scheme — internet-facing or internal."
 }
 
+variable "vpc_cidr" {
+  type        = string
+  description = <<-EOT
+    CIDR block of the VPC the cluster runs in. Used by the chart's
+    NetworkPolicy (when enabled) to allow ALB → pod traffic. ALB ENIs
+    live in the VPC's public subnets, so allowing the VPC CIDR covers
+    both ALB ingress and intra-cluster pod-to-pod traffic.
+  EOT
+}
+
 variable "namespace" {
   type        = string
   description = "k8s namespace to install into (typically bond-mcps)."

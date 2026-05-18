@@ -65,6 +65,13 @@ locals {
       subClaim           = var.jwt_sub_claim
     }
 
+    networkPolicy = {
+      # Off by default; flip to true in production tfvars + ensure vpcCidr
+      # is set so ALB → pod traffic is permitted.
+      enabled = false
+      vpcCidr = var.vpc_cidr
+    }
+
     serviceAccount = {
       create      = true
       annotations = {}

@@ -6,6 +6,12 @@ module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 21.0"
 
+  # The deploy-invariants gate is wired via aws_kms_key.eks (kms.tf) — module
+  # depends_on cascades deferral into count{} inside the EKS module's
+  # submodules and breaks plan. Doing it on the kms key (which module.eks
+  # references in encryption_config) gates the cluster equivalently without
+  # the cascade.
+
   name               = "${local.name_prefix}-eks"
   kubernetes_version = var.eks_kubernetes_version
 

@@ -2,12 +2,13 @@
 # Deploy-time invariants (env-correlated safety checks)
 # -----------------------------------------------------------------------------
 #
-# Two preconditions enforced before any resource that depends on this terraform_data:
+# Two preconditions evaluated at plan time:
 #   1. Non-dev environments + internet-facing ingress must have JWT enabled.
 #   2. Non-dev environments cannot leave EKS public API endpoint open to 0.0.0.0/0.
 #
 # Dev environments are exempt to keep iteration speed (open by default, no JWT).
-# Tighten by overriding var.environment to non-"dev" in the relevant tfvars.
+# Wire this resource into module.eks via depends_on (see eks.tf) so even a
+# phased `terraform apply -target=module.eks` runs the check first.
 
 resource "terraform_data" "deploy_invariants" {
   lifecycle {
@@ -42,45 +43,72 @@ resource "terraform_data" "deploy_invariants" {
   }
 }
 
-# Pre-deploy guardrails.
+# -----------------------------------------------------------------------------
+# Secret-seeding guards
+# -----------------------------------------------------------------------------
 #
-# Each `terraform_data` block reads the current SM secret value at plan time
-# and asserts (via lifecycle.precondition) that it isn't the placeholder.
-# This means `terraform plan` itself fails with a clear message — no
-# local-exec, no per-apply AWS CLI shell-out, no path.cwd fragility.
+# We probe each guarded SM secret via `data.external`, which shells out to the
+# AWS CLI and returns just a small JSON status object — never the secret
+# material itself. That keeps the secret value out of terraform.tfstate, which
+# the previous `data.aws_secretsmanager_secret_version` approach didn't.
 #
-# Two guards:
-#   - encryption-key: always required
-#   - JWT public key:  only when var.jwt_verification.enabled = true
+# Status states:
+#   missing     — secret has no version yet (first deploy, before the shell
+#                 `aws_secretsmanager_secret_version` resource is applied)
+#   placeholder — value still contains the literal "REPLACE_ME" / "REPLACE_WITH_PEM"
+#   seeded      — operator has put-secret-value'd a real value
 #
-# Both feed into module.service.depends_on so workloads never roll out with
-# placeholder secret material that would crash the preflight initContainer.
+# `depends_on` defers the read until the secret_version exists in AWS;
+# the precondition then fires at apply time and fails loudly if not seeded.
+# Operators wire the result through services.tf depends_on (existing) so
+# workloads never roll out with placeholder material.
 
 # -----------------------------------------------------------------------------
 # Encryption key
 # -----------------------------------------------------------------------------
 
-data "aws_secretsmanager_secret_version" "encryption_key_current" {
-  secret_id = aws_secretsmanager_secret.encryption_key.id
+data "external" "encryption_key_check" {
+  program = ["bash", "-c", <<-EOT
+    set -euo pipefail
 
-  # Wait until our placeholder version exists so the lookup doesn't 404 on
-  # very first apply. lifecycle.ignore_changes on the version means TF
-  # won't churn after the operator seeds the real value.
+    aws_rc=0
+    val=$(aws secretsmanager get-secret-value \
+      --secret-id ${aws_secretsmanager_secret.encryption_key.name} \
+      --region ${var.aws_region} \
+      --query SecretString --output text 2>&1) || aws_rc=$?
+
+    if [ "$aws_rc" -ne 0 ]; then
+      if printf '%s' "$val" | grep -q "ResourceNotFoundException"; then
+        printf '%s' '{"status":"missing"}'
+        exit 0
+      fi
+      # Permission / network / other AWS error — surface loudly.
+      echo "aws secretsmanager get-secret-value failed: $val" >&2
+      exit 1
+    fi
+
+    if printf '%s' "$val" | grep -q "REPLACE_ME"; then
+      printf '%s' '{"status":"placeholder"}'
+    else
+      printf '%s' '{"status":"seeded"}'
+    fi
+  EOT
+  ]
+
+  # Defer the read until the placeholder version has been applied to AWS;
+  # otherwise first-apply would always see "missing" on bootstrap.
   depends_on = [aws_secretsmanager_secret_version.encryption_key]
 }
 
 resource "terraform_data" "encryption_key_seeded" {
-  input = data.aws_secretsmanager_secret_version.encryption_key_current.secret_string
-
   lifecycle {
     precondition {
-      condition = !can(regex(
-        "REPLACE_ME",
-        data.aws_secretsmanager_secret_version.encryption_key_current.secret_string
-      ))
+      condition     = data.external.encryption_key_check.result.status == "seeded"
       error_message = <<-EOM
-        ${aws_secretsmanager_secret.encryption_key.name} still has the
-        placeholder value. Seed it before applying:
+        ${aws_secretsmanager_secret.encryption_key.name} is not yet seeded
+        (status: missing or placeholder).
+
+        Seed the encryption key before applying:
 
           cd <repo>/auth
           KEY=$(poetry run bond-mcps generate-key)
@@ -99,10 +127,34 @@ resource "terraform_data" "encryption_key_seeded" {
 # JWT public key (only when multi-tenant identity is enabled)
 # -----------------------------------------------------------------------------
 
-data "aws_secretsmanager_secret_version" "jwt_public_key_current" {
+data "external" "jwt_public_key_check" {
   count = var.jwt_verification.enabled ? 1 : 0
 
-  secret_id = aws_secretsmanager_secret.jwt_public_key.id
+  program = ["bash", "-c", <<-EOT
+    set -euo pipefail
+
+    aws_rc=0
+    val=$(aws secretsmanager get-secret-value \
+      --secret-id ${aws_secretsmanager_secret.jwt_public_key.name} \
+      --region ${var.aws_region} \
+      --query SecretString --output text 2>&1) || aws_rc=$?
+
+    if [ "$aws_rc" -ne 0 ]; then
+      if printf '%s' "$val" | grep -q "ResourceNotFoundException"; then
+        printf '%s' '{"status":"missing"}'
+        exit 0
+      fi
+      echo "aws secretsmanager get-secret-value failed: $val" >&2
+      exit 1
+    fi
+
+    if printf '%s' "$val" | grep -q "REPLACE_WITH_PEM"; then
+      printf '%s' '{"status":"placeholder"}'
+    else
+      printf '%s' '{"status":"seeded"}'
+    fi
+  EOT
+  ]
 
   depends_on = [aws_secretsmanager_secret_version.jwt_public_key]
 }
@@ -110,19 +162,15 @@ data "aws_secretsmanager_secret_version" "jwt_public_key_current" {
 resource "terraform_data" "jwt_public_key_seeded" {
   count = var.jwt_verification.enabled ? 1 : 0
 
-  input = data.aws_secretsmanager_secret_version.jwt_public_key_current[0].secret_string
-
   lifecycle {
     precondition {
-      condition = !can(regex(
-        "REPLACE_WITH_PEM",
-        data.aws_secretsmanager_secret_version.jwt_public_key_current[0].secret_string
-      ))
+      condition     = data.external.jwt_public_key_check[0].result.status == "seeded"
       error_message = <<-EOM
-        ${aws_secretsmanager_secret.jwt_public_key.name} still has the
-        placeholder value but var.jwt_verification.enabled = true.
+        ${aws_secretsmanager_secret.jwt_public_key.name} is not yet seeded
+        (status: missing or placeholder) but var.jwt_verification.enabled = true.
 
-        Seed the PEM-encoded public key (PEM must use Unix line endings):
+        Seed the PEM-encoded public key (Unix line endings; strip CR if
+        seeded from Windows: `tr -d '\r' < cert.pem > cert.lf.pem`):
 
           jq -Rsn --rawfile pem /path/to/bond-ai-jwt-public.pem \
              '{BOND_MCPS_JWT_PUBLIC_KEY: $pem}' > /tmp/jwt-payload.json
