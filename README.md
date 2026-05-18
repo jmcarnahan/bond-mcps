@@ -10,7 +10,8 @@ bond-mcps/
 ├── mcps/
 │   ├── microsoft/       # Microsoft Graph MCP (Mail, Calendar, Teams, OneDrive, SharePoint) — port 5557
 │   ├── github/          # GitHub MCP (repos, issues, PRs, code) — port 5558
-│   └── atlassian/       # Atlassian MCP (Jira, Confluence) — port 9001
+│   ├── atlassian/       # Atlassian MCP (Jira, Confluence) — port 9001
+│   └── databricks/      # Databricks MCP (SQL warehouse queries) — port 18004
 └── deployment/          # Shared cluster infra (planned)
 ```
 
@@ -19,8 +20,9 @@ bond-mcps/
 | Microsoft | [`mcps/microsoft/`](mcps/microsoft/) | 18001 | `ms-graph-cli` |
 | GitHub | [`mcps/github/`](mcps/github/) | 18002 | `github-cli` |
 | Atlassian | [`mcps/atlassian/`](mcps/atlassian/) | 18003 | `atlassian-cli` |
+| Databricks | [`mcps/databricks/`](mcps/databricks/) | 18004 | `databricks-cli` |
 
-The MCP ports are configurable — see the `Makefile` (`MS_GRAPH_PORT`, `GITHUB_PORT`, `ATLASSIAN_PORT`). The auth proxy port (`8000`) is fixed by the OAuth callback URIs registered in each provider's OAuth app, so changing it requires updating those app registrations.
+The MCP ports are configurable — see the `Makefile` (`MS_GRAPH_PORT`, `GITHUB_PORT`, `ATLASSIAN_PORT`, `DATABRICKS_PORT`). The auth proxy port (`8000`) is fixed by the OAuth callback URIs registered in each provider's OAuth app, so changing it requires updating those app registrations.
 
 ## Architecture
 
@@ -49,6 +51,7 @@ For local OAuth (no backend):
   - Microsoft → Azure App Registration ([`mcps/microsoft/README.md`](mcps/microsoft/README.md))
   - GitHub → GitHub OAuth App ([`mcps/github/README.md`](mcps/github/README.md))
   - Atlassian → Atlassian OAuth 2.0 integration ([`mcps/atlassian/README.md`](mcps/atlassian/README.md))
+  - Databricks → workspace-level OAuth app, or a PAT for free-tier ([`mcps/databricks/README.md`](mcps/databricks/README.md))
 - The OAuth app's **redirect URI** must include `http://localhost:8000/connections/<provider>/callback` so the local auth proxy can receive callbacks. If you override `BOND_AUTH_PROXY_PORT`, you must update the registered redirect URI in each provider's OAuth app config — otherwise the callback will be rejected.
 
 ### Required environment variables per MCP
@@ -60,6 +63,7 @@ Create a `.env` in each MCP directory (or `export` the values). These are needed
 | `mcps/microsoft/` | `MS_CLIENT_ID` | `MS_CLIENT_SECRET` (required if Azure app is a confidential client), `MS_TENANT_ID` (defaults to `consumers`), `MS_DEFAULT_FROM_ADDRESS` |
 | `mcps/github/` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | — (the CLI and MCP server share this OAuth app; PKCE first, device-code fallback) |
 | `mcps/atlassian/` | `ATLASSIAN_CLIENT_ID`, `ATLASSIAN_CLIENT_SECRET` | `ATLASSIAN_ACCESS_TOKEN` + `ATLASSIAN_CLOUD_ID` (bypass OAuth flow entirely) |
+| `mcps/databricks/` | `DATABRICKS_HOST`, `DATABRICKS_HTTP_PATH` + EITHER `DATABRICKS_CLIENT_ID` (OAuth, recommended) OR `DATABRICKS_ACCESS_TOKEN` (PAT, dev fallback for free-tier workspaces) | `DATABRICKS_CLIENT_SECRET` (required if the OAuth app is confidential; omit for public PKCE-only apps) |
 
 `.env` files are gitignored. The auth proxy port can be overridden with `BOND_AUTH_PROXY_PORT`.
 
@@ -89,7 +93,7 @@ make logs             # tail all log files (Ctrl-C to detach; processes keep run
 make stop             # shut everything down
 ```
 
-`make dev` first runs `check-ports` (uses `lsof`) and refuses to start if any of 8000/18001/18002/18003 is already in use — it names the offending process. Override any port: `MS_GRAPH_PORT=29001 make dev`, or `AUTH_PORT=9000 make dev` for the auth proxy (the proxy reads `BOND_AUTH_PROXY_PORT`, which the Makefile sets from `AUTH_PORT`).
+`make dev` first runs `check-ports` (uses `lsof`) and refuses to start if any of 8000/18001/18002/18003/18004 is already in use — it names the offending process. Override any port: `MS_GRAPH_PORT=29001 make dev`, or `AUTH_PORT=9000 make dev` for the auth proxy (the proxy reads `BOND_AUTH_PROXY_PORT`, which the Makefile sets from `AUTH_PORT`).
 
 Logs land in `tmp/logs/` and are gitignored.
 
@@ -154,6 +158,8 @@ OAuth tokens are stored in an encrypted SQLAlchemy database. By default this is 
 | `BOND_MCPS_ENCRYPTION_KEY` | (none) | base64-encoded 32-byte AES-256 key. Required for Postgres; for SQLite, falls back to a 0600 file at `~/.bond_mcps/encryption_key` (logs a WARN on every startup) |
 | `BOND_MCPS_USER_ID` | `getpass.getuser()` (SQLite only) | identifies who the tokens belong to. **Required for Postgres deployments** — `current_user_key()` refuses to fall back when the DB URL is Postgres, because containers typically run as `root` and would silently collide across tenants |
 
+Databricks-specific: only OAuth U2M tokens land in `tokens.db` (under provider `databricks`). PAT mode (`DATABRICKS_ACCESS_TOKEN`) reads the token from env on every call and stores nothing. Bearer-mode (backend forwards `Authorization: Bearer`) also stores nothing.
+
 Tokens are encrypted with AES-256-GCM. Each ciphertext is bound to `(user_key, provider, field, key_version)` as AEAD associated data, so cross-row or cross-field tampering is rejected. Plaintext tokens never appear in the DB.
 
 ### One-time setup
@@ -213,6 +219,7 @@ Some tools are gated by the account/tenant you authenticated with, not by the MC
 - **Microsoft personal accounts** (`MS_TENANT_ID=consumers`, e.g. `*@outlook.com`, `*@hotmail.com`): Mail, Calendar, OneDrive (personal) work. **Teams, SharePoint, and Power BI require an organizational Microsoft 365 tenant** — use `MS_TENANT_ID=<your-tenant-guid>` and an Azure app registered in that tenant.
 - **Atlassian Confluence v2 endpoints**: the code calls `/wiki/api/v2/spaces`, which requires the granular scope `read:space:confluence`. If your OAuth app was registered with only legacy scopes (`read:confluence-space.summary`), confluence calls return `401 scope does not match`. Add the granular scope to the OAuth app and re-authenticate. Jira is unaffected.
 - **GitHub**: any repo or org accessible by the OAuth token works. No special gating.
+- **Databricks free / Community Edition**: OAuth app registration is unavailable. Set `DATABRICKS_ACCESS_TOKEN` (a personal access token) instead of `DATABRICKS_CLIENT_ID` — the MCP detects PAT-only mode and skips the browser flow. Note that PATs are workspace-scoped to whatever the issuing user can see, so least-privilege scoping is not possible in this mode.
 
 ## Configuration
 
@@ -231,3 +238,7 @@ A shared deployment target (ECS Express vs Fargate vs EKS) is being designed and
 3. Add tests using `respx` for HTTP mocking
 4. Register the CLI entry in `[tool.poetry.scripts]`
 5. Update this README's tables (MCP list + env vars + token caches)
+6. Add the MCP's directory to the matrix in `.github/workflows/test.yml` so CI runs its tests
+7. Update the Makefile: install/dev/stop/status/check-ports/claude-add/claude-remove/login-`<name>`/logout-`<name>`
+
+If your MCP's natural package name collides with a third-party namespace (e.g. `databricks-sql-connector` owns `databricks.*`), use a different Python package name (Microsoft uses `ms_graph`; Databricks uses `dbx`). Keep the entry-file names (`<name>_mcp.py`, `<name>_cli.py`) consistent with the directory.
