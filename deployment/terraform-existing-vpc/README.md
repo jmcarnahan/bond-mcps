@@ -96,6 +96,34 @@ aws secretsmanager put-secret-value --secret-id bond-mcps-dev-databricks-oauth \
   --secret-string '{"DATABRICKS_CLIENT_ID":"…","DATABRICKS_CLIENT_SECRET":"…"}'
 ```
 
+### JWT public key (only when multi-tenant identity is enabled)
+
+Off by default. To enable, set `jwt_verification.enabled = true` in your
+tfvars and seed `bond-mcps-${env}-jwt-public-key` with the PEM-encoded
+public key of whichever service signs identity JWTs (typically the bond-ai
+backend). The shape:
+
+```bash
+# PEM has newlines; build the JSON safely with jq:
+jq -Rsn --rawfile pem /path/to/bond-ai-jwt-public.pem \
+   '{BOND_MCPS_JWT_PUBLIC_KEY: $pem}' > /tmp/jwt-payload.json
+
+aws secretsmanager put-secret-value \
+  --secret-id bond-mcps-dev-jwt-public-key \
+  --region us-west-2 \
+  --secret-string file:///tmp/jwt-payload.json
+
+rm /tmp/jwt-payload.json
+```
+
+Once seeded, every HTTP request that triggers a Path-2 (local-OAuth) flow
+must include `X-Bond-Auth: Bearer <jwt>` — the JWT's `sub` claim becomes
+the request's `user_key`. Pre-existing single-tenant deploys keep working
+when `jwt_verification.enabled = false` (the default).
+
+See plan section H/C2 and `auth/auth/jwt_identity.py` for the verification
+semantics (signature + exp + optional iss/aud).
+
 ### DB credentials — seeded automatically
 
 TF seeds this from the Aurora cluster's random password + endpoint. `lifecycle
@@ -191,9 +219,10 @@ See `outputs.tf` for the full list. Highlights:
 
 ## Known limitations (v1)
 
-1. **`BOND_MCPS_USER_ID` is one value per pod, not per request.** Single-tenant
-   only. Multi-tenant requires the MCPs to derive `user_key` from the incoming
-   Bearer JWT's `sub` claim. Tracked as plan section H/C2.
+1. **`BOND_MCPS_USER_ID` is single-tenant by default.** To enable per-request
+   multi-tenant identity, flip `jwt_verification.enabled = true` and seed the
+   JWT public key (see secret-seeding section). With JWT verification on,
+   `user_key` is derived from each request's `X-Bond-Auth` JWT `sub` claim.
 2. **OAuth redirect URI is hardcoded** to `http://localhost` in
    `auth/auth/proxy_client.py:107`. Deployed MCPs can't currently complete
    OAuth flows. Tracked as plan section H/C1 (one-line code fix: read

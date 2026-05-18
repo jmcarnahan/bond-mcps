@@ -124,6 +124,31 @@ variable "aurora_engine_version" {
 }
 
 # =========================================================================
+# Multi-tenant identity (JWT verification)
+# =========================================================================
+
+variable "jwt_verification" {
+  description = <<-EOT
+    Multi-tenant identity via JWT verification. Off by default — every caller
+    shares the chart's userKey value (single-tenant). When enabled, every
+    HTTP request that reaches a Path-2 token-DB operation must carry
+    X-Bond-Auth: Bearer <jwt>; the JWT is verified against the operator-
+    supplied public key (seeded into the SM secret created by this module)
+    and the sub claim becomes the request's user_key. See plan section H/C2.
+  EOT
+  type = object({
+    enabled   = bool
+    issuer    = optional(string, "")
+    audience  = optional(string, "")
+    algorithm = optional(string, "RS256")
+    sub_claim = optional(string, "sub")
+  })
+  default = {
+    enabled = false
+  }
+}
+
+# =========================================================================
 # Secrets Manager
 # =========================================================================
 

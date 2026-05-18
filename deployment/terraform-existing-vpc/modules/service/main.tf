@@ -55,6 +55,15 @@ locals {
       refreshInterval        = "5m"
     }
 
+    jwt = {
+      enabled            = var.jwt_enabled
+      secretsManagerName = var.jwt_secrets_manager_name
+      issuer             = var.jwt_issuer
+      audience           = var.jwt_audience
+      algorithm          = var.jwt_algorithm
+      subClaim           = var.jwt_sub_claim
+    }
+
     serviceAccount = {
       create      = true
       annotations = {}

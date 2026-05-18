@@ -86,6 +86,22 @@ secrets:
     # JSON shape: keys ARE the env var names. e.g.
     #   {"GITHUB_CLIENT_ID":"…","GITHUB_CLIENT_SECRET":"…"}
 
+# === Multi-tenant identity via JWT verification ===
+# Opt-in. When enabled, every HTTP request that reaches a Path-2 token-DB
+# operation MUST carry `X-Bond-Auth: Bearer <jwt>`. The JWT's signature is
+# verified against the operator-supplied public key (pulled from SM) and the
+# configured claim (default `sub`) becomes the user_key for that request.
+#
+# When disabled (default), the chart's `userKey` value is used for every
+# caller (single-tenant). See README "Known limitations" for the tradeoff.
+jwt:
+  enabled: false
+  secretsManagerName: ""       # SM secret with {"BOND_MCPS_JWT_PUBLIC_KEY": "<PEM>"}
+  issuer: ""                   # optional iss-claim check
+  audience: ""                 # optional aud-claim check
+  algorithm: "RS256"
+  subClaim: "sub"
+
 # Reference to the ClusterSecretStore created by external-secrets.tf.
 externalSecrets:
   clusterSecretStoreName: bond-mcps-aws-sm

@@ -66,6 +66,32 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
 }
 
 # -------------------------------------------------------------------------
+# JWT verification public key (only consumed when var.jwt_verification.enabled
+# = true and the chart's jwt block is wired). Always created so flipping
+# the flag later doesn't churn — costs nothing while empty.
+# -------------------------------------------------------------------------
+
+resource "aws_secretsmanager_secret" "jwt_public_key" {
+  name                    = local.sm_jwt_public_key
+  description             = "PEM-encoded public key for bond-mcps JWT identity verification"
+  kms_key_id              = aws_kms_key.secrets.arn
+  recovery_window_in_days = var.secrets_recovery_window_days
+
+  tags = { Name = local.sm_jwt_public_key }
+}
+
+resource "aws_secretsmanager_secret_version" "jwt_public_key" {
+  secret_id = aws_secretsmanager_secret.jwt_public_key.id
+  secret_string = jsonencode({
+    BOND_MCPS_JWT_PUBLIC_KEY = "REPLACE_WITH_PEM_IF_JWT_VERIFICATION_ENABLED"
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# -------------------------------------------------------------------------
 # Per-MCP OAuth secrets (one per service that declared oauth_secret_name)
 # -------------------------------------------------------------------------
 

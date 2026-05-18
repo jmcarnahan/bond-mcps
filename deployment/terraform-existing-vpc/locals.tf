@@ -46,4 +46,5 @@ locals {
   sm_prefix         = "${local.name_prefix}-"
   sm_encryption_key = "${local.sm_prefix}encryption-key"
   sm_db_credentials = "${local.sm_prefix}db-credentials"
+  sm_jwt_public_key = "${local.sm_prefix}jwt-public-key"
 }
