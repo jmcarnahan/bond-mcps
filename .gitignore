@@ -35,4 +35,6 @@ tmp/
 *.tfvars.json
 crash.log
 *.tfstate.lock.info
+# But: keep the per-env templates checked in.
+!deployment/terraform-existing-vpc/environments/*.tfvars
 
