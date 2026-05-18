@@ -9,6 +9,11 @@ dbx/auth.py):
   3. PAT (DATABRICKS_ACCESS_TOKEN) — dev fallback for workspaces that cannot
      register OAuth apps (free / Community Edition)
 
+The token is resolved synchronously in each tool's call frame (so FastMCP's
+request-scoped Bearer header is captured) and then handed to a worker thread
+via asyncio.to_thread for the actual SQL round-trip — long queries no longer
+block the event loop.
+
 Run (standalone):
     make dev                                                                    # all 4 services
     poetry run fastmcp run databricks_mcp.py --transport streamable-http --port 18004
@@ -17,6 +22,7 @@ Tool summary (4 tools):
   SQL  : run_query, list_catalogs, list_schemas, list_tables
 """
 
+import asyncio
 import csv
 import io
 import logging
@@ -44,8 +50,6 @@ _MAX_PREVIEW_ROWS = 50
 async def _lifespan(app):
     """Log the auth mode at startup. Validate the auth proxy only when OAuth
     is configured — PAT and backend modes do not need the proxy."""
-    # In CLI / stdio context there's no HTTP request, so AuthSource.BEARER won't
-    # show up here; only OAUTH / PAT are interesting at startup.
     if os.environ.get("DATABRICKS_CLIENT_ID"):
         from auth import OAuthProxyClient
         proxy = OAuthProxyClient()
@@ -76,21 +80,20 @@ def _format_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     return buf.getvalue().rstrip("\r\n")
 
 
-def _friendly_error(err: DatabricksError) -> str:
-    """Map DatabricksError codes to user-readable messages."""
+def _friendly_error(err: DatabricksError, source: AuthSource | None) -> str:
+    """Map DatabricksError codes to user-readable messages.
+
+    `source` is the AuthSource that produced the token for the failed call,
+    captured at tool entry. Threading it through (rather than re-reading env
+    vars at error-formatting time) ensures the message matches the actual
+    auth path used.
+    """
     code = err.error_code
 
     if code == "MissingConfig":
         return f"Databricks not configured: {err}"
 
     if code == "Unauthorized":
-        try:
-            source = db.current_auth_source()
-        except PermissionError:
-            return (
-                "Databricks rejected the token, and no auth source is "
-                "currently configured. See README for setup."
-            )
         if source is AuthSource.OAUTH:
             return (
                 "Databricks authentication failed. Run `make login-databricks` "
@@ -100,12 +103,17 @@ def _friendly_error(err: DatabricksError) -> str:
         if source is AuthSource.PAT:
             return (
                 "Databricks PAT rejected. Your DATABRICKS_ACCESS_TOKEN may be "
-                "expired, revoked, or scoped to a different workspace than "
-                "DATABRICKS_HOST."
+                "expired, revoked, missing the `sql` scope, or scoped to a "
+                "different workspace than DATABRICKS_HOST."
+            )
+        if source is AuthSource.BEARER:
+            return (
+                "Databricks authentication failed. The forwarded Bearer token "
+                "may be expired or scoped to a different workspace."
             )
         return (
-            "Databricks authentication failed. The forwarded Bearer token "
-            "may be expired or scoped to a different workspace."
+            "Databricks rejected the token. No auth source is currently "
+            "configured — see README for setup."
         )
 
     if code == "Forbidden":
@@ -130,12 +138,14 @@ def _friendly_error(err: DatabricksError) -> str:
 def _format_result(result: dict, query: str) -> str:
     """Render a query result dict as a markdown-friendly string.
 
-    Small results: pipe-delimited table inline. Large results: first
-    _MAX_PREVIEW_ROWS as CSV in a fenced code block with a truncation note.
+    Small results: pipe-delimited table inline.
+    Larger results: first _MAX_PREVIEW_ROWS as pipe-delimited table + a note
+    indicating truncation.
     Empty results: a friendly "no rows" message.
     """
     columns = result["columns"]
     rows = result["rows"]
+    truncated = result.get("truncated", False)
 
     if not columns:
         return "Query executed (no result set returned)."
@@ -144,21 +154,28 @@ def _format_result(result: dict, query: str) -> str:
     if total == 0:
         return f"No rows returned.\n\nColumns: {', '.join(columns)}"
 
-    if total <= _MAX_PREVIEW_ROWS:
-        return f"{total} row(s):\n" + _format_table(
-            columns, [[_stringify(v) for v in row] for row in rows]
-        )
-
     preview = rows[:_MAX_PREVIEW_ROWS]
-    csv_buf = io.StringIO()
-    writer = csv.writer(csv_buf)
-    writer.writerow(columns)
-    writer.writerows([[_stringify(v) for v in row] for row in preview])
-    return (
-        f"{total} rows returned (showing first {_MAX_PREVIEW_ROWS} as CSV; "
-        f"refine the query or add LIMIT to narrow the result set):\n"
-        f"```csv\n{csv_buf.getvalue().rstrip()}\n```"
+    table = _format_table(
+        columns, [[_stringify(v) for v in row] for row in preview]
     )
+
+    if total <= _MAX_PREVIEW_ROWS and not truncated:
+        return f"{total} row(s):\n{table}"
+
+    # Either there are more preview rows than we'll show, or the cursor was
+    # cut off at the fetch cap (truncated=True).
+    if truncated:
+        suffix = (
+            f"\n\n(showing first {min(total, _MAX_PREVIEW_ROWS)} of "
+            f"{total}+ row(s); fetch was capped — refine your query with "
+            f"LIMIT to see all rows.)"
+        )
+    else:
+        suffix = (
+            f"\n\n(showing first {_MAX_PREVIEW_ROWS} of {total} row(s); "
+            f"refine with LIMIT to narrow the result set.)"
+        )
+    return f"{table}{suffix}"
 
 
 def _stringify(val) -> str:
@@ -168,6 +185,16 @@ def _stringify(val) -> str:
     if isinstance(val, bytes):
         return val.decode("utf-8", errors="replace")
     return str(val)
+
+
+def _capture_token() -> tuple[str | None, AuthSource | None, str | None]:
+    """Resolve token synchronously in the async tool context. Returns
+    (token, source, error_message). On error: (None, None, message)."""
+    try:
+        token, source = db.resolve_token_now()
+        return token, source, None
+    except PermissionError as e:
+        return None, None, str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -185,24 +212,26 @@ async def run_query(query: str) -> str:
     """
     if not query.strip():
         return "Parameter 'query' is required."
+    token, source, err = _capture_token()
+    if err:
+        return err
     try:
-        result = db.run_query(query)
+        result = await asyncio.to_thread(db.run_query, query, token=token)
     except DatabricksError as e:
-        return _friendly_error(e)
-    except PermissionError as e:
-        return str(e)
+        return _friendly_error(e, source)
     return _format_result(result, query)
 
 
 @mcp.tool()
 async def list_catalogs() -> str:
     """List all catalogs the current user can see (SHOW CATALOGS)."""
+    token, source, err = _capture_token()
+    if err:
+        return err
     try:
-        catalogs = db.list_catalogs()
+        catalogs = await asyncio.to_thread(db.list_catalogs, token=token)
     except DatabricksError as e:
-        return _friendly_error(e)
-    except PermissionError as e:
-        return str(e)
+        return _friendly_error(e, source)
     if not catalogs:
         return "No catalogs visible to your user."
     return f"{len(catalogs)} catalog(s):\n" + "\n".join(f"  {c}" for c in catalogs)
@@ -217,12 +246,13 @@ async def list_schemas(catalog: str) -> str:
     """
     if not catalog:
         return "Parameter 'catalog' is required."
+    token, source, err = _capture_token()
+    if err:
+        return err
     try:
-        schemas = db.list_schemas(catalog)
+        schemas = await asyncio.to_thread(db.list_schemas, catalog, token=token)
     except DatabricksError as e:
-        return _friendly_error(e)
-    except PermissionError as e:
-        return str(e)
+        return _friendly_error(e, source)
     if not schemas:
         return f"No schemas visible in catalog `{catalog}`."
     return f"{len(schemas)} schema(s) in `{catalog}`:\n" + "\n".join(
@@ -240,12 +270,15 @@ async def list_tables(catalog: str, schema: str) -> str:
     """
     if not catalog or not schema:
         return "Parameters 'catalog' and 'schema' are both required."
+    token, source, err = _capture_token()
+    if err:
+        return err
     try:
-        tables = db.list_tables(catalog, schema)
+        tables = await asyncio.to_thread(
+            db.list_tables, catalog, schema, token=token
+        )
     except DatabricksError as e:
-        return _friendly_error(e)
-    except PermissionError as e:
-        return str(e)
+        return _friendly_error(e, source)
     if not tables:
         return f"No tables visible in `{catalog}`.`{schema}`."
     rows = [
