@@ -3,6 +3,11 @@ variable "service_key" {
   description = "Short service name (auth, github, microsoft, ...). Used as Helm release name and Service DNS prefix."
 }
 
+variable "environment_tag" {
+  type        = string
+  description = "Environment short name. Stamped on the ALB as bond-mcps-environment=<value> so the IngressGroup ALB lookup is unique across stacks."
+}
+
 variable "namespace" {
   type        = string
   description = "k8s namespace to install into (typically bond-mcps)."

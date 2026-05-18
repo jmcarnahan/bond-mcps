@@ -54,7 +54,8 @@
         "groupOrder":      { "type": "integer" },
         "scheme":          { "type": "string", "enum": ["internet-facing", "internal"] },
         "healthCheckPath": { "type": "string" },
-        "successCodes":    { "type": "string" }
+        "successCodes":    { "type": "string" },
+        "environmentTag":  { "type": "string" }
       }
     },
     "probes": {

@@ -81,6 +81,7 @@ locals {
       scheme          = "internet-facing"
       healthCheckPath = var.health.type == "http" ? var.health.path : "/"
       successCodes    = "200-499"
+      environmentTag  = var.environment_tag
     }
 
     probes = {

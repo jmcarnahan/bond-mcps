@@ -124,6 +124,11 @@ ingress:
   scheme: internet-facing
   healthCheckPath: /health     # auth serves /health; MCPs fall back to TCP target health
   successCodes: "200-299"
+  # ALB tag stamped via alb.ingress.kubernetes.io/tags. Together with
+  # elbv2.k8s.aws/cluster + ingress.k8s.aws/stack, this uniquely identifies
+  # the ALB across environments so eks-domain.tf's tag-filtered lookup can't
+  # match a stale or cross-env load balancer.
+  environmentTag: ""           # passed by Terraform (var.environment)
 
 probes:
   liveness:

@@ -15,6 +15,9 @@ metadata:
     alb.ingress.kubernetes.io/group.order: {{ .Values.ingress.groupOrder | quote }}
     alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.ingress.healthCheckPath | quote }}
     alb.ingress.kubernetes.io/success-codes: {{ .Values.ingress.successCodes | quote }}
+    {{- if .Values.ingress.environmentTag }}
+    alb.ingress.kubernetes.io/tags: {{ printf "bond-mcps-environment=%s" .Values.ingress.environmentTag | quote }}
+    {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:
