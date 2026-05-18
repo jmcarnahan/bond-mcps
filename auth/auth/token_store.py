@@ -28,13 +28,29 @@ def current_user_key() -> str:
     """Resolve the user identity for token rows.
 
     BOND_MCPS_USER_ID env var wins. Falls back to getpass.getuser() for
-    convenience in local SQLite deployments. Postgres deployments should
-    set the env var explicitly (the OS username is meaningless in
-    containers or systemd units).
+    convenience in local SQLite deployments only.
+
+    For Postgres deployments the env var is required: ``getpass.getuser()``
+    inside an ECS/Fargate container typically returns ``"root"``, which
+    would silently collide across container tenants and write all users'
+    tokens into the same DB rows.
     """
     explicit = os.environ.get("BOND_MCPS_USER_ID")
     if explicit:
         return explicit
+    db_url = os.environ.get("BOND_MCPS_DB_URL", "")
+    if db_url.startswith("postgres"):
+        # Lazy import to avoid pulling auth.db at module-load time
+        # (the auth proxy server uses auth.* without the DB stack).
+        from auth.db.session import DeploymentConfigError
+
+        raise DeploymentConfigError(
+            "BOND_MCPS_USER_ID is required for Postgres deployments. "
+            "Falling back to getpass.getuser() in a container would "
+            "typically return 'root' and collide across tenants. Set "
+            "BOND_MCPS_USER_ID explicitly (e.g., to the tenant identifier "
+            "or service account name)."
+        )
     return getpass.getuser()
 
 

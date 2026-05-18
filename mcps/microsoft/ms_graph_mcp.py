@@ -49,7 +49,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app):
-    """Warn if auth proxy is unreachable when local auth is configured."""
+    """Fail fast on misconfig and warn if the auth proxy isn't reachable.
+
+    verify_runtime_config() crashes the container at boot if BOND_MCPS_DB_URL
+    is wrong, encryption key is missing, or BOND_MCPS_USER_ID is unset for
+    Postgres — preventing the "container looks healthy to ECS but every
+    request fails" pattern.
+    """
+    from auth import startup
+    startup.verify_runtime_config()
+
     if os.environ.get("MS_CLIENT_ID"):
         from auth import OAuthProxyClient
         proxy = OAuthProxyClient()

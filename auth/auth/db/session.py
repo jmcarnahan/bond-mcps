@@ -31,6 +31,11 @@ _state: dict = {"engine": None, "session_factory": None, "url": None}
 
 _STRICT_SSLMODES = {"require", "verify-ca", "verify-full"}
 
+# Dialects we actually support — checked here so misconfig fails at engine
+# creation instead of at first save (when the dialect-aware upsert helper
+# would otherwise raise NotImplementedError).
+_SUPPORTED_DIALECTS = {"sqlite", "postgresql", "postgres"}
+
 
 def _repo_root() -> Path:
     """Return repo root: <auth-package>/../.. → bond-mcps repo root."""
@@ -79,12 +84,19 @@ def default_db_url() -> str:
 
 
 def validate_db_url(url: str) -> None:
-    """Refuse non-TLS Postgres URLs. SQLite passes through.
+    """Reject unsupported dialects and non-TLS Postgres URLs at engine creation.
 
     Raises ValueError with a remediation hint on misconfigured URLs.
     """
     parts = urlsplit(url)
     scheme = parts.scheme.split("+")[0]
+    if scheme not in _SUPPORTED_DIALECTS:
+        raise ValueError(
+            f"Unsupported DB dialect: {scheme!r}. bond-mcps supports SQLite "
+            f"and PostgreSQL. The upsert path relies on dialect-specific "
+            f"INSERT ... ON CONFLICT DO UPDATE — adding a new dialect "
+            f"requires extending _dialect_insert in auth/db/repository.py."
+        )
     if scheme in ("postgresql", "postgres"):
         qs = parse_qs(parts.query)
         sslmode = (qs.get("sslmode", [""])[0] or "").lower()
@@ -94,11 +106,6 @@ def validate_db_url(url: str) -> None:
                 f"got sslmode={sslmode!r}. For Aurora RDS, use 'verify-full' with "
                 f"the RDS root CA bundle."
             )
-    elif scheme == "sqlite":
-        return
-    else:
-        # Other dialects — allow but warn (mysql etc are not officially supported here)
-        logger.warning("Untested DB dialect: %s. SQLite and PostgreSQL are tested.", scheme)
 
 
 def _is_sqlite(url: str) -> bool:
@@ -237,23 +244,47 @@ def ensure_schema_current(url: str | None = None) -> None:
             current = conn.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
-        except (OperationalError, ProgrammingError):
-            # Narrowly catch "no such table" (SQLite OperationalError) and
-            # "relation does not exist" (Postgres ProgrammingError). Other
-            # exceptions (auth, network, programmer errors) propagate so
-            # they're not misdiagnosed as "schema empty".
+        except (OperationalError, ProgrammingError) as e:
+            if not _is_missing_table_error(e):
+                # Don't mask permission, network, or other ProgrammingErrors
+                # as "schema empty" — those need their real diagnosis.
+                raise
             current = None
 
     if current is None:
         raise SchemaOutOfDateError(
-            "DB schema is empty. Run `bond-mcps migrate-db` (or `make migrate-db`) "
-            "to create the token database."
+            "DB schema is empty. Run `bond-mcps migrate-db` to create the "
+            "token database (or `make migrate-db` in a dev checkout)."
         )
     if current != head:
         raise SchemaOutOfDateError(
             f"DB schema at revision {current!r}; expected {head!r}. "
             "Run `bond-mcps migrate-db` (or `make migrate-db`) to upgrade."
         )
+
+
+def _is_missing_table_error(exc: Exception) -> bool:
+    """Heuristically detect 'table does not exist' across SQLite + Postgres.
+
+    SQLite raises OperationalError with message 'no such table: <name>'.
+    Postgres raises ProgrammingError wrapping psycopg.errors.UndefinedTable
+    (pgcode '42P01') with message 'relation "<name>" does not exist'.
+
+    We must NOT swallow permission denied (pgcode '42501'), syntax errors,
+    or other ProgrammingErrors — those should propagate to the operator.
+    """
+    msg = str(exc).lower()
+    if "no such table" in msg:
+        return True
+    if "does not exist" in msg and "relation" in msg:
+        return True
+    # Postgres-specific: check pgcode if available (psycopg attaches it via
+    # the orig attribute that SQLAlchemy preserves).
+    orig = getattr(exc, "orig", None)
+    pgcode = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if pgcode == "42P01":  # undefined_table
+        return True
+    return False
 
 
 def _scrub_url(url: str) -> str:

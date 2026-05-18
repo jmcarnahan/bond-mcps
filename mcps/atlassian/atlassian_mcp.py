@@ -45,7 +45,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app):
-    """Warn if auth proxy is unreachable when local auth is configured."""
+    """Fail fast on misconfig and warn if the auth proxy isn't reachable."""
+    from auth import startup
+    startup.verify_runtime_config()
+
     if os.environ.get("ATLASSIAN_CLIENT_ID"):
         from auth import OAuthProxyClient
         proxy = OAuthProxyClient()
