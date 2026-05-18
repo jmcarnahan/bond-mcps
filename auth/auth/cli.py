@@ -80,6 +80,8 @@ def cmd_clear(args) -> int:
 def cmd_doctor(_args) -> int:
     """Health check: validate config, DB connection, schema, encryption."""
     import os
+    from pathlib import Path
+    from urllib.parse import parse_qs, urlsplit
 
     from auth.db.repository import _default_resolver
     from auth.db.session import (
@@ -104,7 +106,18 @@ def cmd_doctor(_args) -> int:
             print(f"  URL resolution: FAIL — {e}", file=sys.stderr)
             return 1
     print(f"DB URL:     {url}")
-    print(f"User key:   {current_user_key()}")
+
+    is_postgres = url.startswith("postgres")
+
+    # User-key resolution. For Postgres deployments current_user_key()
+    # raises DeploymentConfigError if BOND_MCPS_USER_ID is unset — that
+    # turns into a doctor FAIL since silently defaulting to "root" in a
+    # container would collide across tenants.
+    try:
+        print(f"User key:   {current_user_key()}")
+    except DeploymentConfigError as e:
+        print(f"  User key:       FAIL — {e}", file=sys.stderr)
+        return 1
 
     try:
         validate_db_url(url)
@@ -112,6 +125,32 @@ def cmd_doctor(_args) -> int:
         print(f"  URL validation: FAIL — {e}", file=sys.stderr)
         return 1
     print("  URL validation: OK")
+
+    # For sslmode=verify-ca / verify-full, the operator must supply a root
+    # CA bundle via sslrootcert. A missing file would surface as a confusing
+    # psycopg error at first connection; check it here at boot.
+    if is_postgres:
+        qs = parse_qs(urlsplit(url).query)
+        sslmode = (qs.get("sslmode", [""])[0] or "").lower()
+        sslrootcert = qs.get("sslrootcert", [""])[0]
+        if sslmode in ("verify-ca", "verify-full"):
+            if not sslrootcert:
+                print(
+                    f"  TLS cert path: WARN — sslmode={sslmode} without sslrootcert "
+                    f"in URL; psycopg will fall back to system trust store. "
+                    f"For Aurora, set sslrootcert=/path/to/rds-global-bundle.pem.",
+                    file=sys.stderr,
+                )
+            elif not Path(sslrootcert).exists():
+                print(
+                    f"  TLS cert path: FAIL — sslrootcert={sslrootcert!r} does not "
+                    f"exist. Mount the RDS root CA bundle into the container or "
+                    f"point at an installed system bundle.",
+                    file=sys.stderr,
+                )
+                return 1
+            else:
+                print(f"  TLS cert path: {sslrootcert} present")
 
     try:
         get_engine(url)

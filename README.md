@@ -152,7 +152,7 @@ OAuth tokens are stored in an encrypted SQLAlchemy database. By default this is 
 |---|---|---|
 | `BOND_MCPS_DB_URL` | `sqlite:///<repo>/tokens.db` | Postgres URLs must include `sslmode=require\|verify-ca\|verify-full` |
 | `BOND_MCPS_ENCRYPTION_KEY` | (none) | base64-encoded 32-byte AES-256 key. Required for Postgres; for SQLite, falls back to a 0600 file at `~/.bond_mcps/encryption_key` (logs a WARN on every startup) |
-| `BOND_MCPS_USER_ID` | `getpass.getuser()` | identifies who the tokens belong to. Required for Postgres deployments — refused at start if missing |
+| `BOND_MCPS_USER_ID` | `getpass.getuser()` (SQLite only) | identifies who the tokens belong to. **Required for Postgres deployments** — `current_user_key()` refuses to fall back when the DB URL is Postgres, because containers typically run as `root` and would silently collide across tenants |
 
 Tokens are encrypted with AES-256-GCM. Each ciphertext is bound to `(user_key, provider, field, key_version)` as AEAD associated data, so cross-row or cross-field tampering is rejected. Plaintext tokens never appear in the DB.
 
