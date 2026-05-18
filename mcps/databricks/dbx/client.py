@@ -38,7 +38,7 @@ from typing import Any
 from databricks import sql
 from databricks.sql import exc as dbexc
 
-from dbx.auth import AuthSource, get_auth_source, get_databricks_token
+from dbx.auth import AuthSource, get_databricks_token
 from dbx.local_auth import host_without_scheme
 
 logger = logging.getLogger(__name__)
@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
 # Hard cap on rows pulled from the warehouse per call. Protects the MCP from
 # OOM on `SELECT * FROM <huge>` while still leaving headroom for ad-hoc admin
 # queries. Display formatting in databricks_mcp._format_result caps to a
-# smaller preview number.
-_MAX_FETCH_ROWS = 5000
+# smaller preview number. Public — referenced by databricks_mcp.
+MAX_FETCH_ROWS = 5000
 
 # Per-HTTP-request socket timeout (seconds). Applies to each connect/read on
 # the connector's internal HTTP calls, NOT to total query duration. A long
@@ -86,6 +86,7 @@ def resolve_token_now() -> tuple[str, AuthSource]:
     Call this from the async tool body BEFORE handing off to `asyncio.to_thread`
     so the FastMCP request's Bearer header (if any) is captured.
     """
+    from dbx.auth import get_auth_source
     source = get_auth_source()
     token = get_databricks_token()
     return token, source
@@ -163,7 +164,7 @@ def _classify_error(exc: Exception) -> DatabricksError:
 def run_query(query: str, *, token: str | None = None) -> dict[str, Any]:
     """Execute a SQL query and return columns + rows.
 
-    Caps fetched rows at `_MAX_FETCH_ROWS`. Sets `truncated=True` when the
+    Caps fetched rows at `MAX_FETCH_ROWS`. Sets `truncated=True` when the
     cursor still had more rows past the cap.
 
     Returns:
@@ -175,9 +176,9 @@ def run_query(query: str, *, token: str | None = None) -> dict[str, Any]:
                 cur.execute(query)
                 # Pull one extra so we can detect-and-discard the (n+1)th row
                 # without doing a second round trip if we hit exactly cap.
-                fetched = cur.fetchmany(_MAX_FETCH_ROWS + 1)
-                truncated = len(fetched) > _MAX_FETCH_ROWS
-                rows = fetched[:_MAX_FETCH_ROWS]
+                fetched = cur.fetchmany(MAX_FETCH_ROWS + 1)
+                truncated = len(fetched) > MAX_FETCH_ROWS
+                rows = fetched[:MAX_FETCH_ROWS]
                 columns = [d[0] for d in (cur.description or [])]
         return {
             "columns": columns,
@@ -217,11 +218,6 @@ def list_tables(
             "is_temporary": bool(row[2]) if len(row) > 2 else False,
         })
     return out
-
-
-def current_auth_source() -> AuthSource:
-    """Pass-through to dbx.auth.get_auth_source for use by the MCP server / CLI."""
-    return get_auth_source()
 
 
 def _quote_identifier(name: str) -> str:

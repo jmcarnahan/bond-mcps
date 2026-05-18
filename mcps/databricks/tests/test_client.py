@@ -12,7 +12,7 @@ def _mock_connection(rows, columns):
     """Build a context-manager-friendly mock connector return value.
 
     fetchmany(n) returns up to n rows from the queue — matching what the
-    real connector does, so client.run_query's `fetchmany(_MAX_FETCH_ROWS+1)`
+    real connector does, so client.run_query's `fetchmany(MAX_FETCH_ROWS+1)`
     truncation detection runs the same code path the test exercises.
     """
     remaining = list(rows)
@@ -152,28 +152,28 @@ class TestRunQuery:
         assert mock_connect.call_args.kwargs["access_token"] == "passed-tok"
 
     def test_truncates_at_max_fetch_rows(self, monkeypatch):
-        """Cursor returns more than _MAX_FETCH_ROWS rows; result must be
+        """Cursor returns more than MAX_FETCH_ROWS rows; result must be
         capped with truncated=True. Protects MCP from OOM on huge SELECTs."""
         from dbx import client
         _env(monkeypatch)
         # 5001 fetched → 5000 kept, truncated=True
-        too_many = [(i,) for i in range(client._MAX_FETCH_ROWS + 1)]
+        too_many = [(i,) for i in range(client.MAX_FETCH_ROWS + 1)]
         conn, _ = _mock_connection(rows=too_many, columns=["i"])
         with patch("dbx.client.sql.connect", return_value=conn):
             result = client.run_query("SELECT i FROM big")
-        assert len(result["rows"]) == client._MAX_FETCH_ROWS
+        assert len(result["rows"]) == client.MAX_FETCH_ROWS
         assert result["truncated"] is True
 
     def test_exact_max_fetch_rows_not_truncated(self, monkeypatch):
-        """If the result is exactly _MAX_FETCH_ROWS, truncated must be False —
+        """If the result is exactly MAX_FETCH_ROWS, truncated must be False —
         no false positives."""
         from dbx import client
         _env(monkeypatch)
-        exact = [(i,) for i in range(client._MAX_FETCH_ROWS)]
+        exact = [(i,) for i in range(client.MAX_FETCH_ROWS)]
         conn, _ = _mock_connection(rows=exact, columns=["i"])
         with patch("dbx.client.sql.connect", return_value=conn):
             result = client.run_query("SELECT i FROM big")
-        assert len(result["rows"]) == client._MAX_FETCH_ROWS
+        assert len(result["rows"]) == client.MAX_FETCH_ROWS
         assert result["truncated"] is False
 
 

@@ -35,21 +35,16 @@ from dbx.client import DatabricksError
 from dbx.errors import friendly_error, format_table, stringify
 
 
-def _print_auth_mode() -> AuthSource:
-    """Print the active auth mode and return it. Raises PermissionError if
-    nothing is configured (caller catches and exits)."""
-    source = get_auth_source()
-    label = {
-        AuthSource.OAUTH: "OAuth (DATABRICKS_CLIENT_ID)",
-        AuthSource.PAT:   "PAT (DATABRICKS_ACCESS_TOKEN)",
-        AuthSource.BEARER: "backend Bearer header",
-    }[source]
-    print(f"Databricks auth mode: {label}")
-    return source
+_AUTH_LABELS = {
+    AuthSource.OAUTH:  "OAuth (DATABRICKS_CLIENT_ID)",
+    AuthSource.PAT:    "PAT (DATABRICKS_ACCESS_TOKEN)",
+    AuthSource.BEARER: "backend Bearer header",
+}
 
 
 def cmd_whoami(args):
-    source = _print_auth_mode()
+    source = get_auth_source()
+    print(f"Databricks auth mode: {_AUTH_LABELS[source]}")
     if source is AuthSource.PAT:
         print("PAT mode — no browser login needed.")
     result = db.run_query("SELECT current_user() AS user")
@@ -65,10 +60,7 @@ def cmd_query(args):
     if not columns:
         print("(no result set)")
         return
-    table = format_table(
-        columns, [[stringify(v) for v in row] for row in rows]
-    )
-    print(table)
+    print(format_table(columns, [[stringify(v) for v in row] for row in rows]))
     suffix = " — truncated; refine with LIMIT" if result.get("truncated") else ""
     print(f"\n({len(rows)} row(s){suffix})")
 
@@ -103,15 +95,6 @@ def cmd_logout(args):
         )
 
 
-def _resolve_source_or_none() -> AuthSource | None:
-    """Best-effort capture of the auth source for friendly error formatting.
-    Returns None if nothing is configured — friendly_error handles that case."""
-    try:
-        return get_auth_source()
-    except PermissionError:
-        return None
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Databricks CLI — SQL warehouse queries with OAuth or PAT auth."
@@ -142,10 +125,13 @@ def main():
 
     args = parser.parse_args()
 
-    # Snapshot the auth source up front so any DatabricksError raised by the
-    # command can be formatted with accurate context (matches the MCP server's
-    # "capture at tool entry" pattern).
-    source = _resolve_source_or_none()
+    # Snapshot auth source up front so any DatabricksError raised by the
+    # command can be formatted with accurate context. None is fine —
+    # friendly_error handles the unconfigured case.
+    try:
+        source = get_auth_source()
+    except PermissionError:
+        source = None
 
     try:
         args.func(args)

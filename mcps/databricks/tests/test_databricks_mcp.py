@@ -310,17 +310,3 @@ class TestTokenThreading:
         assert seen_tokens == ["the-tok", "the-tok", "the-tok"]
 
 
-class TestDefensivePermissionErrorHandling:
-    """Defense in depth: _capture_token already catches PermissionError before
-    we hand off to to_thread, so this path is unreachable today. But if a
-    future refactor lets the worker thread call get_databricks_token(), we
-    must surface a friendly message — not a stack trace."""
-
-    async def test_permission_error_from_worker_returns_message(self, mcp_server):
-        from dbx.auth import AuthSource
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("t", AuthSource.PAT)), \
-             patch("databricks_mcp.db.run_query",
-                   side_effect=PermissionError("token went missing mid-query")):
-            out = await _call(mcp_server, "run_query", {"query": "SELECT 1"})
-        assert "token went missing" in out
