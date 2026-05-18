@@ -144,19 +144,67 @@ claude mcp add --transport http --scope user atlassian http://localhost:18003/mc
 
 The MCP servers must be running whenever Claude Code is. Use `make stop` to shut down between sessions, `make claude-remove` to unregister.
 
-## Token caches
+## Token database
 
-All providers cache under `~/.bond_mcps/`:
+OAuth tokens are stored in an encrypted SQLAlchemy database. By default this is a SQLite file at `<repo>/tokens.db` (gitignored); set `BOND_MCPS_DB_URL` to point at PostgreSQL / Aurora RDS for a deployed setup.
 
-| MCP | Cache file | Notes |
+| Setting | Default | Notes |
 |---|---|---|
-| Microsoft | `~/.bond_mcps/microsoft.json` | MSAL-managed (silent refresh via cached refresh token) |
-| GitHub | `~/.bond_mcps/github.json` | GitHub OAuth tokens don't expire by default — no refresh needed; re-auth only required if you revoke the token |
-| Atlassian | `~/.bond_mcps/atlassian.json` | Auto-refresh via `refresh_token` if `ATLASSIAN_CLIENT_ID/SECRET` are set |
+| `BOND_MCPS_DB_URL` | `sqlite:///<repo>/tokens.db` | Postgres URLs must include `sslmode=require\|verify-ca\|verify-full` |
+| `BOND_MCPS_ENCRYPTION_KEY` | (none) | base64-encoded 32-byte AES-256 key. Required for Postgres; for SQLite, falls back to a 0600 file at `~/.bond_mcps/encryption_key` (logs a WARN on every startup) |
+| `BOND_MCPS_USER_ID` | `getpass.getuser()` (SQLite only) | identifies who the tokens belong to. **Required for Postgres deployments** — `current_user_key()` refuses to fall back when the DB URL is Postgres, because containers typically run as `root` and would silently collide across tenants |
 
-To force re-auth for one provider: `make logout-<provider>` (or delete its cache file). To wipe everything: `rm -rf ~/.bond_mcps/`.
+Tokens are encrypted with AES-256-GCM. Each ciphertext is bound to `(user_key, provider, field, key_version)` as AEAD associated data, so cross-row or cross-field tampering is rejected. Plaintext tokens never appear in the DB.
 
-**Migrating from the old layout** (`~/.ms_graph_tokens.json`, `~/.bond_ai_tokens/`): run `make migrate-tokens` once. It moves existing tokens into `~/.bond_mcps/` and removes the empty legacy directory. Safe to re-run.
+### One-time setup
+
+```bash
+make install              # installs deps + runs `bond-mcps migrate-db`
+cd auth && poetry run bond-mcps generate-key   # mint a key
+export BOND_MCPS_ENCRYPTION_KEY=<paste here>
+cd auth && poetry run bond-mcps doctor          # validates URL, schema, encryption
+```
+
+### Day-to-day
+
+| Action | Command |
+|---|---|
+| Re-auth a provider | `make logout-<provider>` (clears DB row) then `make login-<provider>` |
+| Wipe everything | `rm -f tokens.db tokens.db-*` |
+| Run schema migrations | `make migrate-db` |
+| Health check | `make doctor` |
+
+### Migrating from the legacy file cache
+
+If you have existing tokens in `~/.bond_mcps/*.json` from a prior version: `make import-tokens` imports them into the encrypted DB and moves the original files to `~/.bond_mcps/legacy_imported/<provider>.json.<timestamp>` (preserved for recovery). Per-provider: GitHub/Atlassian go into the `provider_tokens` table; Microsoft's MSAL cache blob goes into `msal_token_caches`.
+
+The older `make migrate-tokens` target still handles paths from the pre-`bond_mcps` era (`~/.ms_graph_tokens.json`, `~/.bond_ai_tokens/`) — run that first if you're coming from bond-ai, then `make import-tokens` to move into the DB.
+
+`import-tokens` reads from `~/.bond_mcps/` on the local filesystem — it is not meaningful in containerized / AWS deployments where that directory doesn't exist. Use it on the developer machine that holds the legacy file cache.
+
+### Deploying to AWS (Aurora RDS)
+
+The auth package refuses to start when `BOND_MCPS_DB_URL` is unset *and* it's not running from a bond-mcps dev checkout (i.e., when installed into a container or Lambda runtime where the default SQLite path is meaningless). Production setups must provide:
+
+| Env var | Source | Notes |
+|---|---|---|
+| `BOND_MCPS_DB_URL` | Secrets Manager → ECS task secret | `postgresql+psycopg://<user>:<password>@<host>:5432/<dbname>?sslmode=verify-full&sslrootcert=/etc/ssl/certs/rds-global-bundle.pem` |
+| `BOND_MCPS_ENCRYPTION_KEY` | Secrets Manager → ECS task secret | base64-encoded 32-byte key. File fallback is disabled for Postgres URLs — the env var is required |
+| `BOND_MCPS_USER_ID` | container env (per-tenant) | required when `getpass.getuser()` would be meaningless (Fargate task user is `root`) |
+
+**TLS to Aurora**: `sslmode=verify-full` is enforced at engine creation. Download the AWS RDS global root CA bundle and bake it into the container image (or mount via SSM):
+
+```
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/certs/rds-global-bundle.pem
+```
+
+**Connection pooling**: each bond-mcps process opens up to 15 Postgres connections (`pool_size=10`, `max_overflow=5`). For a deployment of N replicas × 3 MCP processes, that's 45N connections — size the Aurora instance class accordingly (db.t4g.medium tops out at ~85 concurrent connections; db.r6g.large at ~1700).
+
+**Cold start / Serverless v2**: `connect_timeout=30` is configured. Aurora Serverless v2 (ACU=0 paused) can take 10-30s to wake — health-check grace periods should be at least 60s for the first request after a long idle.
+
+**Migrations**: run `bond-mcps migrate-db` as a one-off ECS task (or `make migrate-db` in CI) before scaling out the service. The auth package refuses to start when the schema is behind head — there's no auto-upgrade.
+
+**Key rotation**: the `key_version` column is in place for future rotation. For v1, treat the key as long-lived; rotate by re-encrypting all rows with a new key (CLI not yet shipped — manual or via a custom script).
 
 ## Known account-type limitations
 

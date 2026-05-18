@@ -31,12 +31,17 @@ from github import pulls as pulls_ops
 from github import code as code_ops
 
 logging.basicConfig(level=logging.INFO)
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def _lifespan(app):
-    """Warn if auth proxy is unreachable when local auth is configured."""
+    """Fail fast on misconfig and warn if the auth proxy isn't reachable."""
+    from auth import startup
+    startup.verify_runtime_config()
+
     if os.environ.get("GITHUB_CLIENT_ID"):
         from auth import OAuthProxyClient
         proxy = OAuthProxyClient()
