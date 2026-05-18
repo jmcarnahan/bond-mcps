@@ -1,49 +1,98 @@
 # Pre-deploy guardrails.
 #
-# This null_resource fails the apply if the encryption-key Secrets Manager
-# value is still the placeholder string. Without this check, pods would
-# come up and immediately crash-loop in their preflight initContainer with
-# a confusing TokenEncryptionError — much harder to diagnose than a clean
-# terraform-side failure.
+# Each `terraform_data` block reads the current SM secret value at plan time
+# and asserts (via lifecycle.precondition) that it isn't the placeholder.
+# This means `terraform plan` itself fails with a clear message — no
+# local-exec, no per-apply AWS CLI shell-out, no path.cwd fragility.
 #
-# Runs every apply (triggers always changes). Cheap: one AWS call.
+# Two guards:
+#   - encryption-key: always required
+#   - JWT public key:  only when var.jwt_verification.enabled = true
+#
+# Both feed into module.service.depends_on so workloads never roll out with
+# placeholder secret material that would crash the preflight initContainer.
 
-resource "null_resource" "encryption_key_seeded" {
-  triggers = {
-    # Always re-evaluate; the check itself is the source of truth.
-    every_apply = timestamp()
-  }
+# -----------------------------------------------------------------------------
+# Encryption key
+# -----------------------------------------------------------------------------
 
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      set -e
-      val=$(aws secretsmanager get-secret-value \
-        --secret-id ${aws_secretsmanager_secret.encryption_key.name} \
-        --query SecretString --output text \
-        --region ${var.aws_region} 2>/dev/null || echo '{}')
+data "aws_secretsmanager_secret_version" "encryption_key_current" {
+  secret_id = aws_secretsmanager_secret.encryption_key.id
 
-      if echo "$val" | grep -q 'REPLACE_ME'; then
-        cat >&2 <<MSG
-
-ERROR: ${aws_secretsmanager_secret.encryption_key.name} still has the placeholder value.
-
-Pods will crash in their preflight initContainer until you seed it:
-
-  KEY=\$(cd ${path.cwd}/../../ && poetry --directory auth run bond-mcps generate-key)
-  aws secretsmanager put-secret-value \\
-    --secret-id ${aws_secretsmanager_secret.encryption_key.name} \\
-    --region ${var.aws_region} \\
-    --secret-string "{\"BOND_MCPS_ENCRYPTION_KEY\": \"\$KEY\"}"
-
-Re-run \`terraform apply\` once seeded.
-
-MSG
-        exit 1
-      fi
-      echo "Encryption key looks seeded — proceeding."
-    EOT
-  }
-
+  # Wait until our placeholder version exists so the lookup doesn't 404 on
+  # very first apply. lifecycle.ignore_changes on the version means TF
+  # won't churn after the operator seeds the real value.
   depends_on = [aws_secretsmanager_secret_version.encryption_key]
+}
+
+resource "terraform_data" "encryption_key_seeded" {
+  input = data.aws_secretsmanager_secret_version.encryption_key_current.secret_string
+
+  lifecycle {
+    precondition {
+      condition = !can(regex(
+        "REPLACE_ME",
+        data.aws_secretsmanager_secret_version.encryption_key_current.secret_string
+      ))
+      error_message = <<-EOM
+        ${aws_secretsmanager_secret.encryption_key.name} still has the
+        placeholder value. Seed it before applying:
+
+          cd <repo>/auth
+          KEY=$(poetry run bond-mcps generate-key)
+          aws secretsmanager put-secret-value \
+            --secret-id ${aws_secretsmanager_secret.encryption_key.name} \
+            --region ${var.aws_region} \
+            --secret-string "{\"BOND_MCPS_ENCRYPTION_KEY\": \"$KEY\"}"
+
+        Re-run `terraform apply` once seeded.
+      EOM
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# JWT public key (only when multi-tenant identity is enabled)
+# -----------------------------------------------------------------------------
+
+data "aws_secretsmanager_secret_version" "jwt_public_key_current" {
+  count = var.jwt_verification.enabled ? 1 : 0
+
+  secret_id = aws_secretsmanager_secret.jwt_public_key.id
+
+  depends_on = [aws_secretsmanager_secret_version.jwt_public_key]
+}
+
+resource "terraform_data" "jwt_public_key_seeded" {
+  count = var.jwt_verification.enabled ? 1 : 0
+
+  input = data.aws_secretsmanager_secret_version.jwt_public_key_current[0].secret_string
+
+  lifecycle {
+    precondition {
+      condition = !can(regex(
+        "REPLACE_WITH_PEM",
+        data.aws_secretsmanager_secret_version.jwt_public_key_current[0].secret_string
+      ))
+      error_message = <<-EOM
+        ${aws_secretsmanager_secret.jwt_public_key.name} still has the
+        placeholder value but var.jwt_verification.enabled = true.
+
+        Seed the PEM-encoded public key (PEM must use Unix line endings):
+
+          jq -Rsn --rawfile pem /path/to/bond-ai-jwt-public.pem \
+             '{BOND_MCPS_JWT_PUBLIC_KEY: $pem}' > /tmp/jwt-payload.json
+
+          aws secretsmanager put-secret-value \
+            --secret-id ${aws_secretsmanager_secret.jwt_public_key.name} \
+            --region ${var.aws_region} \
+            --secret-string file:///tmp/jwt-payload.json
+
+          rm /tmp/jwt-payload.json
+
+        Re-run `terraform apply` once seeded. Or flip
+        var.jwt_verification.enabled = false to revert to single-tenant mode.
+      EOM
+    }
+  }
 }
