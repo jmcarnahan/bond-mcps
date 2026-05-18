@@ -79,3 +79,34 @@ def test_postgres_engine_kwargs_include_connect_timeout(monkeypatch):
     assert captured["kwargs"]["connect_args"].get("connect_timeout") == 30
     # And pool_pre_ping for Aurora failover handling.
     assert captured["kwargs"].get("pool_pre_ping") is True
+
+
+def test_postgres_engine_pool_sized_for_aurora_serverless_v2(monkeypatch):
+    """Pool sizing is deployment-critical for Aurora Serverless v2.
+
+    Aurora at 1.0 ACU caps connections around 113. We have ~9 worker
+    processes (4 MCPs × 2 replicas + auth × 1), so per-process pool must
+    stay small enough that 9× sum ≤ 113 with headroom. pool_size=3 +
+    max_overflow=2 puts the per-process cap at 5, total peak at 45.
+    """
+    from unittest.mock import patch as _patch
+
+    import auth.db.session as session_mod
+
+    captured = {}
+
+    def fake_create_engine(url, **kwargs):
+        captured["kwargs"] = kwargs
+
+        class _Stub:
+            dialect = type("D", (), {"name": "postgresql"})()
+            def connect(self): raise RuntimeError("stub")
+            def dispose(self): pass
+
+        return _Stub()
+
+    with _patch.object(session_mod, "create_engine", side_effect=fake_create_engine):
+        session_mod._make_engine("postgresql://u:p@h:5432/d?sslmode=verify-full")
+
+    assert captured["kwargs"].get("pool_size") == 3
+    assert captured["kwargs"].get("max_overflow") == 2

@@ -29,6 +29,42 @@ class TestGetRedirectUri:
             client = OAuthProxyClient()
             assert client.port == 7777
 
+    def test_public_url_env_overrides_localhost(self):
+        with patch.dict(
+            os.environ,
+            {"BOND_AUTH_PROXY_PUBLIC_URL": "https://auth.mcps.example.com"},
+        ):
+            client = OAuthProxyClient(port=8000)
+            assert client.get_redirect_uri("github") == \
+                "https://auth.mcps.example.com/connections/github/callback"
+
+    def test_public_url_strips_trailing_slash(self):
+        with patch.dict(
+            os.environ,
+            {"BOND_AUTH_PROXY_PUBLIC_URL": "https://auth.mcps.example.com/"},
+        ):
+            client = OAuthProxyClient(port=8000)
+            assert client.get_redirect_uri("github") == \
+                "https://auth.mcps.example.com/connections/github/callback"
+
+    def test_empty_public_url_falls_back_to_localhost(self):
+        with patch.dict(os.environ, {"BOND_AUTH_PROXY_PUBLIC_URL": ""}):
+            client = OAuthProxyClient(port=8000)
+            assert client.get_redirect_uri("github") == \
+                "http://localhost:8000/connections/github/callback"
+
+    def test_public_url_ignores_client_port(self):
+        """Public URL is authoritative — the client's internal port matters
+        only for in-cluster polling, not for the redirect URI the OAuth
+        provider sees."""
+        with patch.dict(
+            os.environ,
+            {"BOND_AUTH_PROXY_PUBLIC_URL": "https://auth.mcps.example.com"},
+        ):
+            client = OAuthProxyClient(port=9999)
+            assert client.get_redirect_uri("github") == \
+                "https://auth.mcps.example.com/connections/github/callback"
+
 
 class TestHealthCheck:
     def test_healthy(self):

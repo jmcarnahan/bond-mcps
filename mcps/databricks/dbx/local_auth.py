@@ -86,8 +86,8 @@ def get_local_token() -> str:
     client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET") or None
     _, token_url = _auth_endpoints(host)
 
-    from auth import TokenStore
-    store = TokenStore("databricks")
+    from auth import TokenStore, resolve_user_key_for_request
+    store = TokenStore("databricks", user_key=resolve_user_key_for_request())
 
     # 1. Cached token (with refresh)
     # TokenStore.refresh_if_needed requires a non-None client_secret arg; pass

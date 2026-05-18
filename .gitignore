@@ -27,6 +27,10 @@ tmp/
 # Git worktrees
 .worktrees/
 
+# CI-generated build context (auth/ subtree copied into each MCP's build dir
+# before `docker build`; cleaned up afterward).
+mcps/*/_shared_auth_pkg/
+
 # Terraform
 .terraform/
 *.tfstate
@@ -35,4 +39,6 @@ tmp/
 *.tfvars.json
 crash.log
 *.tfstate.lock.info
+# But: keep the per-env templates checked in.
+!deployment/terraform-existing-vpc/environments/*.tfvars
 

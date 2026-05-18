@@ -103,7 +103,22 @@ class OAuthProxyClient:
         raise TimeoutError("Timed out waiting for OAuth callback")
 
     def get_redirect_uri(self, provider: str) -> str:
-        """Return the redirect URI for the given provider."""
+        """Return the redirect URI for the given provider.
+
+        Local dev (default): http://localhost:{self.port}/connections/{provider}/callback
+
+        Deployed: set BOND_AUTH_PROXY_PUBLIC_URL to the public origin the
+        OAuth provider can reach (e.g. https://auth.mcps.example.com) and the
+        redirect URI is built off that base instead. The URL registered with
+        the OAuth provider must match exactly — register the deployed URL
+        before triggering an OAuth flow from a deployed MCP.
+
+        Trailing slashes on the env var are stripped to avoid double-slash
+        URLs ("//connections/...").
+        """
+        public_url = os.environ.get("BOND_AUTH_PROXY_PUBLIC_URL", "").strip()
+        if public_url:
+            return f"{public_url.rstrip('/')}/connections/{provider}/callback"
         return f"http://localhost:{self.port}/connections/{provider}/callback"
 
     def _health_check(self) -> bool:

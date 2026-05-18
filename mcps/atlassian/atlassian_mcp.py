@@ -28,6 +28,7 @@ from typing import Sequence
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -61,6 +62,14 @@ async def _lifespan(app):
 
 
 mcp = FastMCP("Atlassian MCP Server", lifespan=_lifespan)
+
+
+# Liveness/readiness probe. Returns 200 immediately if the ASGI app is up.
+# Does NOT touch the DB or auth proxy — those are validated at startup by
+# `bond-mcps doctor`. Used by k8s probes + the ALB target-group healthcheck.
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request):
+    return JSONResponse({"status": "ok"})
 
 
 def _format_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
