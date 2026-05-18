@@ -1,3 +1,112 @@
-# Inputs: one entry of the services map (flattened) plus shared inputs
-# (namespace, cluster name, alb cert arn, ESO ClusterSecretStore name,
-# encryption_key_secret_name, db_credentials_secret_name, full image URI, etc.).
+variable "service_key" {
+  type        = string
+  description = "Short service name (auth, github, microsoft, ...). Used as Helm release name and Service DNS prefix."
+}
+
+variable "namespace" {
+  type        = string
+  description = "k8s namespace to install into (typically bond-mcps)."
+}
+
+variable "image_repository" {
+  type        = string
+  description = "Full ECR repository URL."
+}
+
+variable "image_tag" {
+  type    = string
+  default = "latest"
+}
+
+variable "container_port" {
+  type    = number
+  default = 8000
+}
+
+variable "replicas" {
+  type    = number
+  default = 1
+}
+
+variable "is_auth_proxy" {
+  type    = bool
+  default = false
+}
+
+variable "runs_migrations" {
+  type    = bool
+  default = false
+}
+
+variable "user_key" {
+  type        = string
+  description = "BOND_MCPS_USER_ID value. Single-tenant per pod today — see plan section H C2."
+}
+
+variable "hostname" {
+  type        = string
+  description = "External hostname this service is exposed at."
+}
+
+variable "extra_env" {
+  type    = map(string)
+  default = {}
+}
+
+variable "auth_proxy_internal_host" {
+  type        = string
+  description = "In-cluster DNS of the auth proxy service. Injected as AUTH_PROXY_HOST for non-auth services."
+}
+
+variable "auth_proxy_port" {
+  type    = number
+  default = 8000
+}
+
+variable "encryption_key_secret_name" {
+  type        = string
+  description = "Full Secrets Manager name (e.g. bond-mcps-dev-encryption-key) of the AES-256 key."
+}
+
+variable "db_credentials_secret_name" {
+  type        = string
+  description = "Full SM name of Aurora credentials. ESO templates BOND_MCPS_DB_URL from it."
+}
+
+variable "oauth_secret_name" {
+  type        = string
+  default     = null
+  description = "Full SM name of this service's OAuth credentials. null = no OAuth secret."
+}
+
+variable "cluster_secret_store_name" {
+  type    = string
+  default = "bond-mcps-aws-sm"
+}
+
+variable "acm_certificate_arn" {
+  type        = string
+  description = "ACM cert ARN for the wildcard *.<base_domain> cert."
+}
+
+variable "health" {
+  type = object({
+    type = string
+    path = optional(string, "/health")
+  })
+  default = { type = "tcp" }
+}
+
+variable "resources" {
+  type = object({
+    requests = object({ cpu = string, memory = string })
+    limits   = object({ cpu = string, memory = string })
+  })
+  default = null
+}
+
+variable "chart_path" {
+  type        = string
+  description = "Filesystem path to the mcp-service Helm chart (relative to this module)."
+  default     = "../../../helm/mcp-service"
+}
