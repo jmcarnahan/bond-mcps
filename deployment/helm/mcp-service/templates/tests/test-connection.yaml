@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "mcp-service.fullname" . }}-test-connection
+  labels:
+    {{- include "mcp-service.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      # Pinned to a specific patch tag for reproducibility. Bump
+      # intentionally on CVE fix releases; the major-only `:8` tag
+      # drifts and would make `helm test` non-deterministic.
+      image: curlimages/curl:8.10.1
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          # In-cluster DNS resolves the service name to its ClusterIP, so
+          # plain curl works. The probe path follows the chart's readiness
+          # config — every service exposes either /health (auth) or
+          # /healthz (MCPs) at .Values.probes.readiness.path.
+          URL="http://{{ include "mcp-service.fullname" . }}:{{ .Values.port }}{{ .Values.probes.readiness.path }}"
+          echo "Probing $URL"
+          curl -fsS --max-time 30 "$URL"
+          echo
+          echo "OK"

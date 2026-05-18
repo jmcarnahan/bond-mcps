@@ -174,11 +174,18 @@ def _make_engine(url: str) -> Engine:
     # Non-SQLite (Postgres / Aurora). connect_timeout bounds the wait on a
     # cold Aurora Serverless v2 cluster wake; without it psycopg waits
     # forever and container health checks time out into a restart loop.
+    #
+    # pool_size=3 + max_overflow=2 ⇒ at most 5 connections per process.
+    # Aurora Serverless v2 at 1.0 ACU has ~113 max connections; with 9
+    # worker processes (4 MCPs × 2 + auth × 1) the peak is 45, leaving
+    # comfortable headroom for preflight initContainers and ad-hoc
+    # operator queries. See deployment/terraform-existing-vpc/README.md
+    # "Aurora connection budget" for the math.
     return create_engine(
         url,
         echo=False,
-        pool_size=10,
-        max_overflow=5,
+        pool_size=3,
+        max_overflow=2,
         pool_pre_ping=True,
         pool_recycle=3600,
         connect_args={"connect_timeout": 30},

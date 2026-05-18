@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def current_user_key() -> str:
-    """Resolve the user identity for token rows.
+    """Resolve the user identity for token rows from the process environment.
 
     BOND_MCPS_USER_ID env var wins. Falls back to getpass.getuser() for
     convenience in local SQLite deployments only.
@@ -34,6 +34,8 @@ def current_user_key() -> str:
     inside an ECS/Fargate container typically returns ``"root"``, which
     would silently collide across container tenants and write all users'
     tokens into the same DB rows.
+
+    For per-request multi-tenant resolution, see ``resolve_user_key_for_request()``.
     """
     explicit = os.environ.get("BOND_MCPS_USER_ID")
     if explicit:
@@ -52,6 +54,67 @@ def current_user_key() -> str:
             "or service account name)."
         )
     return getpass.getuser()
+
+
+def resolve_user_key_for_request() -> str:
+    """Resolve the user_key for the current HTTP request.
+
+    Multi-tenant deployments enable per-request identity by setting
+    BOND_MCPS_JWT_PUBLIC_KEY (see auth.jwt_identity). When set, every
+    HTTP-bound request must carry an ``X-Bond-Auth: Bearer <jwt>`` header;
+    the JWT's signature is verified and the configured claim (default
+    ``sub``) becomes the user_key.
+
+    Behavior matrix:
+      - Outside an HTTP request context (CLI, startup, tests): fall back to
+        ``current_user_key()`` (env-based). The JWT requirement only applies
+        to live request handling.
+      - In an HTTP context, JWT verification disabled (env unset): fall back
+        to ``current_user_key()``. This is the single-tenant deploy mode.
+      - In an HTTP context, JWT verification enabled, header present and
+        valid: return the JWT-derived user_key.
+      - In an HTTP context, JWT verification enabled, header missing or
+        invalid: raise ``IdentityVerificationError`` (caller must identify;
+        we will not silently write to the env-based tenant row).
+    """
+    # Lazy import: fastmcp may not be installed in pure-auth test envs.
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+    except ImportError:
+        return current_user_key()
+
+    try:
+        headers = get_http_headers(include={"x-bond-auth"})
+        in_http_context = True
+    except Exception:
+        # Not running inside a fastmcp request (CLI, startup, tests).
+        in_http_context = False
+        headers = {}
+
+    # Cheap inline env check — keeps auth.jwt_identity (and pyjwt) out of the
+    # import graph entirely when JWT verification is disabled. A stale local
+    # .venv without pyjwt still works for local-dev Path-2 flows.
+    jwt_enabled = bool(os.environ.get("BOND_MCPS_JWT_PUBLIC_KEY", "").strip())
+
+    if not jwt_enabled or not in_http_context:
+        # Single-tenant deploy (env-based) or non-HTTP context (CLI, startup,
+        # tests). The JWT requirement only applies to live HTTP requests.
+        return current_user_key()
+
+    # JWT mode + HTTP context: pyjwt MUST be available. Import now.
+    from auth.jwt_identity import IdentityVerificationError, verify_identity_token
+
+    bond_auth = headers.get("x-bond-auth", "") if headers else ""
+    if not bond_auth.startswith("Bearer "):
+        raise IdentityVerificationError(
+            "Multi-tenant mode is enabled (BOND_MCPS_JWT_PUBLIC_KEY is set) "
+            "but this request lacks an `X-Bond-Auth: Bearer <jwt>` header. "
+            "Identify the caller via a signed JWT or unset the public key "
+            "config to revert to single-tenant mode."
+        )
+
+    token = bond_auth[len("Bearer "):].strip()
+    return verify_identity_token(token)
 
 
 class TokenStore:

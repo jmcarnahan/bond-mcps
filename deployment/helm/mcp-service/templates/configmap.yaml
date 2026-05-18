@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mcp-service.fullname" . }}-config
+  labels:
+    {{- include "mcp-service.labels" . | nindent 4 }}
+data:
+  {{- /* Inject auth proxy coordinates so MCP services don't have to declare them per-service. */ -}}
+  {{- if .Values.authProxy.inject }}
+  AUTH_PROXY_HOST: {{ .Values.authProxy.host | quote }}
+  BOND_AUTH_PROXY_PORT: {{ .Values.authProxy.port | quote }}
+  {{- if .Values.authProxy.publicUrl }}
+  BOND_AUTH_PROXY_PUBLIC_URL: {{ .Values.authProxy.publicUrl | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.userKey }}
+  BOND_MCPS_USER_ID: {{ .Values.userKey | quote }}
+  {{- end }}
+  {{- if .Values.jwt.enabled }}
+  {{- if .Values.jwt.issuer }}
+  BOND_MCPS_JWT_ISSUER: {{ .Values.jwt.issuer | quote }}
+  {{- end }}
+  {{- if .Values.jwt.audience }}
+  BOND_MCPS_JWT_AUDIENCE: {{ .Values.jwt.audience | quote }}
+  {{- end }}
+  BOND_MCPS_JWT_ALGORITHM: {{ .Values.jwt.algorithm | quote }}
+  {{- if ne .Values.jwt.subClaim "sub" }}
+  BOND_MCPS_JWT_SUB_CLAIM: {{ .Values.jwt.subClaim | quote }}
+  {{- end }}
+  {{- end }}
+  {{- range $k, $v := .Values.env }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

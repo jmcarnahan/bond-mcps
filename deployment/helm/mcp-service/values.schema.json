@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "port", "replicas", "secrets", "externalSecrets"],
+  "additionalProperties": true,
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag":        { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "command":  { "type": "array", "items": { "type": "string" } },
+    "port":     { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "replicas":    { "type": "integer", "minimum": 0 },
+    "isAuthProxy": { "type": "boolean" },
+    "env":         { "type": "object" },
+    "userKey":     { "type": "string" },
+    "authProxy": {
+      "type": "object",
+      "properties": {
+        "inject":    { "type": "boolean" },
+        "host":      { "type": "string" },
+        "port":      { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "publicUrl": { "type": "string" }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "encryptionKey": { "$ref": "#/definitions/secretBlock" },
+        "db":            { "$ref": "#/definitions/secretBlock" },
+        "oauth":         { "$ref": "#/definitions/secretBlock" }
+      }
+    },
+    "externalSecrets": {
+      "type": "object",
+      "required": ["clusterSecretStoreName"],
+      "properties": {
+        "clusterSecretStoreName": { "type": "string", "minLength": 1 },
+        "refreshInterval":        { "type": "string" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled":         { "type": "boolean" },
+        "host":            { "type": "string" },
+        "className":       { "type": "string" },
+        "certificateArn":  { "type": "string" },
+        "groupName":       { "type": "string" },
+        "groupOrder":      { "type": "integer" },
+        "scheme":          { "type": "string", "enum": ["internet-facing", "internal"] },
+        "healthCheckPath": { "type": "string" },
+        "successCodes":    { "type": "string" },
+        "environmentTag":  { "type": "string" }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "properties": {
+        "liveness":  { "$ref": "#/definitions/probeBlock" },
+        "readiness": { "$ref": "#/definitions/probeBlock" }
+      }
+    },
+    "jwt": {
+      "type": "object",
+      "properties": {
+        "enabled":            { "type": "boolean" },
+        "secretsManagerName": { "type": "string" },
+        "issuer":             { "type": "string" },
+        "audience":           { "type": "string" },
+        "algorithm":          { "type": "string" },
+        "subClaim":           { "type": "string" }
+      }
+    },
+    "migrations": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "command": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "command": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "pdb": {
+      "type": "object",
+      "properties": {
+        "enabled":      { "type": "boolean" },
+        "minAvailable": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "vpcCidr": { "type": "string" }
+      }
+    }
+  },
+  "definitions": {
+    "secretBlock": {
+      "type": "object",
+      "properties": {
+        "enabled":            { "type": "boolean" },
+        "secretsManagerName": { "type": "string" },
+        "sslmode":            { "type": "string" }
+      }
+    },
+    "probeBlock": {
+      "type": "object",
+      "properties": {
+        "type":                { "type": "string", "enum": ["http", "tcp"] },
+        "path":                { "type": "string" },
+        "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+        "periodSeconds":       { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

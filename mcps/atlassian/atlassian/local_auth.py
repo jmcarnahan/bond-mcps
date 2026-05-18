@@ -71,8 +71,8 @@ def get_local_token_and_cloud_id() -> tuple[str, str]:
             "are required for local authentication."
         )
 
-    from auth import TokenStore
-    store = TokenStore("atlassian")
+    from auth import TokenStore, resolve_user_key_for_request
+    store = TokenStore("atlassian", user_key=resolve_user_key_for_request())
 
     # 1. Try cached token (with refresh)
     token = store.refresh_if_needed(client_id, client_secret, TOKEN_URL)
