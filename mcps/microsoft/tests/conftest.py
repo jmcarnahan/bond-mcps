@@ -1,8 +1,15 @@
 """Shared fixtures and mock data for Microsoft Graph tests."""
 
+import os
 from unittest.mock import AsyncMock
 
 import pytest
+
+# Tests exercise the MCP server via the FastMCP test client which triggers
+# our lifespan, which runs auth.startup.verify_runtime_config(). That check
+# wants a real DB and encryption key — neither of which the test suite
+# stands up. Skip it for tests. NEVER set this env var in production.
+os.environ.setdefault("BOND_MCPS_SKIP_STARTUP_VERIFY", "1")
 
 
 @pytest.fixture

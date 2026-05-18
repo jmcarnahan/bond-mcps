@@ -41,6 +41,9 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
+
 from atlassian.atlassian_client import AtlassianClient, AtlassianError
 from atlassian.local_auth import get_local_token_and_cloud_id
 from atlassian import jira as jira_ops
@@ -327,8 +330,11 @@ def cmd_user_me(args):
 # ---------------------------------------------------------------------------
 
 def cmd_logout(args):
+    # TokenStore is DB-backed now — the file-based `cache_file` attribute was
+    # removed in PR #4 (db-backed-token-cache). Use get_token() which returns
+    # None when nothing is stored.
     store = TokenStore("atlassian")
-    if store.cache_file.exists():
+    if store.get_token() is not None:
         store.clear()
         print("Logged out. Cached tokens removed.")
     else:
