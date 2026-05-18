@@ -38,6 +38,7 @@ services = {
     replicas          = 2
     oauth_secret_name = "microsoft-oauth"
     extra_env         = { MS_TENANT_ID = "consumers" }
+    health            = { type = "http", path = "/healthz" }
   }
 
   github = {
@@ -47,6 +48,7 @@ services = {
     hostname_prefix   = "github"
     replicas          = 2
     oauth_secret_name = "github-oauth"
+    health            = { type = "http", path = "/healthz" }
   }
 
   atlassian = {
@@ -56,6 +58,7 @@ services = {
     hostname_prefix   = "atlassian"
     replicas          = 2
     oauth_secret_name = "atlassian-oauth"
+    health            = { type = "http", path = "/healthz" }
   }
 
   databricks = {
@@ -65,6 +68,7 @@ services = {
     hostname_prefix   = "databricks"
     replicas          = 2
     oauth_secret_name = "databricks-oauth"
+    health            = { type = "http", path = "/healthz" }
     extra_env = {
       DATABRICKS_HOST      = "https://CHANGE-ME.cloud.databricks.com"
       DATABRICKS_HTTP_PATH = "/sql/1.0/warehouses/CHANGE-ME"

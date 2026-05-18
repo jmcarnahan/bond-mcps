@@ -81,8 +81,10 @@ locals {
       groupOrder      = var.is_auth_proxy ? 1 : 10
       scheme          = var.ingress_scheme
       healthCheckPath = var.health.type == "http" ? var.health.path : "/"
-      successCodes    = "200-499"
-      environmentTag  = var.environment_tag
+      # 200-299 now that every service has a real /healthz returning 200.
+      # Previously 200-499 to tolerate MCPs that lacked the route.
+      successCodes   = "200-299"
+      environmentTag = var.environment_tag
     }
 
     probes = {
