@@ -6,11 +6,16 @@
 # isn't a supported usage pattern here.
 from auth import log_discipline, startup  # noqa: F401
 from auth.proxy_client import AuthStateExpiredError, OAuthProxyClient
-from auth.token_store import TokenStore, current_user_key
+from auth.token_store import (
+    TokenStore,
+    current_user_key,
+    resolve_user_key_for_request,
+)
 
 __all__ = [
     "AuthStateExpiredError",
     "OAuthProxyClient",
     "TokenStore",
     "current_user_key",
+    "resolve_user_key_for_request",
 ]
