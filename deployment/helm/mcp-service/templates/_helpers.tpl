@@ -79,4 +79,8 @@ the same environment.
 - secretRef:
     name: {{ include "mcp-service.fullname" . }}-oauth
 {{- end }}
+{{- if .Values.jwt.enabled }}
+- secretRef:
+    name: {{ include "mcp-service.fullname" . }}-jwt
+{{- end }}
 {{- end -}}

@@ -43,6 +43,13 @@ module "service" {
   cluster_secret_store_name = "bond-mcps-aws-sm"
   acm_certificate_arn       = aws_acm_certificate_validation.wildcard.certificate_arn
 
+  jwt_enabled              = var.jwt_verification.enabled
+  jwt_secrets_manager_name = aws_secretsmanager_secret.jwt_public_key.name
+  jwt_issuer               = var.jwt_verification.issuer
+  jwt_audience             = var.jwt_verification.audience
+  jwt_algorithm            = var.jwt_verification.algorithm
+  jwt_sub_claim            = var.jwt_verification.sub_claim
+
   depends_on = [
     kubectl_manifest.cluster_secret_store, # ESO must be ready
     helm_release.alb_controller,           # so the ingress class resolves

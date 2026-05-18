@@ -64,6 +64,17 @@
         "readiness": { "$ref": "#/definitions/probeBlock" }
       }
     },
+    "jwt": {
+      "type": "object",
+      "properties": {
+        "enabled":            { "type": "boolean" },
+        "secretsManagerName": { "type": "string" },
+        "issuer":             { "type": "string" },
+        "audience":           { "type": "string" },
+        "algorithm":          { "type": "string" },
+        "subClaim":           { "type": "string" }
+      }
+    },
     "migrations": {
       "type": "object",
       "properties": {

@@ -111,6 +111,37 @@ variable "resources" {
   default = null
 }
 
+variable "jwt_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "jwt_secrets_manager_name" {
+  type        = string
+  default     = ""
+  description = "Full SM secret name holding {\"BOND_MCPS_JWT_PUBLIC_KEY\": \"<PEM>\"}. Required if jwt_enabled = true."
+}
+
+variable "jwt_issuer" {
+  type    = string
+  default = ""
+}
+
+variable "jwt_audience" {
+  type    = string
+  default = ""
+}
+
+variable "jwt_algorithm" {
+  type    = string
+  default = "RS256"
+}
+
+variable "jwt_sub_claim" {
+  type    = string
+  default = "sub"
+}
+
 variable "chart_path" {
   type        = string
   description = "Filesystem path to the mcp-service Helm chart (relative to this module)."
