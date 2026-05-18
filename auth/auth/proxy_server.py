@@ -18,6 +18,8 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
+
+from auth import log_discipline
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -203,7 +205,6 @@ def run_proxy(host: str = "127.0.0.1", port: int = 8000) -> None:
     # Pin third-party log levels — same policy as the MCPs. The proxy
     # doesn't currently use httpx/authlib/msal, but applying here keeps
     # the policy uniform across all auth-package processes.
-    from auth import log_discipline
     log_discipline.apply()
     server = _ThreadingHTTPServer((host, port), AuthProxyHandler)
     _write_pid_file()

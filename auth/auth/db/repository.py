@@ -41,9 +41,15 @@ _RESERVED_FIELDS = {
 }
 
 
-def _default_resolver() -> encryption.EncryptionKeyResolver:
-    # Postgres URLs require a strict env-var key; SQLite may use file fallback.
-    url = os.environ.get("BOND_MCPS_DB_URL", "")
+def _default_resolver(url: str = "") -> encryption.EncryptionKeyResolver:
+    """Build the standard resolver for a given DB URL.
+
+    Postgres URLs require an env-var key (no file fallback). SQLite URLs
+    may fall back to ~/.bond_mcps/encryption_key. ``url`` defaults to the
+    BOND_MCPS_DB_URL env var when empty.
+    """
+    if not url:
+        url = os.environ.get("BOND_MCPS_DB_URL", "")
     is_postgres = url.startswith("postgres")  # matches postgres:// and postgresql://
     return encryption.EncryptionKeyResolver(allow_file_fallback=not is_postgres)
 
@@ -61,8 +67,14 @@ class TokenRepository:
         url: str | None = None,
         resolver: encryption.EncryptionKeyResolver | None = None,
     ):
-        self._session_factory = get_session_factory(url)
-        self._resolver = resolver or _default_resolver()
+        # Resolve the URL once and reuse it for both the session factory
+        # and the resolver so they can't drift (e.g., explicit Postgres url
+        # while env still points at sqlite).
+        from auth.db.session import _resolve_url
+
+        resolved = _resolve_url(url)
+        self._session_factory = get_session_factory(resolved)
+        self._resolver = resolver or _default_resolver(resolved)
 
     @contextmanager
     def _read_session(self) -> Iterator[Session]:
