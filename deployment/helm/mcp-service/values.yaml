@@ -1,0 +1,111 @@
+# Default values for one bond-mcps service (auth proxy OR an MCP server).
+# Every key is documented; values.schema.json enforces structure.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: "PLACEHOLDER"    # full ECR URI; Terraform passes the real value
+  tag: "0.0.0"
+  pullPolicy: IfNotPresent
+
+# Override the image CMD only if needed. Both auth and MCP Dockerfiles already
+# bind to 0.0.0.0:8000, so leaving this empty is correct in the default case.
+command: []
+args: []
+
+# Container port. All current images listen on 8000 internally.
+port: 8000
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Non-sensitive env vars rendered into the ConfigMap.
+# When authProxy.inject=true, AUTH_PROXY_HOST + BOND_AUTH_PROXY_PORT are merged in
+# automatically so the operator does not have to repeat them per MCP.
+env: {}
+
+# For MCP services. Set inject: true and host: to the in-cluster DNS of the auth
+# proxy Service. The auth proxy itself sets inject: false.
+authProxy:
+  inject: false
+  host: ""                     # e.g. auth.bond-mcps.svc.cluster.local
+  port: 8000
+
+# Secrets are sourced from AWS Secrets Manager via External Secrets Operator.
+# Each enabled entry renders one ExternalSecret that materialises a k8s Secret
+# named "<fullname>-<key>". That Secret is consumed by the Deployment via envFrom,
+# so the SM JSON keys MUST equal the desired env var names (except `db`, which uses
+# templating to assemble BOND_MCPS_DB_URL from username/password/host/port/dbname).
+secrets:
+  encryptionKey:
+    enabled: true
+    secretsManagerName: ""     # e.g. bond-mcps-dev-encryption-key
+    # JSON shape: {"BOND_MCPS_ENCRYPTION_KEY": "<base64>"}  (SM key == env var name)
+  db:
+    enabled: true
+    secretsManagerName: ""     # e.g. bond-mcps-dev-db-credentials
+    # JSON shape: {"username","password","host","port","dbname"} → templated into URL.
+    sslmode: require
+  oauth:
+    enabled: false
+    secretsManagerName: ""     # e.g. bond-mcps-dev-github-oauth
+    # JSON shape: keys ARE the env var names. e.g.
+    #   {"GITHUB_CLIENT_ID":"…","GITHUB_CLIENT_SECRET":"…"}
+
+# Reference to the ClusterSecretStore created by external-secrets.tf.
+externalSecrets:
+  clusterSecretStoreName: bond-mcps-aws-sm
+  refreshInterval: 1h
+
+serviceAccount:
+  create: true
+  annotations: {}              # set eks.amazonaws.com/role-arn here if this service needs IRSA
+
+ingress:
+  enabled: true
+  host: ""                     # e.g. auth.mcps.ai.example.com
+  className: alb
+  certificateArn: ""           # ACM cert ARN; Terraform passes it
+  groupName: bond-mcps         # alb.ingress.kubernetes.io/group.name — shared ALB
+  groupOrder: 10
+  scheme: internet-facing
+  healthCheckPath: /health     # auth serves /health; MCPs fall back to TCP target health
+  successCodes: "200-299"
+  extraAnnotations: {}
+
+probes:
+  liveness:
+    type: tcp                  # "http" for auth (with path: /health) or "tcp" for MCPs
+    path: /health
+    initialDelaySeconds: 15
+    periodSeconds: 10
+  readiness:
+    type: tcp
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+# Database migrations. Set enabled: true ONLY for the auth service. When enabled,
+# an initContainer runs `bond-mcps migrate-db` on every pod start using the same
+# image and DB secret as the main container. Alembic is idempotent under races.
+migrations:
+  enabled: false
+  command: ["bond-mcps", "migrate-db"]
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
