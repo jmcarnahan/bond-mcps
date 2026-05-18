@@ -74,10 +74,15 @@ class TestConnect:
         # Critical: no credentials_provider callback that could fire from a
         # worker thread with no FastMCP context.
         assert "credentials_provider" not in kwargs
-        # Multi-tenant safety: telemetry off (its daemon thread would call our
-        # auth path with no request context, leaking identity).
+        # Multi-tenant safety: BOTH telemetry flags off. enable_telemetry alone
+        # is insufficient because force_enable_telemetry=True overrides it
+        # (telemetry_client.py is_telemetry_enabled). If a future config layer
+        # passes force_enable_telemetry=True via env or wrapper, our protection
+        # would silently break.
         assert kwargs["enable_telemetry"] is False
-        # Runaway-query cap.
+        assert kwargs["force_enable_telemetry"] is False
+        # Per-HTTP-request hang protection (NOT a query-duration timeout;
+        # that's enforced by the MCP tool layer via asyncio.wait_for).
         assert kwargs["_socket_timeout"] == 300
 
     def test_connect_resolves_token_when_none_given(self, monkeypatch):

@@ -135,12 +135,11 @@ class TestDoBrowserAuth:
 
         with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
              patch("dbx.local_auth.webbrowser"), \
-             patch("dbx.local_auth.secrets") as mock_secrets, \
+             patch("dbx.local_auth.secrets.token_urlsafe", return_value="test-state"), \
              patch(
                  "dbx.local_auth._exchange_code",
                  return_value={"access_token": "new-tok", "refresh_token": "ref"},
              ):
-            mock_secrets.token_urlsafe.return_value = "test-state"
             result = _do_browser_auth(CLIENT_ID, CLIENT_SECRET, WORKSPACE_HOST)
 
         assert result == {"access_token": "new-tok", "refresh_token": "ref"}
@@ -177,8 +176,7 @@ class TestDoBrowserAuth:
         }
         with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
              patch("dbx.local_auth.webbrowser"), \
-             patch("dbx.local_auth.secrets") as mock_secrets:
-            mock_secrets.token_urlsafe.return_value = "expected-state"
+             patch("dbx.local_auth.secrets.token_urlsafe", return_value="expected-state"):
             result = _do_browser_auth(CLIENT_ID, CLIENT_SECRET, WORKSPACE_HOST)
         assert result is None
 

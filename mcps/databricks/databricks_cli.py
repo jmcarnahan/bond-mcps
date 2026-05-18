@@ -22,8 +22,6 @@ Usage:
 """
 
 import argparse
-import csv
-import io
 import os
 import sys
 
@@ -34,6 +32,7 @@ from auth import TokenStore
 from dbx import client as db
 from dbx.auth import AuthSource, get_auth_source
 from dbx.client import DatabricksError
+from dbx.errors import friendly_error, format_table, stringify
 
 
 def _print_auth_mode() -> AuthSource:
@@ -47,23 +46,6 @@ def _print_auth_mode() -> AuthSource:
     }[source]
     print(f"Databricks auth mode: {label}")
     return source
-
-
-def _format_table(header, rows) -> str:
-    """Pipe-delimited table, matching the MCP server's output format."""
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(header)
-    writer.writerows(rows)
-    return buf.getvalue().rstrip("\r\n")
-
-
-def _stringify(val) -> str:
-    if val is None:
-        return ""
-    if isinstance(val, bytes):
-        return val.decode("utf-8", errors="replace")
-    return str(val)
 
 
 def cmd_whoami(args):
@@ -83,13 +65,11 @@ def cmd_query(args):
     if not columns:
         print("(no result set)")
         return
-    table = _format_table(
-        columns, [[_stringify(v) for v in row] for row in rows]
+    table = format_table(
+        columns, [[stringify(v) for v in row] for row in rows]
     )
     print(table)
-    suffix = ""
-    if result.get("truncated"):
-        suffix = " — truncated; refine with LIMIT"
+    suffix = " — truncated; refine with LIMIT" if result.get("truncated") else ""
     print(f"\n({len(rows)} row(s){suffix})")
 
 
@@ -123,6 +103,15 @@ def cmd_logout(args):
         )
 
 
+def _resolve_source_or_none() -> AuthSource | None:
+    """Best-effort capture of the auth source for friendly error formatting.
+    Returns None if nothing is configured — friendly_error handles that case."""
+    try:
+        return get_auth_source()
+    except PermissionError:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Databricks CLI — SQL warehouse queries with OAuth or PAT auth."
@@ -153,13 +142,18 @@ def main():
 
     args = parser.parse_args()
 
+    # Snapshot the auth source up front so any DatabricksError raised by the
+    # command can be formatted with accurate context (matches the MCP server's
+    # "capture at tool entry" pattern).
+    source = _resolve_source_or_none()
+
     try:
         args.func(args)
     except PermissionError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except DatabricksError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(friendly_error(e, source), file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
         print("\nCancelled.")

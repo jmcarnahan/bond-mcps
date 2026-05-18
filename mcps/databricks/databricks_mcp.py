@@ -12,7 +12,11 @@ dbx/auth.py):
 The token is resolved synchronously in each tool's call frame (so FastMCP's
 request-scoped Bearer header is captured) and then handed to a worker thread
 via asyncio.to_thread for the actual SQL round-trip — long queries no longer
-block the event loop.
+block the event loop. Each tool wraps its asyncio.to_thread in
+`asyncio.wait_for(timeout=_QUERY_TIMEOUT_S)` so a runaway query returns a
+prompt error to the client. The background worker thread continues until
+the query naturally finishes (Python has no clean way to cancel a thread);
+its result is discarded.
 
 Run (standalone):
     make dev                                                                    # all 4 services
@@ -23,13 +27,10 @@ Tool summary (4 tools):
 """
 
 import asyncio
-import csv
-import io
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Sequence
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -38,12 +39,19 @@ load_dotenv(Path(__file__).parent / ".env")
 
 from dbx import client as db
 from dbx.auth import AuthSource
-from dbx.client import DatabricksError
+from dbx.client import DatabricksError, _MAX_FETCH_ROWS
+from dbx.errors import friendly_error, format_table, stringify
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _MAX_PREVIEW_ROWS = 50
+
+# Total wall-clock cap on a single tool invocation. If it expires, the tool
+# returns a timeout message; the background thread is orphaned but bounded by
+# the SQL connector's per-request _SOCKET_TIMEOUT_S (each polling call caps
+# at 5 minutes, so an orphan thread eventually self-cleans).
+_QUERY_TIMEOUT_S = 300
 
 
 @asynccontextmanager
@@ -71,77 +79,16 @@ async def _lifespan(app):
 mcp = FastMCP("Databricks MCP Server", lifespan=_lifespan)
 
 
-def _format_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
-    """Pipe-delimited CSV, matching the atlassian MCP table formatter."""
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(header)
-    writer.writerows(rows)
-    return buf.getvalue().rstrip("\r\n")
-
-
-def _friendly_error(err: DatabricksError, source: AuthSource | None) -> str:
-    """Map DatabricksError codes to user-readable messages.
-
-    `source` is the AuthSource that produced the token for the failed call,
-    captured at tool entry. Threading it through (rather than re-reading env
-    vars at error-formatting time) ensures the message matches the actual
-    auth path used.
-    """
-    code = err.error_code
-
-    if code == "MissingConfig":
-        return f"Databricks not configured: {err}"
-
-    if code == "Unauthorized":
-        if source is AuthSource.OAUTH:
-            return (
-                "Databricks authentication failed. Run `make login-databricks` "
-                "to reconnect, or check that DATABRICKS_HOST matches the "
-                "workspace where the OAuth app is registered."
-            )
-        if source is AuthSource.PAT:
-            return (
-                "Databricks PAT rejected. Your DATABRICKS_ACCESS_TOKEN may be "
-                "expired, revoked, missing the `sql` scope, or scoped to a "
-                "different workspace than DATABRICKS_HOST."
-            )
-        if source is AuthSource.BEARER:
-            return (
-                "Databricks authentication failed. The forwarded Bearer token "
-                "may be expired or scoped to a different workspace."
-            )
-        return (
-            "Databricks rejected the token. No auth source is currently "
-            "configured — see README for setup."
-        )
-
-    if code == "Forbidden":
-        return (
-            "Databricks permission denied. Your user lacks access to the SQL "
-            "warehouse at DATABRICKS_HTTP_PATH, or to the requested "
-            "catalog/schema."
-        )
-
-    if code == "Unreachable":
-        return (
-            f"Cannot reach Databricks at DATABRICKS_HOST. Check the workspace "
-            f"URL.\n({err})"
-        )
-
-    if code == "SQLError":
-        return f"Databricks SQL error:\n```\n{err}\n```"
-
-    return f"Databricks error: {err}"
-
-
 def _format_result(result: dict, query: str) -> str:
-    """Render a query result dict as a markdown-friendly string.
+    """Render a query result dict as a string.
 
-    Small results: pipe-delimited table inline.
-    Larger results: first _MAX_PREVIEW_ROWS as pipe-delimited table + a note
-    indicating truncation.
-    Empty results: a friendly "no rows" message.
+    Layout (always — no two-structure mode):
+        N row(s)[+]:[ — showing first M]
+        <pipe-delimited table of preview rows>
+        [(Fetch was capped at _MAX_FETCH_ROWS rows ...)]
+
+    The `+` suffix on the count indicates the fetch hit the cap and there
+    may be more rows in the warehouse.
     """
     columns = result["columns"]
     rows = result["rows"]
@@ -155,36 +102,26 @@ def _format_result(result: dict, query: str) -> str:
         return f"No rows returned.\n\nColumns: {', '.join(columns)}"
 
     preview = rows[:_MAX_PREVIEW_ROWS]
-    table = _format_table(
-        columns, [[_stringify(v) for v in row] for row in preview]
+    table = format_table(
+        columns, [[stringify(v) for v in row] for row in preview]
     )
 
-    if total <= _MAX_PREVIEW_ROWS and not truncated:
-        return f"{total} row(s):\n{table}"
-
-    # Either there are more preview rows than we'll show, or the cursor was
-    # cut off at the fetch cap (truncated=True).
-    if truncated:
-        suffix = (
-            f"\n\n(showing first {min(total, _MAX_PREVIEW_ROWS)} of "
-            f"{total}+ row(s); fetch was capped — refine your query with "
-            f"LIMIT to see all rows.)"
+    suffix_count_marker = "+" if truncated else ""
+    if total > _MAX_PREVIEW_ROWS:
+        header = (
+            f"{total}{suffix_count_marker} row(s) — showing first "
+            f"{_MAX_PREVIEW_ROWS}:"
         )
     else:
-        suffix = (
-            f"\n\n(showing first {_MAX_PREVIEW_ROWS} of {total} row(s); "
-            f"refine with LIMIT to narrow the result set.)"
+        header = f"{total}{suffix_count_marker} row(s):"
+
+    out = f"{header}\n{table}"
+    if truncated:
+        out += (
+            f"\n\n(Fetch was capped at {_MAX_FETCH_ROWS} rows — refine your "
+            f"query with LIMIT to see more.)"
         )
-    return f"{table}{suffix}"
-
-
-def _stringify(val) -> str:
-    """Convert a SQL value to a stable string for table output."""
-    if val is None:
-        return ""
-    if isinstance(val, bytes):
-        return val.decode("utf-8", errors="replace")
-    return str(val)
+    return out
 
 
 def _capture_token() -> tuple[str | None, AuthSource | None, str | None]:
@@ -195,6 +132,24 @@ def _capture_token() -> tuple[str | None, AuthSource | None, str | None]:
         return token, source, None
     except PermissionError as e:
         return None, None, str(e)
+
+
+async def _execute_with_timeout(fn, *args, **kwargs):
+    """Run `fn(*args, **kwargs)` in a worker thread bounded by
+    `_QUERY_TIMEOUT_S` wall-clock seconds. Returns the result or raises
+    asyncio.TimeoutError."""
+    return await asyncio.wait_for(
+        asyncio.to_thread(fn, *args, **kwargs),
+        timeout=_QUERY_TIMEOUT_S,
+    )
+
+
+def _timeout_message() -> str:
+    return (
+        f"Query exceeded the {_QUERY_TIMEOUT_S}s timeout. Refine with LIMIT "
+        f"or simplify the query. (The warehouse-side query may continue until "
+        f"it finishes naturally; its result is discarded.)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +171,16 @@ async def run_query(query: str) -> str:
     if err:
         return err
     try:
-        result = await asyncio.to_thread(db.run_query, query, token=token)
+        result = await _execute_with_timeout(db.run_query, query, token=token)
+    except asyncio.TimeoutError:
+        return _timeout_message()
     except DatabricksError as e:
-        return _friendly_error(e, source)
+        return friendly_error(e, source)
+    except PermissionError as e:
+        # Defensive: should be unreachable because _capture_token already
+        # handles missing auth. Kept so a refactor that drops a token through
+        # the thread layer can't leak a stack trace to the MCP client.
+        return str(e)
     return _format_result(result, query)
 
 
@@ -229,9 +191,13 @@ async def list_catalogs() -> str:
     if err:
         return err
     try:
-        catalogs = await asyncio.to_thread(db.list_catalogs, token=token)
+        catalogs = await _execute_with_timeout(db.list_catalogs, token=token)
+    except asyncio.TimeoutError:
+        return _timeout_message()
     except DatabricksError as e:
-        return _friendly_error(e, source)
+        return friendly_error(e, source)
+    except PermissionError as e:
+        return str(e)
     if not catalogs:
         return "No catalogs visible to your user."
     return f"{len(catalogs)} catalog(s):\n" + "\n".join(f"  {c}" for c in catalogs)
@@ -250,9 +216,15 @@ async def list_schemas(catalog: str) -> str:
     if err:
         return err
     try:
-        schemas = await asyncio.to_thread(db.list_schemas, catalog, token=token)
+        schemas = await _execute_with_timeout(
+            db.list_schemas, catalog, token=token
+        )
+    except asyncio.TimeoutError:
+        return _timeout_message()
     except DatabricksError as e:
-        return _friendly_error(e, source)
+        return friendly_error(e, source)
+    except PermissionError as e:
+        return str(e)
     if not schemas:
         return f"No schemas visible in catalog `{catalog}`."
     return f"{len(schemas)} schema(s) in `{catalog}`:\n" + "\n".join(
@@ -274,18 +246,22 @@ async def list_tables(catalog: str, schema: str) -> str:
     if err:
         return err
     try:
-        tables = await asyncio.to_thread(
+        tables = await _execute_with_timeout(
             db.list_tables, catalog, schema, token=token
         )
+    except asyncio.TimeoutError:
+        return _timeout_message()
     except DatabricksError as e:
-        return _friendly_error(e, source)
+        return friendly_error(e, source)
+    except PermissionError as e:
+        return str(e)
     if not tables:
         return f"No tables visible in `{catalog}`.`{schema}`."
     rows = [
         [t.get("database", ""), t.get("table", ""), "yes" if t.get("is_temporary") else "no"]
         for t in tables
     ]
-    return f"{len(tables)} table(s) in `{catalog}`.`{schema}`:\n" + _format_table(
+    return f"{len(tables)} table(s) in `{catalog}`.`{schema}`:\n" + format_table(
         ["database", "table", "temp"], rows
     )
 
