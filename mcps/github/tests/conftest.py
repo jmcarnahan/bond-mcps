@@ -1,6 +1,13 @@
 """Shared fixtures and mock data for GitHub API tests."""
 
+import os
+
 import pytest
+
+# Skip the MCP startup config check during tests; the FastMCP test client
+# triggers the lifespan and we don't stand up a DB+key in unit tests.
+# NEVER set this env var in production.
+os.environ.setdefault("BOND_MCPS_SKIP_STARTUP_VERIFY", "1")
 
 # ---------------------------------------------------------------------------
 # Sample GitHub API response payloads

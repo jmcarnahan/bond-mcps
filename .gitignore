@@ -15,6 +15,12 @@ build/
 .env
 .env.local
 
+# Token database (encrypted at rest, but still excluded from VCS)
+tokens.db
+tokens.db-shm
+tokens.db-wal
+.bond_mcps_encryption_key
+
 # Dev orchestration scratch (Makefile writes logs here)
 tmp/
 
@@ -29,3 +35,4 @@ tmp/
 *.tfvars.json
 crash.log
 *.tfstate.lock.info
+
