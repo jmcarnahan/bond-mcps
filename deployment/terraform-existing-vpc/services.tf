@@ -11,8 +11,9 @@ module "service" {
   for_each = local.enabled_services
   source   = "./modules/service"
 
-  service_key = each.key
-  namespace   = kubernetes_namespace.bond_mcps.metadata[0].name
+  service_key     = each.key
+  environment_tag = var.environment
+  namespace       = kubernetes_namespace.bond_mcps.metadata[0].name
 
   image_repository = aws_ecr_repository.this[each.key].repository_url
   image_tag        = each.value.image_tag
