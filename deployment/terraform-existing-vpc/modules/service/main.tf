@@ -28,9 +28,10 @@ locals {
 
     authProxy = {
       # The auth service itself doesn't need injection; everyone else does.
-      inject = var.is_auth_proxy ? false : true
-      host   = var.auth_proxy_internal_host
-      port   = var.auth_proxy_port
+      inject    = var.is_auth_proxy ? false : true
+      host      = var.auth_proxy_internal_host
+      port      = var.auth_proxy_port
+      publicUrl = var.auth_proxy_public_url
     }
 
     secrets = {

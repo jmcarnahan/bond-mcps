@@ -21,9 +21,10 @@
     "authProxy": {
       "type": "object",
       "properties": {
-        "inject": { "type": "boolean" },
-        "host":   { "type": "string" },
-        "port":   { "type": "integer", "minimum": 1, "maximum": 65535 }
+        "inject":    { "type": "boolean" },
+        "host":      { "type": "string" },
+        "port":      { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "publicUrl": { "type": "string" }
       }
     },
     "secrets": {
