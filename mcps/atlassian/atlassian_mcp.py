@@ -63,6 +63,15 @@ async def _lifespan(app):
 mcp = FastMCP("Atlassian MCP Server", lifespan=_lifespan)
 
 
+# Liveness/readiness probe. Returns 200 immediately if the ASGI app is up.
+# Does NOT touch the DB or auth proxy — those are validated at startup by
+# `bond-mcps doctor`. Used by k8s probes + the ALB target-group healthcheck.
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok"})
+
+
 def _format_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     """Format rows as pipe-delimited CSV using Python's csv module for safe quoting."""
     buf = io.StringIO()

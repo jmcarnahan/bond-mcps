@@ -56,6 +56,15 @@ async def _lifespan(app):
 mcp = FastMCP("GitHub MCP Server", lifespan=_lifespan)
 
 
+# Liveness/readiness probe. Returns 200 immediately if the ASGI app is up.
+# Does NOT touch the DB or auth proxy — those are validated at startup by
+# `bond-mcps doctor`. Used by k8s probes + the ALB target-group healthcheck.
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok"})
+
+
 def _friendly_error(err: GitHubError) -> str:
     """Convert a GitHubError into a user-friendly message."""
     code = err.error_code
