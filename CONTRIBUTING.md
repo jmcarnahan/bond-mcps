@@ -34,8 +34,12 @@ Prereqs: Python ≥ 3.10, Poetry. macOS or Linux (the Makefile uses `lsof`, `kil
 The recommended path is the repo-root `Makefile`, which orchestrates the auth proxy and all 3 MCPs together:
 
 ```bash
-make install            # poetry install in auth/ + each MCP
+make install            # poetry install in auth/ + each MCP, then `bond-mcps migrate-db`
 # Populate .env per MCP first — see README.md "Quick start" step 0
+# Then mint an encryption key:
+cd auth && poetry run bond-mcps generate-key
+export BOND_MCPS_ENCRYPTION_KEY=<paste>
+make doctor             # validate config, DB schema, encryption setup
 make dev                # boots all 4 services in tmp/logs/
 make login              # primes OAuth tokens via the CLIs (opens browser per provider)
 make claude-add         # registers the 3 MCPs with Claude Code (user scope)
@@ -73,7 +77,7 @@ The atlassian package has 16 integration tests gated by `--integration`; they hi
 ## Code conventions
 
 - **Python**: 3.10+ features OK (PEP 604 union syntax, `dict[str, X]` builtins, structural pattern matching where it clarifies). Type hints on public functions.
-- **Auth package**: stdlib only — no external runtime deps. Tests use pytest + the standard library mock.
+- **Auth package**: SQLAlchemy, Alembic, `cryptography`. Lazy-import the DB stack inside functions where possible so non-DB consumers (the auth proxy) don't pay the import cost. Tests use pytest + stdlib mock; the conftest fixtures set up an ephemeral SQLite DB at `tmp_path/tokens.db` and a fresh AES key per test.
 - **MCPs**: httpx for HTTP (sync + async), fastmcp for the server, python-dotenv for `.env` loading, respx for test mocking.
 - **No comments that just restate the code.** Comment the *why* (non-obvious constraints, workarounds, invariants), not the *what*.
 

@@ -39,6 +39,9 @@ from github import repos, issues, pulls, code
 
 load_dotenv(Path(__file__).parent / ".env")
 
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
+
 
 def _get_token() -> str:
     """Get a GitHub access token via the shared local-auth flow.
