@@ -54,6 +54,7 @@ module "service" {
     kubectl_manifest.cluster_secret_store, # ESO must be ready
     helm_release.alb_controller,           # so the ingress class resolves
     aws_rds_cluster_instance.bond_mcps,    # so preflight can reach the DB
-    null_resource.encryption_key_seeded,   # so preflight has a real key
+    terraform_data.encryption_key_seeded,  # so preflight has a real key
+    terraform_data.jwt_public_key_seeded,  # so JWT mode (when enabled) has a real PEM
   ]
 }
