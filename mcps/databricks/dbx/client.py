@@ -38,8 +38,13 @@ from typing import Any
 from databricks import sql
 from databricks.sql import exc as dbexc
 
-from dbx.auth import AuthSource, get_databricks_token
+from dbx.auth import AuthSource, get_databricks_token, resolve_token_now
 from dbx.local_auth import host_without_scheme
+
+# Re-export so `from dbx import client as db; db.resolve_token_now()` still
+# works (single source of truth lives in dbx.auth — see its module docstring).
+__all__ = ["DatabricksError", "MAX_FETCH_ROWS", "resolve_token_now",
+           "run_query", "list_catalogs", "list_schemas", "list_tables"]
 
 logger = logging.getLogger(__name__)
 
@@ -78,18 +83,6 @@ def _require_env() -> tuple[str, str]:
             error_code="MissingConfig",
         )
     return host, http_path
-
-
-def resolve_token_now() -> tuple[str, AuthSource]:
-    """Resolve a Databricks token in the current call context.
-
-    Call this from the async tool body BEFORE handing off to `asyncio.to_thread`
-    so the FastMCP request's Bearer header (if any) is captured.
-    """
-    from dbx.auth import get_auth_source
-    source = get_auth_source()
-    token = get_databricks_token()
-    return token, source
 
 
 def _connect(token: str | None):
