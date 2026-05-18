@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+from auth.token_store import current_user_key
 
 logger = logging.getLogger(__name__)
 
 
 def cmd_generate_key(_args) -> int:
-    import os as _os
-
     from auth.encryption import generate_key
 
-    if _os.environ.get("BOND_MCPS_ENCRYPTION_KEY"):
+    if os.environ.get("BOND_MCPS_ENCRYPTION_KEY"):
         print(
             "WARNING: BOND_MCPS_ENCRYPTION_KEY is already set in this shell. "
             "If you replace it with the value below, any data encrypted under "
@@ -42,7 +45,6 @@ def cmd_migrate_db(_args) -> int:
 
 def cmd_import_files(args) -> int:
     from auth.db.importer import import_legacy_files
-    from auth.token_store import current_user_key
 
     user_key = args.user or current_user_key()
     result = import_legacy_files(user_key=user_key)
@@ -64,7 +66,6 @@ def cmd_import_files(args) -> int:
 
 def cmd_clear(args) -> int:
     from auth.db.repository import TokenRepository
-    from auth.token_store import current_user_key
 
     user_key = args.user or current_user_key()
     repo = TokenRepository()
@@ -79,10 +80,6 @@ def cmd_clear(args) -> int:
 
 def cmd_doctor(_args) -> int:
     """Health check: validate config, DB connection, schema, encryption."""
-    import os
-    from pathlib import Path
-    from urllib.parse import parse_qs, urlsplit
-
     from auth.db.repository import _default_resolver
     from auth.db.session import (
         DeploymentConfigError,
@@ -93,8 +90,6 @@ def cmd_doctor(_args) -> int:
         validate_db_url,
     )
     from auth.encryption import TokenEncryptionError, verify_encryption_setup
-
-    from auth.token_store import current_user_key
 
     env_url = os.environ.get("BOND_MCPS_DB_URL")
     if env_url:

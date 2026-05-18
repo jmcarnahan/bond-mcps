@@ -127,6 +127,19 @@ def test_per_mcp_mcp_servers_apply_log_discipline():
         )
 
 
+def test_proxy_server_applies_log_discipline():
+    """The auth proxy server is the third process in the auth-package
+    deployment and should pin the same third-party log levels for policy
+    uniformity, even though it doesn't currently use httpx/authlib/msal."""
+    from pathlib import Path
+
+    proxy = Path(__file__).resolve().parents[1] / "auth" / "proxy_server.py"
+    text = proxy.read_text()
+    assert "log_discipline.apply()" in text, (
+        "proxy_server.py does not call log_discipline.apply()"
+    )
+
+
 def test_model_repr_masks_encrypted_columns(repo):
     """ProviderToken __repr__ should never expose ciphertext bytes."""
     store = TokenStore("github", user_key="alice")
