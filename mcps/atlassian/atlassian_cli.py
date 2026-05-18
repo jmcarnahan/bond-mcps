@@ -330,8 +330,11 @@ def cmd_user_me(args):
 # ---------------------------------------------------------------------------
 
 def cmd_logout(args):
+    # TokenStore is DB-backed now — the file-based `cache_file` attribute was
+    # removed in PR #4 (db-backed-token-cache). Use get_token() which returns
+    # None when nothing is stored.
     store = TokenStore("atlassian")
-    if store.cache_file.exists():
+    if store.get_token() is not None:
         store.clear()
         print("Logged out. Cached tokens removed.")
     else:
