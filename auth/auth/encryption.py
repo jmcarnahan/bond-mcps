@@ -15,7 +15,6 @@ import logging
 import os
 import secrets
 from pathlib import Path
-from typing import Protocol
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -30,12 +29,6 @@ SENTINEL_PLAINTEXT = b"bond-mcps-encryption-sentinel"
 
 class TokenEncryptionError(Exception):
     """Raised for any encryption/decryption failure or misconfiguration."""
-
-
-class KeyResolver(Protocol):
-    def get_key(self, version: int) -> bytes: ...
-    @property
-    def write_version(self) -> int: ...
 
 
 class EncryptionKeyResolver:
@@ -148,7 +141,7 @@ def encrypt(
     user_key: str,
     provider: str,
     field: str,
-    resolver: KeyResolver,
+    resolver: EncryptionKeyResolver,
 ) -> tuple[bytes, int]:
     """Encrypt plaintext at the resolver's write version.
 
@@ -172,7 +165,7 @@ def decrypt(
     provider: str,
     field: str,
     key_version: int,
-    resolver: KeyResolver,
+    resolver: EncryptionKeyResolver,
 ) -> bytes:
     """Decrypt nonce||ciphertext, verifying AAD binding to the row identity."""
     if blob is None or len(blob) <= NONCE_BYTES:
@@ -215,7 +208,7 @@ def decrypt_optional(
     return decrypt(blob, key_version=key_version, **kwargs)
 
 
-def verify_encryption_setup(resolver: KeyResolver) -> None:
+def verify_encryption_setup(resolver: EncryptionKeyResolver) -> None:
     """Round-trip a sentinel string to verify the encryption setup at startup.
 
     Raises TokenEncryptionError if the key isn't configured or doesn't work.

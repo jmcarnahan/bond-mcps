@@ -54,17 +54,12 @@ def current_user_key() -> str:
     return getpass.getuser()
 
 
-# Backward-compatible alias for the private name used during initial
-# development. Prefer current_user_key in new code.
-_current_user_key = current_user_key
-
-
 class TokenStore:
     """DB-backed token store for a single (user_key, provider) pair."""
 
     def __init__(self, provider: str, *, user_key: str | None = None):
         self.provider = provider
-        self.user_key = user_key or _current_user_key()
+        self.user_key = user_key or current_user_key()
         # Lazy repo construction: the DB stack is only touched on first method call.
         self._repo = None
 

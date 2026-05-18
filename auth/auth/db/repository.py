@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -58,25 +59,37 @@ class TokenRepository:
         self,
         *,
         url: str | None = None,
-        resolver: encryption.KeyResolver | None = None,
+        resolver: encryption.EncryptionKeyResolver | None = None,
     ):
         self._session_factory = get_session_factory(url)
         self._resolver = resolver or _default_resolver()
 
     @contextmanager
-    def _session(self, *, begin_immediate_on_sqlite: bool = False) -> Iterator[Session]:
-        """Open a session with optional SQLite write-lock promotion.
+    def _read_session(self) -> Iterator[Session]:
+        """Open a session for read-only operations."""
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
-        Note: ``begin_immediate_on_sqlite`` only affects SQLite. On Postgres
-        a transaction begin without explicit locking is non-blocking; for
-        concurrency safety on Postgres, callers either use the dialect-aware
-        upsert helpers (save_token / save_msal_cache) or take an explicit
-        row lock via ``locked_token`` / ``locked_msal_cache``.
+    @contextmanager
+    def _write_session(self) -> Iterator[Session]:
+        """Open a session for write operations.
+
+        On SQLite, promotes to a write lock immediately (BEGIN IMMEDIATE)
+        so concurrent writers serialize cleanly. On Postgres this is a
+        no-op — concurrency safety there comes from the dialect-aware
+        upsert helpers and from row-level locks in ``locked_token`` /
+        ``locked_msal_cache``.
         """
         session = self._session_factory()
         try:
-            if begin_immediate_on_sqlite:
-                self._begin_immediate(session)
+            self._begin_immediate(session)
             yield session
             session.commit()
         except Exception:
@@ -87,12 +100,8 @@ class TokenRepository:
 
     @staticmethod
     def _begin_immediate(session: Session) -> None:
-        """SQLite-only: promote the implicit transaction to a write lock.
-
-        Acquires RESERVED, serializing concurrent writers. No-op on Postgres.
-        """
-        bind = session.get_bind()
-        if bind.dialect.name == "sqlite":
+        """SQLite-only: promote the implicit transaction to a write lock."""
+        if session.get_bind().dialect.name == "sqlite":
             session.execute(text("BEGIN IMMEDIATE"))
 
     @staticmethod
@@ -121,7 +130,7 @@ class TokenRepository:
         Caller is responsible for expiry semantics (mirrors the old TokenStore
         API — refresh_if_needed uses raw load too).
         """
-        with self._session() as s:
+        with self._read_session() as s:
             row = s.get(ProviderToken, (user_key, provider))
             if row is None:
                 return None
@@ -139,14 +148,14 @@ class TokenRepository:
             raise ValueError("save_token requires 'access_token' in data")
 
         values = self._encode_provider_token_values(user_key, provider, data)
-        with self._session(begin_immediate_on_sqlite=True) as s:
+        with self._write_session() as s:
             self._upsert_provider_token(s, user_key, provider, values)
 
     def clear_token(self, user_key: str, provider: str) -> None:
         """Delete the token row if it exists. Idempotent under concurrency
         (a concurrent DELETE either races and finds the row, or finds it
         already gone — both return successfully)."""
-        with self._session(begin_immediate_on_sqlite=True) as s:
+        with self._write_session() as s:
             row = s.get(ProviderToken, (user_key, provider))
             if row is not None:
                 s.delete(row)
@@ -163,7 +172,7 @@ class TokenRepository:
             resolver=self._resolver,
         )
         refresh_blob, refresh_version = encryption.encrypt_optional(
-            _to_bytes_or_none(data.get("refresh_token")),
+            _to_bytes(data.get("refresh_token")),
             user_key=user_key,
             provider=provider,
             field="refresh_token",
@@ -253,7 +262,7 @@ class TokenRepository:
     # ---- MSAL cache CRUD -----------------------------------------------------
 
     def get_msal_cache(self, user_key: str) -> str | None:
-        with self._session() as s:
+        with self._read_session() as s:
             row = s.get(MsalTokenCache, user_key)
             if row is None:
                 return None
@@ -275,11 +284,11 @@ class TokenRepository:
             field="cache_data",
             resolver=self._resolver,
         )
-        with self._session(begin_immediate_on_sqlite=True) as s:
+        with self._write_session() as s:
             self._upsert_msal_cache(s, user_key, blob, version)
 
     def clear_msal_cache(self, user_key: str) -> None:
-        with self._session(begin_immediate_on_sqlite=True) as s:
+        with self._write_session() as s:
             row = s.get(MsalTokenCache, user_key)
             if row is not None:
                 s.delete(row)
@@ -396,7 +405,6 @@ class LockedToken:
         expires_at = self._data.get("expires_at")
         if expires_at is None:
             return False
-        import time
         return time.time() >= (expires_at - buffer_seconds)
 
     def update(self, new_data: dict) -> None:
@@ -410,17 +418,12 @@ class LockedToken:
         if not new_data.get("access_token"):
             raise ValueError("update() requires 'access_token' in new_data")
 
-        # Preserve extras from the prior row that the refresh response
-        # didn't supply (e.g., Atlassian cloud_id), but let new_data win
-        # for any keys it explicitly provides.
-        prior_extras = (
-            dict(self._row.extra_metadata or {}) if self._row is not None else {}
-        )
-        new_extras = {k: v for k, v in new_data.items() if k not in _RESERVED_FIELDS}
-        merged = {**new_data}  # don't mutate caller's dict
-        # Place merged extras back into the data dict for re-encoding.
-        for k, v in {**prior_extras, **new_extras}.items():
-            merged[k] = v
+        # Preserve extras (e.g., Atlassian cloud_id) from the row being
+        # refreshed; new_data wins on any keys it explicitly supplies.
+        # _encode_provider_token_values filters reserved keys out into
+        # `extras` itself, so merging the full new_data is safe.
+        prior_extras = dict(self._row.extra_metadata or {}) if self._row else {}
+        merged = {**prior_extras, **new_data}
 
         values = self._repo._encode_provider_token_values(
             self._user_key, self._provider, merged
@@ -494,16 +497,11 @@ class LockedMsalCache:
         )
 
 
-def _to_bytes(s: str | bytes) -> bytes:
-    if isinstance(s, bytes):
-        return s
-    return s.encode("utf-8")
-
-
-def _to_bytes_or_none(s: str | bytes | None) -> bytes | None:
+def _to_bytes(s: str | bytes | None) -> bytes | None:
+    """UTF-8-encode a str, pass bytes through, propagate None."""
     if s is None:
         return None
-    return _to_bytes(s)
+    return s if isinstance(s, bytes) else s.encode("utf-8")
 
 
 def _coerce_expires_at(value) -> _dt.datetime | None:
