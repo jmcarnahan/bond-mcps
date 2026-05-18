@@ -83,6 +83,7 @@ def cmd_doctor(_args) -> int:
 
     from auth.db.repository import _default_resolver
     from auth.db.session import (
+        DeploymentConfigError,
         SchemaOutOfDateError,
         default_db_url,
         ensure_schema_current,
@@ -93,7 +94,15 @@ def cmd_doctor(_args) -> int:
 
     from auth.token_store import current_user_key
 
-    url = os.environ.get("BOND_MCPS_DB_URL") or default_db_url()
+    env_url = os.environ.get("BOND_MCPS_DB_URL")
+    if env_url:
+        url = env_url
+    else:
+        try:
+            url = default_db_url()
+        except DeploymentConfigError as e:
+            print(f"  URL resolution: FAIL — {e}", file=sys.stderr)
+            return 1
     print(f"DB URL:     {url}")
     print(f"User key:   {current_user_key()}")
 

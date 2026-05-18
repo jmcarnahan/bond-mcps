@@ -57,6 +57,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
+
 from ms_graph.graph_client import GraphClient
 from ms_graph.local_auth import get_local_token, get_local_powerbi_token
 from ms_graph import mail, calendar, teams, files

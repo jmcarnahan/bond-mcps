@@ -7,6 +7,7 @@ proxy server) does not pay the DB-stack startup cost.
 
 from auth.db.repository import TokenRepository
 from auth.db.session import (
+    DeploymentConfigError,
     SchemaOutOfDateError,
     default_db_url,
     ensure_schema_current,
@@ -17,6 +18,7 @@ from auth.db.session import (
 )
 
 __all__ = [
+    "DeploymentConfigError",
     "SchemaOutOfDateError",
     "TokenRepository",
     "default_db_url",

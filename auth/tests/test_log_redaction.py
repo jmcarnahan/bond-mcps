@@ -82,6 +82,51 @@ def test_log_discipline_pins_third_party_levels():
     assert logging.getLogger("msal").level == logging.WARNING
 
 
+def test_per_mcp_cli_modules_apply_log_discipline():
+    """Each MCP's CLI entrypoint must call log_discipline.apply() at module
+    load so OAuth token exchanges don't get logged at httpx DEBUG level.
+
+    We don't try to import the CLI modules here (they live in sibling
+    packages); instead we statically grep the files for the discipline
+    invocation. This is a regression guard, not a behavioral test.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    targets = [
+        repo_root / "mcps" / "microsoft" / "ms_graph_cli.py",
+        repo_root / "mcps" / "github" / "github_cli.py",
+        repo_root / "mcps" / "atlassian" / "atlassian_cli.py",
+    ]
+    for path in targets:
+        assert path.exists(), f"CLI not found: {path}"
+        text = path.read_text()
+        assert "log_discipline" in text, (
+            f"{path.name} does not import log_discipline — OAuth token "
+            "exchanges could leak via httpx/authlib/msal debug logs"
+        )
+        assert "log_discipline.apply()" in text, (
+            f"{path.name} imports log_discipline but never calls apply()"
+        )
+
+
+def test_per_mcp_mcp_servers_apply_log_discipline():
+    """Same check for the MCP server entrypoints."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    targets = [
+        repo_root / "mcps" / "microsoft" / "ms_graph_mcp.py",
+        repo_root / "mcps" / "github" / "github_mcp.py",
+        repo_root / "mcps" / "atlassian" / "atlassian_mcp.py",
+    ]
+    for path in targets:
+        text = path.read_text()
+        assert "log_discipline.apply()" in text, (
+            f"{path.name} does not call log_discipline.apply()"
+        )
+
+
 def test_model_repr_masks_encrypted_columns(repo):
     """ProviderToken __repr__ should never expose ciphertext bytes."""
     store = TokenStore("github", user_key="alice")
