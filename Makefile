@@ -13,7 +13,7 @@
 .PHONY: install dev stop logs status check-ports claude-add claude-remove \
         login login-microsoft login-github login-atlassian login-databricks \
         logout logout-microsoft logout-github logout-atlassian logout-databricks \
-        migrate-tokens _check-proxy
+        migrate-db import-tokens doctor migrate-tokens _check-proxy
 
 # Login flows open the browser one at a time — never parallelize.
 .NOTPARALLEL:
@@ -33,6 +33,21 @@ install:
 	cd mcps/github && poetry install
 	cd mcps/atlassian && poetry install
 	cd mcps/databricks && poetry install
+	@$(MAKE) --no-print-directory migrate-db
+
+# Bring the token DB schema up to head. Idempotent — safe to run repeatedly.
+# Uses sqlite:///<repo>/tokens.db unless BOND_MCPS_DB_URL is set.
+migrate-db:
+	@cd auth && poetry run bond-mcps migrate-db
+
+# One-shot health check: validate config, DB, schema, and encryption setup.
+doctor:
+	@cd auth && poetry run bond-mcps doctor
+
+# One-shot import: pull legacy ~/.bond_mcps/*.json tokens into the encrypted DB.
+# Idempotent; imported files are moved to ~/.bond_mcps/legacy_imported/.
+import-tokens:
+	@cd auth && poetry run bond-mcps import-files
 
 check-ports:
 	@busy=0; for p in $(AUTH_PORT) $(MS_GRAPH_PORT) $(GITHUB_PORT) $(ATLASSIAN_PORT) $(DATABRICKS_PORT); do \
@@ -148,25 +163,23 @@ login-databricks:
 
 logout: logout-microsoft logout-github logout-atlassian logout-databricks
 
+# Each logout clears the DB row via the CLI. Legacy file caches (if any)
+# are also removed defensively.
 logout-microsoft:
-	@if [ -f $(TOKEN_DIR)/microsoft.json ]; then \
-	  rm -f $(TOKEN_DIR)/microsoft.json && echo "Cleared microsoft token."; \
-	else echo "(microsoft: no cached token)"; fi
+	@cd auth && poetry run bond-mcps clear --provider microsoft
+	@rm -f $(TOKEN_DIR)/microsoft.json 2>/dev/null || true
 
 logout-github:
-	@if [ -f $(TOKEN_DIR)/github.json ]; then \
-	  rm -f $(TOKEN_DIR)/github.json && echo "Cleared github token."; \
-	else echo "(github: no cached token)"; fi
+	@cd auth && poetry run bond-mcps clear --provider github
+	@rm -f $(TOKEN_DIR)/github.json 2>/dev/null || true
 
 logout-atlassian:
-	@if [ -f $(TOKEN_DIR)/atlassian.json ]; then \
-	  rm -f $(TOKEN_DIR)/atlassian.json && echo "Cleared atlassian token."; \
-	else echo "(atlassian: no cached token)"; fi
+	@cd auth && poetry run bond-mcps clear --provider atlassian
+	@rm -f $(TOKEN_DIR)/atlassian.json 2>/dev/null || true
 
 logout-databricks:
-	@if [ -f $(TOKEN_DIR)/databricks.json ]; then \
-	  rm -f $(TOKEN_DIR)/databricks.json && echo "Cleared databricks token."; \
-	else echo "(databricks: no cached token; PAT mode does not cache)"; fi
+	@cd auth && poetry run bond-mcps clear --provider databricks
+	@rm -f $(TOKEN_DIR)/databricks.json 2>/dev/null || true
 
 # Move tokens from the legacy bond-ai paths to the unified $(TOKEN_DIR).
 # Safe to run repeatedly: skips when the destination already exists.

@@ -99,18 +99,28 @@ class TestList:
 
 
 class TestLogout:
-    def test_clears_existing_cache(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr("auth.token_store.DEFAULT_CACHE_DIR", tmp_path)
-        cache_file = tmp_path / "databricks.json"
-        cache_file.write_text('{"access_token": "x"}')
-
-        out = _run_cli(["logout"], capsys)
-        assert not cache_file.exists()
+    def test_clears_existing_cache(self, capsys):
+        """TokenStore is DB-backed now; test the public API contract:
+        if get_token() returns something, we call clear() and report it."""
+        with patch("databricks_cli.TokenStore") as MockStore:
+            store = MockStore.return_value
+            store.get_token.return_value = {"access_token": "x"}
+            out = _run_cli(["logout"], capsys)
+        store.clear.assert_called_once()
         assert "Cleared" in out.out
 
-    def test_warns_when_pat_env_still_set(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr("auth.token_store.DEFAULT_CACHE_DIR", tmp_path)
-        out = _run_cli(["logout"], capsys)
+    def test_reports_nothing_to_clear_when_empty(self, capsys):
+        with patch("databricks_cli.TokenStore") as MockStore:
+            store = MockStore.return_value
+            store.get_token.return_value = None
+            out = _run_cli(["logout"], capsys)
+        store.clear.assert_not_called()
+        assert "No cached" in out.out
+
+    def test_warns_when_pat_env_still_set(self, capsys):
+        with patch("databricks_cli.TokenStore") as MockStore:
+            MockStore.return_value.get_token.return_value = None
+            out = _run_cli(["logout"], capsys)
         assert "DATABRICKS_ACCESS_TOKEN" in out.out
 
 

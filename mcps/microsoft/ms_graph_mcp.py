@@ -42,12 +42,23 @@ from ms_graph.power_bi import AsyncPowerBIClient
 from ms_graph.teams import TeamsNotAvailableError, extract_message_text, extract_message_sender
 
 logging.basicConfig(level=logging.INFO)
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def _lifespan(app):
-    """Warn if auth proxy is unreachable when local auth is configured."""
+    """Fail fast on misconfig and warn if the auth proxy isn't reachable.
+
+    verify_runtime_config() crashes the container at boot if BOND_MCPS_DB_URL
+    is wrong, encryption key is missing, or BOND_MCPS_USER_ID is unset for
+    Postgres — preventing the "container looks healthy to ECS but every
+    request fails" pattern.
+    """
+    from auth import startup
+    startup.verify_runtime_config()
+
     if os.environ.get("MS_CLIENT_ID"):
         from auth import OAuthProxyClient
         proxy = OAuthProxyClient()

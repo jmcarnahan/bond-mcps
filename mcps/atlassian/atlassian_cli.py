@@ -41,6 +41,9 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
+from auth import log_discipline  # noqa: E402
+log_discipline.apply()
+
 from atlassian.atlassian_client import AtlassianClient, AtlassianError
 from atlassian.local_auth import get_local_token_and_cloud_id
 from atlassian import jira as jira_ops

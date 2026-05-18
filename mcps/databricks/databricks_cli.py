@@ -82,8 +82,10 @@ def cmd_tables(args):
 
 
 def cmd_logout(args):
+    # TokenStore is now DB-backed (no cache_file attribute). get_token()
+    # returns None when nothing's stored — the lookup is cheap.
     store = TokenStore("databricks")
-    if store.cache_file.exists():
+    if store.get_token() is not None:
         store.clear()
         print("Cleared cached Databricks OAuth token.")
     else:
