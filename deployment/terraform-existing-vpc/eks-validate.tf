@@ -1,3 +1,47 @@
+# -----------------------------------------------------------------------------
+# Deploy-time invariants (env-correlated safety checks)
+# -----------------------------------------------------------------------------
+#
+# Two preconditions enforced before any resource that depends on this terraform_data:
+#   1. Non-dev environments + internet-facing ingress must have JWT enabled.
+#   2. Non-dev environments cannot leave EKS public API endpoint open to 0.0.0.0/0.
+#
+# Dev environments are exempt to keep iteration speed (open by default, no JWT).
+# Tighten by overriding var.environment to non-"dev" in the relevant tfvars.
+
+resource "terraform_data" "deploy_invariants" {
+  lifecycle {
+    precondition {
+      condition = (
+        var.environment == "dev" ||
+        var.jwt_verification.enabled ||
+        var.ingress_default_scheme == "internal"
+      )
+      error_message = <<-EOM
+        Non-dev environments with `internet-facing` ingress must enable JWT
+        verification — otherwise public endpoints accept unauthenticated
+        Path-2 OAuth flows. Set EITHER:
+          var.jwt_verification.enabled = true  (preferred)
+          var.ingress_default_scheme   = "internal"
+      EOM
+    }
+
+    precondition {
+      condition = (
+        var.environment == "dev" ||
+        !contains(var.eks_cluster_endpoint_public_access_cidrs, "0.0.0.0/0")
+      )
+      error_message = <<-EOM
+        Non-dev environments refuse 0.0.0.0/0 in
+        var.eks_cluster_endpoint_public_access_cidrs.
+
+        Restrict the EKS public API endpoint to your CI runner egress
+        CIDR(s) and the operator bastion CIDR.
+      EOM
+    }
+  }
+}
+
 # Pre-deploy guardrails.
 #
 # Each `terraform_data` block reads the current SM secret value at plan time

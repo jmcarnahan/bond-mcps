@@ -101,8 +101,18 @@ variable "services" {
 
 variable "aurora_min_capacity" {
   type        = number
-  default     = 0.5
-  description = "Aurora Serverless v2 minimum ACU. 0.5 is the lowest setting (always-on cost ~$45/mo)."
+  default     = 1.0
+  description = <<-EOT
+    Aurora Serverless v2 minimum ACU.
+
+    1.0 is the safe default: ~113 max connections, comfortable headroom
+    for 9 worker processes × 5 conns each (pool_size 3 + max_overflow 2)
+    plus preflight Jobs. Always-on cost ~$90/mo.
+
+    0.5 is acceptable for dev (~56 max conns, $45/mo), where peak load
+    rarely hits the budget. Override in environments/<env>.tfvars when
+    appropriate. See README "Aurora connection budget".
+  EOT
 }
 
 variable "aurora_max_capacity" {
@@ -115,6 +125,35 @@ variable "aurora_deletion_protection" {
   type        = bool
   default     = true
   description = "If true, deletion_protection on the Aurora cluster and a final snapshot are taken on destroy."
+}
+
+variable "ecr_force_delete" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Force-delete ECR repositories on `terraform destroy` even if they
+    contain images. Default false (matches AWS default; destroy fails
+    until you empty the repo). Set true in dev so iterate-destroy cycles
+    are cheap. Decoupled from aurora_deletion_protection so prod-Aurora /
+    dev-ECR is a coherent combination.
+  EOT
+}
+
+variable "ingress_default_scheme" {
+  type        = string
+  default     = "internet-facing"
+  description = <<-EOT
+    Default scheme for service ingresses. "internet-facing" exposes pods
+    via a public ALB; "internal" stays inside the VPC. In non-dev
+    environments, internet-facing requires var.jwt_verification.enabled
+    = true — caught by the deploy-invariants precondition in
+    eks-validate.tf.
+  EOT
+
+  validation {
+    condition     = contains(["internet-facing", "internal"], var.ingress_default_scheme)
+    error_message = "ingress_default_scheme must be \"internet-facing\" or \"internal\"."
+  }
 }
 
 variable "aurora_engine_version" {

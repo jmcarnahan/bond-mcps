@@ -10,7 +10,12 @@ hosted_zone_id = "Z-REDACTED-ZONE" # bond-ai's example.com zone
 
 # Dev: skip deletion protection so iterate-destroy-iterate is cheap.
 aurora_deletion_protection   = false
+ecr_force_delete             = true # let `terraform destroy` clean up images
 secrets_recovery_window_days = 0
+
+# Dev: 0.5 ACU is enough for sparse load (~$45/mo cheaper than the
+# 1.0 default). Production should leave aurora_min_capacity at default.
+aurora_min_capacity = 0.5
 
 services = {
   auth = {

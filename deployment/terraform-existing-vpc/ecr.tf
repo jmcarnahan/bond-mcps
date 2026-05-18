@@ -6,7 +6,7 @@ resource "aws_ecr_repository" "this" {
 
   name                 = each.value.image_repo_name
   image_tag_mutability = "MUTABLE"
-  force_delete         = !var.aurora_deletion_protection # mirror Aurora protection flag
+  force_delete         = var.ecr_force_delete
 
   encryption_configuration {
     encryption_type = "KMS"

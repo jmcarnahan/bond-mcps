@@ -8,6 +8,12 @@ variable "environment_tag" {
   description = "Environment short name. Stamped on the ALB as bond-mcps-environment=<value> so the IngressGroup ALB lookup is unique across stacks."
 }
 
+variable "ingress_scheme" {
+  type        = string
+  default     = "internet-facing"
+  description = "ALB scheme — internet-facing or internal."
+}
+
 variable "namespace" {
   type        = string
   description = "k8s namespace to install into (typically bond-mcps)."

@@ -13,6 +13,7 @@ module "service" {
 
   service_key     = each.key
   environment_tag = var.environment
+  ingress_scheme  = var.ingress_default_scheme
   namespace       = kubernetes_namespace.bond_mcps.metadata[0].name
 
   image_repository = aws_ecr_repository.this[each.key].repository_url
