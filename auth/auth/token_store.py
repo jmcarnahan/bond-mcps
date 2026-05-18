@@ -77,8 +77,7 @@ def resolve_user_key_for_request() -> str:
         invalid: raise ``IdentityVerificationError`` (caller must identify;
         we will not silently write to the env-based tenant row).
     """
-    # Lazy imports keep the module light when JWT support isn't installed
-    # (test environments, the proxy-only process).
+    # Lazy import: fastmcp may not be installed in pure-auth test envs.
     try:
         from fastmcp.server.dependencies import get_http_headers
     except ImportError:
@@ -92,21 +91,18 @@ def resolve_user_key_for_request() -> str:
         in_http_context = False
         headers = {}
 
-    from auth.jwt_identity import (
-        IdentityVerificationError,
-        is_jwt_verification_enabled,
-        verify_identity_token,
-    )
+    # Cheap inline env check — keeps auth.jwt_identity (and pyjwt) out of the
+    # import graph entirely when JWT verification is disabled. A stale local
+    # .venv without pyjwt still works for local-dev Path-2 flows.
+    jwt_enabled = bool(os.environ.get("BOND_MCPS_JWT_PUBLIC_KEY", "").strip())
 
-    if not is_jwt_verification_enabled():
-        # Single-tenant deploy (or pre-multi-tenant). Env value owns user_key.
+    if not jwt_enabled or not in_http_context:
+        # Single-tenant deploy (env-based) or non-HTTP context (CLI, startup,
+        # tests). The JWT requirement only applies to live HTTP requests.
         return current_user_key()
 
-    if not in_http_context:
-        # CLIs and startup paths can't carry an identity JWT. Fall back to env.
-        # Operator typically sets BOND_MCPS_USER_ID to a service identity for
-        # these paths (e.g., 'bond-mcps-admin').
-        return current_user_key()
+    # JWT mode + HTTP context: pyjwt MUST be available. Import now.
+    from auth.jwt_identity import IdentityVerificationError, verify_identity_token
 
     bond_auth = headers.get("x-bond-auth", "") if headers else ""
     if not bond_auth.startswith("Bearer "):
