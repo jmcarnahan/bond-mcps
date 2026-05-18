@@ -1,9 +1,9 @@
-# bond-mcps Atlassian MCP server (Jira + Confluence).
+# bond-mcps Databricks MCP server (SQL warehouse access).
 #
-# Build (with mcps/atlassian/ as the context, after CI prep):
-#   docker build -t bond-mcps-mcp-atlassian -f mcps/atlassian/Dockerfile mcps/atlassian/
+# Build (with mcps/databricks/ as the context, after CI prep):
+#   docker build -t bond-mcps-mcp-databricks -f mcps/databricks/Dockerfile mcps/databricks/
 #
-# CI prep step copies auth/ → mcps/atlassian/_shared_auth_pkg/ first so the
+# CI prep step copies auth/ → mcps/databricks/_shared_auth_pkg/ first so the
 # path dependency `bond-auth = {path = "../../auth"}` resolves inside the
 # container (../../auth from /app/pyproject.toml → /auth).
 
@@ -20,8 +20,8 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry config virtualenvs.create false && \
     poetry install --only main --no-interaction --no-ansi --no-root
 
-COPY atlassian/ ./atlassian/
-COPY atlassian_mcp.py ./
+COPY dbx/ ./dbx/
+COPY databricks_mcp.py ./
 
 RUN pip install --no-cache-dir "psycopg[binary]>=3.3,<4.0"
 
@@ -34,4 +34,4 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-CMD ["fastmcp", "run", "atlassian_mcp.py", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["fastmcp", "run", "databricks_mcp.py", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]
