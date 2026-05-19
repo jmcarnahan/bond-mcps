@@ -39,16 +39,18 @@ import os
 import sys
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from auth import log_discipline  # noqa: E402
+
 log_discipline.apply()
 
+from atlassian import confluence as confluence_ops
+from atlassian import jira as jira_ops
+from atlassian import user as user_ops
 from atlassian.atlassian_client import AtlassianClient, AtlassianError
 from atlassian.local_auth import get_local_token_and_cloud_id
-from atlassian import jira as jira_ops
-from atlassian import confluence as confluence_ops
-from atlassian import user as user_ops
 
 from auth import TokenStore
 
@@ -79,6 +81,7 @@ def _pp(data):
 # Jira commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_jira_projects(args):
     with _get_client() as client:
         projects = jira_ops.list_projects(client, max_results=args.max_results)
@@ -107,7 +110,10 @@ def cmd_jira_search(args):
         # Fetch all or up to max_results
         cap = args.max_results if args.max_results > 0 else jira_ops._MAX_TOTAL_ISSUES
         issues = jira_ops.search_all_issues(
-            client, jql=args.jql, fields=field_str, max_total=cap,
+            client,
+            jql=args.jql,
+            fields=field_str,
+            max_total=cap,
         )
 
     if not issues:
@@ -192,7 +198,9 @@ def cmd_jira_update(args):
     if args.assignee:
         kwargs["assignee_id"] = args.assignee
     if not kwargs:
-        print("Nothing to update — provide at least one of --summary, --description, --priority, --labels, --assignee")
+        print(
+            "Nothing to update — provide at least one of --summary, --description, --priority, --labels, --assignee"
+        )
         return
     with _get_client() as client:
         jira_ops.update_issue(client, args.issue_key, **kwargs)
@@ -273,6 +281,7 @@ def cmd_jira_lookup_user(args):
 # Confluence commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_confluence_spaces(args):
     with _get_client() as client:
         spaces = confluence_ops.list_spaces(client, max_results=args.max_results)
@@ -286,7 +295,9 @@ def cmd_confluence_spaces(args):
 
 def cmd_confluence_search(args):
     with _get_client() as client:
-        results = confluence_ops.search_content(client, query=args.query, max_results=args.max_results)
+        results = confluence_ops.search_content(
+            client, query=args.query, max_results=args.max_results
+        )
     if not results:
         print("No results found.")
         return
@@ -315,6 +326,7 @@ def cmd_confluence_get(args):
 # User commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_user_me(args):
     with _get_client() as client:
         user = user_ops.get_myself(client)
@@ -328,6 +340,7 @@ def cmd_user_me(args):
 # ---------------------------------------------------------------------------
 # Logout
 # ---------------------------------------------------------------------------
+
 
 def cmd_logout(args):
     # TokenStore is DB-backed now — the file-based `cache_file` attribute was
@@ -345,84 +358,106 @@ def cmd_logout(args):
 # Raw MCP-mirror commands (for testing consolidated tools)
 # ---------------------------------------------------------------------------
 
+
 def cmd_raw_jira_search(args):
     import asyncio
+
     from atlassian_mcp import jira_search
-    result = asyncio.run(jira_search(
-        target=args.target,
-        jql=args.jql,
-        query=args.query,
-        project_key=args.project_key,
-        fields=args.fields,
-        status=args.status,
-        max_results=args.max_results,
-    ))
+
+    result = asyncio.run(
+        jira_search(
+            target=args.target,
+            jql=args.jql,
+            query=args.query,
+            project_key=args.project_key,
+            fields=args.fields,
+            status=args.status,
+            max_results=args.max_results,
+        )
+    )
     print(result)
 
 
 def cmd_raw_jira_get(args):
     import asyncio
+
     from atlassian_mcp import jira_get
-    result = asyncio.run(jira_get(
-        target=args.target,
-        issue_key=args.issue_key,
-    ))
+
+    result = asyncio.run(
+        jira_get(
+            target=args.target,
+            issue_key=args.issue_key,
+        )
+    )
     print(result)
 
 
 def cmd_raw_jira_manage(args):
     import asyncio
+
     from atlassian_mcp import jira_manage
-    result = asyncio.run(jira_manage(
-        target=args.target,
-        issue_key=args.issue_key,
-        project_key=args.project_key,
-        summary=args.summary,
-        issue_type=args.issue_type,
-        description=args.description,
-        assignee_id=args.assignee_id,
-        priority=args.priority,
-        labels=args.labels,
-        body=args.body,
-        author_label=args.author_label,
-        transition_name=args.transition_name,
-        name=args.name,
-        release_date=args.release_date,
-        released=args.released,
-    ))
+
+    result = asyncio.run(
+        jira_manage(
+            target=args.target,
+            issue_key=args.issue_key,
+            project_key=args.project_key,
+            summary=args.summary,
+            issue_type=args.issue_type,
+            description=args.description,
+            assignee_id=args.assignee_id,
+            priority=args.priority,
+            labels=args.labels,
+            body=args.body,
+            author_label=args.author_label,
+            transition_name=args.transition_name,
+            name=args.name,
+            release_date=args.release_date,
+            released=args.released,
+        )
+    )
     print(result)
 
 
 def cmd_raw_confluence_search(args):
     import asyncio
+
     from atlassian_mcp import confluence_search
-    result = asyncio.run(confluence_search(
-        target=args.target,
-        query=args.query,
-        page_id=args.page_id,
-        max_results=args.max_results,
-    ))
+
+    result = asyncio.run(
+        confluence_search(
+            target=args.target,
+            query=args.query,
+            page_id=args.page_id,
+            max_results=args.max_results,
+        )
+    )
     print(result)
 
 
 def cmd_raw_confluence_manage(args):
     import asyncio
+
     from atlassian_mcp import confluence_manage
-    result = asyncio.run(confluence_manage(
-        target=args.target,
-        space_id=args.space_id,
-        title=args.title,
-        body=args.body,
-        parent_id=args.parent_id,
-        page_id=args.page_id,
-        version_number=args.version_number,
-    ))
+
+    result = asyncio.run(
+        confluence_manage(
+            target=args.target,
+            space_id=args.space_id,
+            title=args.title,
+            body=args.body,
+            parent_id=args.parent_id,
+            page_id=args.page_id,
+            version_number=args.version_number,
+        )
+    )
     print(result)
 
 
 # ---------------------------------------------------------------------------
 # CLI setup
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -440,10 +475,14 @@ def main():
 
     p = jira_sub.add_parser("search", help="Search issues with JQL")
     p.add_argument("jql", help="JQL query string")
-    p.add_argument("--max-results", type=int, default=0,
-                   help="Max issues to return (0 = all, default: all)")
-    p.add_argument("--fields", default="",
-                   help='Fields to include. "extended" for full set, or comma-separated list (default: minimal)')
+    p.add_argument(
+        "--max-results", type=int, default=0, help="Max issues to return (0 = all, default: all)"
+    )
+    p.add_argument(
+        "--fields",
+        default="",
+        help='Fields to include. "extended" for full set, or comma-separated list (default: minimal)',
+    )
     p.set_defaults(func=cmd_jira_search)
 
     p = jira_sub.add_parser("count", help="Count issues matching JQL")
@@ -489,8 +528,12 @@ def main():
     p = jira_sub.add_parser("versions", help="List project versions/releases")
     p.add_argument("project_key", help="Project key (e.g., PROJ)")
     p.add_argument("--query", default="", help="Filter by name pattern")
-    p.add_argument("--status", default="", choices=["released", "unreleased", ""],
-                   help="Filter by status (default: all)")
+    p.add_argument(
+        "--status",
+        default="",
+        choices=["released", "unreleased", ""],
+        help="Filter by status (default: all)",
+    )
     p.add_argument("--max-results", type=int, default=50)
     p.set_defaults(func=cmd_jira_versions)
 
@@ -536,8 +579,11 @@ def main():
     raw_sub = raw_parser.add_subparsers(dest="command", required=True)
 
     p = raw_sub.add_parser("jira-search", help="Mirror of jira_search MCP tool")
-    p.add_argument("--target", required=True,
-                   choices=["projects", "issues", "issue_count", "versions", "users", "myself"])
+    p.add_argument(
+        "--target",
+        required=True,
+        choices=["projects", "issues", "issue_count", "versions", "users", "myself"],
+    )
     p.add_argument("--jql", default="")
     p.add_argument("--query", default="")
     p.add_argument("--project-key", default="")
@@ -552,8 +598,11 @@ def main():
     p.set_defaults(func=cmd_raw_jira_get)
 
     p = raw_sub.add_parser("jira-manage", help="Mirror of jira_manage MCP tool")
-    p.add_argument("--target", required=True,
-                   choices=["create_issue", "update_issue", "comment", "transition", "create_version"])
+    p.add_argument(
+        "--target",
+        required=True,
+        choices=["create_issue", "update_issue", "comment", "transition", "create_version"],
+    )
     p.add_argument("--issue-key", default="")
     p.add_argument("--project-key", default="")
     p.add_argument("--summary", default="")

@@ -46,7 +46,7 @@ locals {
     var.mcp_atlassian_v2_enabled
     ? (var.mcp_atlassian_is_private
       ? aws_apprunner_vpc_ingress_connection.mcp_atlassian[0].domain_name
-      : aws_apprunner_service.mcp_atlassian[0].service_url)
+    : aws_apprunner_service.mcp_atlassian[0].service_url)
     : ""
   )
 }

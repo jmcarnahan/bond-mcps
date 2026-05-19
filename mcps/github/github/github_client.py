@@ -5,8 +5,9 @@ Provides sync and async clients that handle authorization headers,
 API versioning, and error parsing for the GitHub v3 REST API.
 """
 
+from typing import Any
+
 import httpx
-from typing import Any, Dict, Optional
 
 GITHUB_API_BASE_URL = "https://api.github.com"
 
@@ -42,11 +43,14 @@ def _raise_for_github_error(response: httpx.Response) -> None:
         errors = body.get("errors", [])
         if errors:
             details = "; ".join(
-                e.get("message", str(e)) for e in errors[:5]  # cap at 5 errors
+                e.get("message", str(e))
+                for e in errors[:5]  # cap at 5 errors
             )
             message = f"{message} ({details})"
         if not message:
-            message = response.text[:_MAX_ERROR_MESSAGE_LEN] if response.text else response.reason_phrase
+            message = (
+                response.text[:_MAX_ERROR_MESSAGE_LEN] if response.text else response.reason_phrase
+            )
     except Exception:
         raw = response.text or response.reason_phrase or "Unknown error"
         message = raw[:_MAX_ERROR_MESSAGE_LEN]
@@ -83,24 +87,24 @@ class GitHubClient:
             timeout=30.0,
         )
 
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self._client.get(path, params=params)
         _raise_for_github_error(response)
         return response.json()
 
-    def post(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def post(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any] | None:
         response = self._client.post(path, json=json_data)
         _raise_for_github_error(response)
         if response.status_code == 204 or not response.content:
             return None
         return response.json()
 
-    def patch(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def patch(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self._client.patch(path, json=json_data)
         _raise_for_github_error(response)
         return response.json()
 
-    def put(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def put(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any] | None:
         response = self._client.put(path, json=json_data)
         _raise_for_github_error(response)
         if response.status_code == 204 or not response.content:
@@ -134,24 +138,28 @@ class AsyncGitHubClient:
             timeout=30.0,
         )
 
-    async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = await self._client.get(path, params=params)
         _raise_for_github_error(response)
         return response.json()
 
-    async def post(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    async def post(
+        self, path: str, json_data: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         response = await self._client.post(path, json=json_data)
         _raise_for_github_error(response)
         if response.status_code == 204 or not response.content:
             return None
         return response.json()
 
-    async def patch(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def patch(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any]:
         response = await self._client.patch(path, json=json_data)
         _raise_for_github_error(response)
         return response.json()
 
-    async def put(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    async def put(
+        self, path: str, json_data: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         response = await self._client.put(path, json=json_data)
         _raise_for_github_error(response)
         if response.status_code == 204 or not response.content:

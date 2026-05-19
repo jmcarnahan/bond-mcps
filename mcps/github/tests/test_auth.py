@@ -2,9 +2,9 @@
 
 import base64
 import os
+from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch
 
 FAKE_BASIC_AUTH = base64.b64encode(b"user:pass").decode()
 
@@ -68,24 +68,30 @@ class TestGetGitHubTokenFallback:
     def test_falls_back_to_local_auth(self):
         from github.auth import get_github_token
 
-        with patch(_HEADERS_PATCH, side_effect=Exception("no HTTP context")), \
-             patch.dict(os.environ, {"GITHUB_CLIENT_ID": "test-id"}), \
-             patch("github.local_auth.get_local_token", return_value="local-tok"):
+        with (
+            patch(_HEADERS_PATCH, side_effect=Exception("no HTTP context")),
+            patch.dict(os.environ, {"GITHUB_CLIENT_ID": "test-id"}),
+            patch("github.local_auth.get_local_token", return_value="local-tok"),
+        ):
             token = get_github_token()
         assert token == "local-tok"
 
     def test_raises_when_no_header_and_no_client_id(self):
         from github.auth import get_github_token
 
-        with patch(_HEADERS_PATCH, side_effect=Exception("no HTTP context")), \
-             patch.dict(os.environ, {}, clear=True):
+        with (
+            patch(_HEADERS_PATCH, side_effect=Exception("no HTTP context")),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_github_token()
 
     def test_bearer_header_takes_priority_over_local_auth(self):
         from github.auth import get_github_token
 
-        with patch(_HEADERS_PATCH, return_value={"authorization": "Bearer header-tok"}), \
-             patch.dict(os.environ, {"GITHUB_CLIENT_ID": "test-id"}):
+        with (
+            patch(_HEADERS_PATCH, return_value={"authorization": "Bearer header-tok"}),
+            patch.dict(os.environ, {"GITHUB_CLIENT_ID": "test-id"}),
+        ):
             token = get_github_token()
         assert token == "header-tok"

@@ -3,11 +3,10 @@
 import json
 
 import httpx
-import pytest
 import respx
-
-from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient
 from ms_graph import calendar
+from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient
+
 from .conftest import (
     SAMPLE_CALENDAR_EVENT,
     SAMPLE_CALENDAR_EVENT_ALLDAY,

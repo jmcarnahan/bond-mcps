@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from databricks.sql import exc as dbexc
 
-from tests.conftest import WORKSPACE_HOST, HTTP_PATH
+from tests.conftest import HTTP_PATH, WORKSPACE_HOST
 
 
 def _mock_connection(rows, columns):
@@ -42,18 +42,21 @@ def _env(monkeypatch):
 
 class TestRequireEnv:
     def test_raises_when_host_missing(self):
-        from dbx.client import _require_env, DatabricksError
+        from dbx.client import DatabricksError, _require_env
+
         with pytest.raises(DatabricksError, match="DATABRICKS_HOST"):
             _require_env()
 
     def test_raises_when_http_path_missing(self, monkeypatch):
-        from dbx.client import _require_env, DatabricksError
+        from dbx.client import DatabricksError, _require_env
+
         monkeypatch.setenv("DATABRICKS_HOST", WORKSPACE_HOST)
         with pytest.raises(DatabricksError, match="DATABRICKS_HTTP_PATH"):
             _require_env()
 
     def test_lists_all_missing_in_one_error(self):
-        from dbx.client import _require_env, DatabricksError
+        from dbx.client import DatabricksError, _require_env
+
         with pytest.raises(DatabricksError) as exc:
             _require_env()
         assert "DATABRICKS_HOST" in str(exc.value)
@@ -66,6 +69,7 @@ class TestConnect:
         verbatim. Crucial for Bearer-mode handoff to worker threads — there
         must be NO callback that would later re-resolve from a stale context."""
         from dbx import client
+
         _env(monkeypatch)
         with patch("dbx.client.sql.connect") as mock_connect:
             client._connect(token="explicit-bearer-token")
@@ -88,20 +92,23 @@ class TestConnect:
     def test_connect_resolves_token_when_none_given(self, monkeypatch):
         """CLI path: _connect(None) falls through to get_databricks_token()."""
         from dbx import client
+
         _env(monkeypatch)
-        with patch("dbx.client.sql.connect") as mock_connect, \
-             patch("dbx.client.get_databricks_token", return_value="env-pat"):
+        with (
+            patch("dbx.client.sql.connect") as mock_connect,
+            patch("dbx.client.get_databricks_token", return_value="env-pat"),
+        ):
             client._connect(token=None)
         assert mock_connect.call_args.kwargs["access_token"] == "env-pat"
 
 
 class TestResolveTokenNow:
     def test_returns_token_and_source(self, monkeypatch):
-        from dbx.client import resolve_token_now
         from dbx.auth import AuthSource
+        from dbx.client import resolve_token_now
+
         monkeypatch.setenv("DATABRICKS_ACCESS_TOKEN", "the-pat")
-        with patch("fastmcp.server.dependencies.get_http_headers",
-                   side_effect=Exception("no ctx")):
+        with patch("fastmcp.server.dependencies.get_http_headers", side_effect=Exception("no ctx")):
             token, source = resolve_token_now()
         assert token == "the-pat"
         assert source is AuthSource.PAT
@@ -109,11 +116,14 @@ class TestResolveTokenNow:
     def test_captures_bearer_header(self, monkeypatch):
         """The token from `Authorization: Bearer` must take precedence — this
         is the call site where the contextvar is still alive."""
-        from dbx.client import resolve_token_now
         from dbx.auth import AuthSource
+        from dbx.client import resolve_token_now
+
         monkeypatch.setenv("DATABRICKS_ACCESS_TOKEN", "would-leak-if-used")
-        with patch("fastmcp.server.dependencies.get_http_headers",
-                   return_value={"authorization": "Bearer request-tok"}):
+        with patch(
+            "fastmcp.server.dependencies.get_http_headers",
+            return_value={"authorization": "Bearer request-tok"},
+        ):
             token, source = resolve_token_now()
         assert token == "request-tok"
         assert source is AuthSource.BEARER
@@ -122,9 +132,11 @@ class TestResolveTokenNow:
 class TestRunQuery:
     def test_returns_columns_and_rows(self, monkeypatch):
         from dbx.client import run_query
+
         _env(monkeypatch)
         conn, cursor = _mock_connection(
-            rows=[("a", 1), ("b", 2)], columns=["name", "val"],
+            rows=[("a", 1), ("b", 2)],
+            columns=["name", "val"],
         )
         with patch("dbx.client.sql.connect", return_value=conn):
             result = run_query("SELECT name, val FROM t")
@@ -137,6 +149,7 @@ class TestRunQuery:
 
     def test_empty_result(self, monkeypatch):
         from dbx.client import run_query
+
         _env(monkeypatch)
         conn, _ = _mock_connection(rows=[], columns=["x"])
         with patch("dbx.client.sql.connect", return_value=conn):
@@ -145,6 +158,7 @@ class TestRunQuery:
 
     def test_passes_token_to_connect(self, monkeypatch):
         from dbx.client import run_query
+
         _env(monkeypatch)
         conn, _ = _mock_connection(rows=[], columns=["x"])
         with patch("dbx.client.sql.connect", return_value=conn) as mock_connect:
@@ -155,6 +169,7 @@ class TestRunQuery:
         """Cursor returns more than MAX_FETCH_ROWS rows; result must be
         capped with truncated=True. Protects MCP from OOM on huge SELECTs."""
         from dbx import client
+
         _env(monkeypatch)
         # 5001 fetched → 5000 kept, truncated=True
         too_many = [(i,) for i in range(client.MAX_FETCH_ROWS + 1)]
@@ -168,6 +183,7 @@ class TestRunQuery:
         """If the result is exactly MAX_FETCH_ROWS, truncated must be False —
         no false positives."""
         from dbx import client
+
         _env(monkeypatch)
         exact = [(i,) for i in range(client.MAX_FETCH_ROWS)]
         conn, _ = _mock_connection(rows=exact, columns=["i"])
@@ -183,23 +199,27 @@ class TestClassifyError:
 
     def test_server_operation_error_is_sql_error(self):
         from dbx.client import _classify_error
+
         err = dbexc.ServerOperationError("TABLE_OR_VIEW_NOT_FOUND")
         result = _classify_error(err)
         assert result.error_code == "SQLError"
 
     def test_programming_error_is_sql_error(self):
         from dbx.client import _classify_error
+
         err = dbexc.ProgrammingError("parse error")
         result = _classify_error(err)
         assert result.error_code == "SQLError"
 
     def test_request_error_with_401_is_unauthorized(self):
         from dbx.client import _classify_error
+
         err = dbexc.RequestError("HTTP 401 Unauthorized")
         assert _classify_error(err).error_code == "Unauthorized"
 
     def test_request_error_with_403_is_forbidden(self):
         from dbx.client import _classify_error
+
         err = dbexc.RequestError("HTTP 403 Forbidden — permission denied")
         assert _classify_error(err).error_code == "Forbidden"
 
@@ -208,6 +228,7 @@ class TestClassifyError:
         RequestError. Don't blanket-classify those as Unreachable — the user
         would think their network is broken when it's a server-side hiccup."""
         from dbx.client import _classify_error
+
         err = dbexc.RequestError(
             "Error during request to server: Deadlock found when trying to "
             "get lock; try restarting transaction"
@@ -220,31 +241,37 @@ class TestClassifyError:
         """Strong network signal in the message → Unreachable, even when
         wrapped in a connector exception type."""
         from dbx.client import _classify_error
+
         err = dbexc.RequestError("could not resolve host dbc-x.cloud.databricks.com")
         assert _classify_error(err).error_code == "Unreachable"
 
     def test_connection_error_is_unreachable(self):
         from dbx.client import _classify_error
+
         assert _classify_error(ConnectionError("refused")).error_code == "Unreachable"
 
     def test_os_error_is_unreachable(self):
         from dbx.client import _classify_error
+
         assert _classify_error(OSError("network unreachable")).error_code == "Unreachable"
 
     def test_unknown_exception_falls_back(self):
         from dbx.client import _classify_error
+
         assert _classify_error(RuntimeError("???")).error_code == "Unknown"
 
     def test_substring_fallback_for_untyped_401(self):
         """A generic Exception with '401' in the message should still classify
         as Unauthorized (covers transport layers that don't raise typed errors)."""
         from dbx.client import _classify_error
+
         assert _classify_error(Exception("got HTTP 401")).error_code == "Unauthorized"
 
 
 class TestListHelpers:
     def test_list_catalogs(self, monkeypatch):
         from dbx.client import list_catalogs
+
         _env(monkeypatch)
         conn, _ = _mock_connection(rows=[("main",), ("samples",)], columns=["catalog"])
         with patch("dbx.client.sql.connect", return_value=conn):
@@ -252,9 +279,11 @@ class TestListHelpers:
 
     def test_list_schemas_quotes_identifier(self, monkeypatch):
         from dbx.client import list_schemas
+
         _env(monkeypatch)
         conn, cursor = _mock_connection(
-            rows=[("default",), ("bronze",)], columns=["databaseName"],
+            rows=[("default",), ("bronze",)],
+            columns=["databaseName"],
         )
         with patch("dbx.client.sql.connect", return_value=conn):
             assert list_schemas("main") == ["default", "bronze"]
@@ -263,6 +292,7 @@ class TestListHelpers:
     def test_list_schemas_escapes_backticks(self, monkeypatch):
         """Identifier with an embedded backtick must be safely escaped."""
         from dbx.client import list_schemas
+
         _env(monkeypatch)
         conn, cursor = _mock_connection(rows=[], columns=["databaseName"])
         with patch("dbx.client.sql.connect", return_value=conn):
@@ -271,6 +301,7 @@ class TestListHelpers:
 
     def test_list_tables(self, monkeypatch):
         from dbx.client import list_tables
+
         _env(monkeypatch)
         conn, cursor = _mock_connection(
             rows=[
@@ -292,6 +323,7 @@ class TestListHelpers:
         contract as run_query. Otherwise the worker thread would re-resolve
         and lose the request-scoped Bearer."""
         from dbx.client import list_catalogs, list_schemas, list_tables
+
         _env(monkeypatch)
         conn, _ = _mock_connection(rows=[], columns=["x"])
         for call in (

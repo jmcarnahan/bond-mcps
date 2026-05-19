@@ -6,32 +6,99 @@ All functions accept a GraphClient or AsyncGraphClient and return parsed dicts.
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import unquote
 
-from .graph_client import GraphClient, AsyncGraphClient, GraphError
+from .graph_client import AsyncGraphClient, GraphClient, GraphError
 
 logger = logging.getLogger(__name__)
 
 # Whitelist of standard HTML element names. Using a whitelist (rather than
 # matching any word after <) prevents false positives on patterns like
 # "Dear <FirstName>," or "if x<y and z>w" being mis-classified as HTML.
-_HTML_TAG_NAMES = frozenset({
-    'html', 'head', 'body', 'div', 'span', 'section', 'article',
-    'header', 'footer', 'main', 'nav', 'aside', 'pre', 'blockquote',
-    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-    'p', 'br', 'hr', 'wbr',
-    'ul', 'ol', 'li', 'dl', 'dt', 'dd',
-    'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
-    'a', 'strong', 'em', 'b', 'i', 'u', 's', 'del', 'ins', 'mark', 'small',
-    'code', 'kbd', 'samp', 'sup', 'sub', 'abbr',
-    'img', 'figure', 'figcaption', 'picture', 'source',
-    'form', 'input', 'button', 'label', 'select', 'option', 'textarea',
-    'script', 'style', 'link', 'meta', 'title',
-    'font', 'center', 'nobr',
-})
+_HTML_TAG_NAMES = frozenset(
+    {
+        "html",
+        "head",
+        "body",
+        "div",
+        "span",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "main",
+        "nav",
+        "aside",
+        "pre",
+        "blockquote",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "br",
+        "hr",
+        "wbr",
+        "ul",
+        "ol",
+        "li",
+        "dl",
+        "dt",
+        "dd",
+        "table",
+        "thead",
+        "tbody",
+        "tfoot",
+        "tr",
+        "th",
+        "td",
+        "caption",
+        "colgroup",
+        "col",
+        "a",
+        "strong",
+        "em",
+        "b",
+        "i",
+        "u",
+        "s",
+        "del",
+        "ins",
+        "mark",
+        "small",
+        "code",
+        "kbd",
+        "samp",
+        "sup",
+        "sub",
+        "abbr",
+        "img",
+        "figure",
+        "figcaption",
+        "picture",
+        "source",
+        "form",
+        "input",
+        "button",
+        "label",
+        "select",
+        "option",
+        "textarea",
+        "script",
+        "style",
+        "link",
+        "meta",
+        "title",
+        "font",
+        "center",
+        "nobr",
+    }
+)
 _HTML_TAG_RE = re.compile(
-    r'</?(?:' + '|'.join(sorted(_HTML_TAG_NAMES, key=len, reverse=True)) + r')\b',
+    r"</?(?:" + "|".join(sorted(_HTML_TAG_NAMES, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 )
 
@@ -48,7 +115,7 @@ def _detect_body_type(body: str) -> str:
     return "HTML" if _HTML_TAG_RE.search(body) else "Text"
 
 
-def _extract_mailbox_address(odata_context: str) -> Optional[str]:
+def _extract_mailbox_address(odata_context: str) -> str | None:
     """Extract the mailbox email from an @odata.context URL.
 
     For consumer accounts, the /me/mailboxSettings @odata.context contains the
@@ -65,7 +132,8 @@ def _extract_mailbox_address(odata_context: str) -> Optional[str]:
 # User profile
 # ---------------------------------------------------------------------------
 
-def get_profile(client: GraphClient) -> Dict[str, Any]:
+
+def get_profile(client: GraphClient) -> dict[str, Any]:
     """Get the authenticated user's profile from /me.
 
     Also attempts to fetch /me/mailboxSettings to discover the real mailbox
@@ -84,7 +152,7 @@ def get_profile(client: GraphClient) -> Dict[str, Any]:
     return profile
 
 
-async def aget_profile(client: AsyncGraphClient) -> Dict[str, Any]:
+async def aget_profile(client: AsyncGraphClient) -> dict[str, Any]:
     """Get the authenticated user's profile from /me (async).
 
     Also attempts to fetch /me/mailboxSettings to discover the real mailbox
@@ -107,11 +175,12 @@ async def aget_profile(client: AsyncGraphClient) -> Dict[str, Any]:
 # Synchronous
 # ---------------------------------------------------------------------------
 
+
 def list_messages(
     client: GraphClient,
     folder: str = "inbox",
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List recent messages in a mail folder."""
     data = client.get(
         f"/me/mailFolders/{folder}/messages",
@@ -120,18 +189,18 @@ def list_messages(
     return data.get("value", [])
 
 
-def get_message(client: GraphClient, message_id: str) -> Dict[str, Any]:
+def get_message(client: GraphClient, message_id: str) -> dict[str, Any]:
     """Get a single message by ID."""
     return client.get(f"/me/messages/{message_id}")
 
 
 def send_message(
     client: GraphClient,
-    to: List[str],
+    to: list[str],
     subject: str,
     body: str,
-    cc: Optional[List[str]] = None,
-    from_address: Optional[str] = None,
+    cc: list[str] | None = None,
+    from_address: str | None = None,
     body_type: str = "auto",
 ) -> None:
     """Send an email message."""
@@ -141,7 +210,7 @@ def send_message(
     cc_recipients = [{"emailAddress": {"address": addr}} for addr in (cc or [])]
     effective_type = _detect_body_type(body) if body_type == "auto" else body_type
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "message": {
             "subject": subject,
             "body": {"contentType": effective_type, "content": body},
@@ -161,7 +230,7 @@ def search_messages(
     client: GraphClient,
     query: str,
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search messages using KQL query syntax."""
     data = client.get(
         "/me/messages",
@@ -174,11 +243,12 @@ def search_messages(
 # Asynchronous
 # ---------------------------------------------------------------------------
 
+
 async def alist_messages(
     client: AsyncGraphClient,
     folder: str = "inbox",
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List recent messages in a mail folder (async)."""
     data = await client.get(
         f"/me/mailFolders/{folder}/messages",
@@ -187,18 +257,18 @@ async def alist_messages(
     return data.get("value", [])
 
 
-async def aget_message(client: AsyncGraphClient, message_id: str) -> Dict[str, Any]:
+async def aget_message(client: AsyncGraphClient, message_id: str) -> dict[str, Any]:
     """Get a single message by ID (async)."""
     return await client.get(f"/me/messages/{message_id}")
 
 
 async def asend_message(
     client: AsyncGraphClient,
-    to: List[str],
+    to: list[str],
     subject: str,
     body: str,
-    cc: Optional[List[str]] = None,
-    from_address: Optional[str] = None,
+    cc: list[str] | None = None,
+    from_address: str | None = None,
     body_type: str = "auto",
 ) -> None:
     """Send an email message (async)."""
@@ -208,7 +278,7 @@ async def asend_message(
     cc_recipients = [{"emailAddress": {"address": addr}} for addr in (cc or [])]
     effective_type = _detect_body_type(body) if body_type == "auto" else body_type
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "message": {
             "subject": subject,
             "body": {"contentType": effective_type, "content": body},
@@ -228,7 +298,7 @@ async def asearch_messages(
     client: AsyncGraphClient,
     query: str,
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search messages using KQL query syntax (async)."""
     data = await client.get(
         "/me/messages",

@@ -18,12 +18,12 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
-
-from auth import log_discipline
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
+
+from auth import log_discipline
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._handle_health()
         elif path.startswith("/auth/result/"):
-            state = path[len("/auth/result/"):]
+            state = path[len("/auth/result/") :]
             self._handle_result(state)
         elif re.match(r"^/connections/[^/]+/callback$", path):
             provider = path.split("/")[2]
@@ -107,7 +107,8 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
                 duplicate = True
             else:
                 _pending[state] = PendingAuth(
-                    provider=provider, created_at=time.time(),
+                    provider=provider,
+                    created_at=time.time(),
                 )
                 duplicate = False
 
@@ -134,20 +135,26 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
         if outcome == "unknown":
             logger.warning("Callback with unknown/expired state for %s", provider)
-            self._send_html(400,
+            self._send_html(
+                400,
                 "<h2>Authentication failed</h2>"
-                "<p>Unknown or expired auth session. Please try again.</p>")
+                "<p>Unknown or expired auth session. Please try again.</p>",
+            )
         elif outcome == "mismatch":
             logger.warning("Callback provider mismatch for state=%s", state[:8] if state else "?")
-            self._send_html(400,
-                "<h2>Authentication failed</h2>"
-                "<p>Provider mismatch. Please try again.</p>")
+            self._send_html(
+                400, "<h2>Authentication failed</h2>" "<p>Provider mismatch. Please try again.</p>"
+            )
         else:
             has_code = "code" in params
-            logger.info("OAuth callback received for %s (code=%s)", provider, "yes" if has_code else "NO")
-            self._send_html(200,
+            logger.info(
+                "OAuth callback received for %s (code=%s)", provider, "yes" if has_code else "NO"
+            )
+            self._send_html(
+                200,
                 "<h2>Authentication successful!</h2>"
-                "<p>You can close this tab and return to your terminal.</p>")
+                "<p>You can close this tab and return to your terminal.</p>",
+            )
 
     def _handle_result(self, state: str) -> None:
         with _lock:
@@ -220,10 +227,10 @@ def run_proxy(host: str = "127.0.0.1", port: int = 8000) -> None:
 
     logger.info("Auth proxy listening on %s:%d", host, port)
     print(f"\n{'=' * 50}", flush=True)
-    print(f"  Bond MCPs OAuth Proxy", flush=True)
+    print("  Bond MCPs OAuth Proxy", flush=True)
     print(f"  Listening on {host}:{port}", flush=True)
     print(f"  PID: {os.getpid()}", flush=True)
-    print(f"  Press Ctrl+C to stop", flush=True)
+    print("  Press Ctrl+C to stop", flush=True)
     print(f"{'=' * 50}\n", flush=True)
     try:
         server.serve_forever()

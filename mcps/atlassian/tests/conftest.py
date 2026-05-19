@@ -26,6 +26,7 @@ def pytest_collection_modifyitems(config, items):
             if "integration" in item.keywords:
                 item.add_marker(skip_integration)
 
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -94,9 +95,7 @@ SAMPLE_ISSUE = {
             "content": [
                 {
                     "type": "paragraph",
-                    "content": [
-                        {"type": "text", "text": "Login times out after 30 seconds."}
-                    ],
+                    "content": [{"type": "text", "text": "Login times out after 30 seconds."}],
                 }
             ],
         },
@@ -156,9 +155,7 @@ SAMPLE_COMMENT = {
         "content": [
             {
                 "type": "paragraph",
-                "content": [
-                    {"type": "text", "text": "I can reproduce this on Chrome."}
-                ],
+                "content": [{"type": "text", "text": "I can reproduce this on Chrome."}],
             }
         ],
     },
@@ -178,9 +175,7 @@ SAMPLE_COMMENT_2 = {
         "content": [
             {
                 "type": "paragraph",
-                "content": [
-                    {"type": "text", "text": "Working on a fix now."}
-                ],
+                "content": [{"type": "text", "text": "Working on a fix now."}],
             }
         ],
     },

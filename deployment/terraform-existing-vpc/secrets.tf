@@ -66,14 +66,26 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
 }
 
 # -------------------------------------------------------------------------
-# JWT verification public key (only consumed when var.jwt_verification.enabled
-# = true and the chart's jwt block is wired). Always created so flipping
-# the flag later doesn't churn — costs nothing while empty.
+# JWT verification public key — LEGACY static-PEM mode only.
+#
+# Created ONLY when var.jwt_verification.enabled = true AND no AS service is
+# declared (i.e. no service has is_auth_server=true). In that mode the
+# operator ships the public key in SM instead of fetching it from the AS's
+# /.well-known/jwks.json endpoint. When an AS service is declared, MCPs read
+# the live JWKS from the AS and this secret is unnecessary; the AS's signing
+# material lives in `as_credentials` instead.
 # -------------------------------------------------------------------------
 
+locals {
+  enable_legacy_jwt_pk_secret = (
+    var.jwt_verification.enabled && local.auth_server_key == null
+  )
+}
+
 resource "aws_secretsmanager_secret" "jwt_public_key" {
+  count                   = local.enable_legacy_jwt_pk_secret ? 1 : 0
   name                    = local.sm_jwt_public_key
-  description             = "PEM-encoded public key for bond-mcps JWT identity verification"
+  description             = "PEM-encoded public key for bond-mcps JWT identity verification (legacy static-PEM mode)"
   kms_key_id              = aws_kms_key.secrets.arn
   recovery_window_in_days = var.secrets_recovery_window_days
 
@@ -81,9 +93,46 @@ resource "aws_secretsmanager_secret" "jwt_public_key" {
 }
 
 resource "aws_secretsmanager_secret_version" "jwt_public_key" {
-  secret_id = aws_secretsmanager_secret.jwt_public_key.id
+  count     = local.enable_legacy_jwt_pk_secret ? 1 : 0
+  secret_id = aws_secretsmanager_secret.jwt_public_key[0].id
   secret_string = jsonencode({
     BOND_MCPS_JWT_PUBLIC_KEY = "REPLACE_WITH_PEM_IF_JWT_VERIFICATION_ENABLED"
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# -------------------------------------------------------------------------
+# Authorization Server credentials (created when an AS service is declared).
+#
+# Holds the AS's RSA signing key (BOND_MCPS_AS_PRIVATE_KEY_PEM) plus the
+# upstream IdP client_secret if the upstream client is confidential. The
+# JSON keys are env var names — ESO dataFrom.extract maps each to a
+# Kubernetes Secret key that the chart consumes via envFrom.
+# -------------------------------------------------------------------------
+
+locals {
+  enable_as_credentials_secret = local.auth_server_key != null
+}
+
+resource "aws_secretsmanager_secret" "as_credentials" {
+  count                   = local.enable_as_credentials_secret ? 1 : 0
+  name                    = local.sm_as_credentials
+  description             = "RSA signing key + upstream client_secret for the bond-mcps Authorization Server"
+  kms_key_id              = aws_kms_key.secrets.arn
+  recovery_window_in_days = var.secrets_recovery_window_days
+
+  tags = { Name = local.sm_as_credentials }
+}
+
+resource "aws_secretsmanager_secret_version" "as_credentials" {
+  count     = local.enable_as_credentials_secret ? 1 : 0
+  secret_id = aws_secretsmanager_secret.as_credentials[0].id
+  secret_string = jsonencode({
+    BOND_MCPS_AS_PRIVATE_KEY_PEM     = "REPLACE_WITH_RSA_PEM"
+    BOND_MCPS_UPSTREAM_CLIENT_SECRET = "" # Empty for public OIDC clients (PKCE-only)
   })
 
   lifecycle {

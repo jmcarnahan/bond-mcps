@@ -1,16 +1,15 @@
 """Tests for issue operations."""
 
 import httpx
-import pytest
 import respx
-
 from github.github_client import GITHUB_API_BASE_URL, AsyncGitHubClient, GitHubClient
+
 from .conftest import (
+    SAMPLE_COMMENTS_RESPONSE,
+    SAMPLE_CREATED_COMMENT,
+    SAMPLE_CREATED_ISSUE,
     SAMPLE_ISSUE,
     SAMPLE_ISSUES_RESPONSE,
-    SAMPLE_COMMENTS_RESPONSE,
-    SAMPLE_CREATED_ISSUE,
-    SAMPLE_CREATED_COMMENT,
 )
 
 
@@ -64,15 +63,18 @@ class TestIssuesSync:
             return_value=httpx.Response(201, json=SAMPLE_CREATED_ISSUE)
         )
         with GitHubClient("tok") as client:
-            result = create_issue(client, "o", "r", title="New feature request", body="Please add this.")
+            result = create_issue(
+                client, "o", "r", title="New feature request", body="Please add this."
+            )
 
         assert result["number"] == 50
         assert route.called
 
     @respx.mock
     def test_create_issue_with_labels(self):
-        from github.issues import create_issue
         import json
+
+        from github.issues import create_issue
 
         route = respx.post(f"{GITHUB_API_BASE_URL}/repos/o/r/issues").mock(
             return_value=httpx.Response(201, json=SAMPLE_CREATED_ISSUE)

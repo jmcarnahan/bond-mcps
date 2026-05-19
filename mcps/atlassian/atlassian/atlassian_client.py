@@ -5,8 +5,9 @@ Provides sync and async clients that handle authorization headers
 and error parsing for both Jira v3 and Confluence v2 APIs.
 """
 
+from typing import Any
+
 import httpx
-from typing import Any, Dict, Optional
 
 ATLASSIAN_API_BASE = "https://api.atlassian.com"
 
@@ -52,7 +53,9 @@ def _raise_for_atlassian_error(response: httpx.Response) -> None:
             message = body.get("error", "")
 
         if not message:
-            message = response.text[:_MAX_ERROR_MESSAGE_LEN] if response.text else response.reason_phrase
+            message = (
+                response.text[:_MAX_ERROR_MESSAGE_LEN] if response.text else response.reason_phrase
+            )
     except Exception:
         raw = response.text or response.reason_phrase or "Unknown error"
         message = raw[:_MAX_ERROR_MESSAGE_LEN]
@@ -107,19 +110,19 @@ class AtlassianClient:
         """Base URL path for Confluence REST API v1 (used for CQL search)."""
         return f"/ex/confluence/{self._cloud_id}/wiki/rest/api"
 
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         response = self._client.get(path, params=params)
         _raise_for_atlassian_error(response)
         return response.json()
 
-    def post(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    def post(self, path: str, json_data: dict[str, Any] | None = None) -> Any | None:
         response = self._client.post(path, json=json_data)
         _raise_for_atlassian_error(response)
         if response.status_code == 204 or not response.content:
             return None
         return response.json()
 
-    def put(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    def put(self, path: str, json_data: dict[str, Any] | None = None) -> Any | None:
         response = self._client.put(path, json=json_data)
         _raise_for_atlassian_error(response)
         if response.status_code == 204 or not response.content:
@@ -166,19 +169,19 @@ class AsyncAtlassianClient:
         """Base URL path for Confluence REST API v1 (used for CQL search)."""
         return f"/ex/confluence/{self._cloud_id}/wiki/rest/api"
 
-    async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         response = await self._client.get(path, params=params)
         _raise_for_atlassian_error(response)
         return response.json()
 
-    async def post(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    async def post(self, path: str, json_data: dict[str, Any] | None = None) -> Any | None:
         response = await self._client.post(path, json=json_data)
         _raise_for_atlassian_error(response)
         if response.status_code == 204 or not response.content:
             return None
         return response.json()
 
-    async def put(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    async def put(self, path: str, json_data: dict[str, Any] | None = None) -> Any | None:
         response = await self._client.put(path, json=json_data)
         _raise_for_atlassian_error(response)
         if response.status_code == 204 or not response.content:

@@ -5,53 +5,50 @@ get_graph_token() directly instead of get_http_headers().
 """
 
 import json
+from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
-from unittest.mock import patch
-
 from ms_graph.graph_client import GRAPH_BASE_URL
 from ms_graph.power_bi import POWERBI_BASE_URL
+
 from .conftest import (
-    SAMPLE_USER_PROFILE,
+    GRAPH_ERROR_403,
+    SAMPLE_CHANNEL_MESSAGES_RESPONSE,
+    SAMPLE_CHANNELS_RESPONSE,
+    SAMPLE_CHAT_MESSAGE_SENT,
+    SAMPLE_CHAT_MESSAGES_RESPONSE,
+    SAMPLE_CHATS_RESPONSE,
+    SAMPLE_COPY_COMPLETED,
+    SAMPLE_COPY_FAILED,
+    SAMPLE_DRIVE_CHILDREN_RESPONSE,
+    SAMPLE_DRIVE_ITEM_BINARY,
+    SAMPLE_DRIVE_ITEM_FILE,
+    SAMPLE_DRIVE_ITEM_LARGE_TEXT,
+    SAMPLE_DRIVE_ITEM_WORD,
     SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
     SAMPLE_MESSAGE_2,
     SAMPLE_MESSAGES_RESPONSE,
-    SAMPLE_TEAMS_RESPONSE,
-    SAMPLE_CHANNELS_RESPONSE,
-    SAMPLE_CHANNEL_MESSAGE_USER,
-    SAMPLE_CHANNEL_MESSAGE_BOT,
-    SAMPLE_CHANNEL_MESSAGES_RESPONSE,
-    SAMPLE_CHATS_RESPONSE,
-    SAMPLE_CHAT_MESSAGES_RESPONSE,
-    SAMPLE_CHAT_MESSAGE_SENT,
-    SAMPLE_DRIVE_CHILDREN_RESPONSE,
-    SAMPLE_DRIVE_ITEM_FILE,
-    SAMPLE_DRIVE_ITEM_BINARY,
-    SAMPLE_DRIVE_ITEM_LARGE_TEXT,
-    SAMPLE_DRIVE_ITEM_FOLDER,
-    SAMPLE_DRIVE_ITEM_WORD,
-    SAMPLE_UPLOADED_FILE,
-    SAMPLE_COPY_COMPLETED,
-    SAMPLE_COPY_FAILED,
+    SAMPLE_PBI_DASHBOARDS_RESPONSE,
+    SAMPLE_PBI_DATASETS_RESPONSE,
+    SAMPLE_PBI_DAX_RESULT,
+    SAMPLE_PBI_EXPORT_SUCCEEDED,
+    SAMPLE_PBI_REPORTS_RESPONSE,
+    SAMPLE_PBI_WORKSPACES_RESPONSE,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_EMPTY,
     SAMPLE_SITES_RESPONSE,
-    GRAPH_ERROR_403,
-    GRAPH_ERROR_404,
-    SAMPLE_PBI_WORKSPACES_RESPONSE,
-    SAMPLE_PBI_DATASETS_RESPONSE,
-    SAMPLE_PBI_REPORTS_RESPONSE,
-    SAMPLE_PBI_DASHBOARDS_RESPONSE,
-    SAMPLE_PBI_DAX_RESULT,
-    SAMPLE_PBI_EXPORT_SUCCEEDED,
-    SAMPLE_PBI_EXPORT_FAILED,
+    SAMPLE_TEAMS_RESPONSE,
+    SAMPLE_UPLOADED_FILE,
+    SAMPLE_USER_PROFILE,
 )
 
 MONITOR_URL = "https://api.onedrive.com/v1.0/monitor/copy-op-token"
-PBI_EXPORT_MONITOR_URL = f"{POWERBI_BASE_URL}/groups/ws-id-001/reports/rpt-id-001/exports/export-id-001"
+PBI_EXPORT_MONITOR_URL = (
+    f"{POWERBI_BASE_URL}/groups/ws-id-001/reports/rpt-id-001/exports/export-id-001"
+)
 
 
 def _mock_token(token: str = "test-ms-token"):
@@ -73,12 +70,14 @@ def _get_text(result) -> str:
 def mcp_server():
     """Import and return the MCP server instance."""
     from ms_graph_mcp import mcp
+
     return mcp
 
 
 # ---------------------------------------------------------------------------
 # Profile
 # ---------------------------------------------------------------------------
+
 
 class TestMCPProfileTools:
     """Test user profile MCP tools via in-process FastMCP client."""
@@ -93,11 +92,12 @@ class TestMCPProfileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("get_user_profile", {})
 
         text = _get_text(result)
-        assert "John Carnahan" in text
+        assert "Test User" in text
         assert "user@example.com" in text
         assert "Mailbox Address" in text
         assert "mailbox@example.com" in text
@@ -108,23 +108,25 @@ class TestMCPProfileTools:
             return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
         )
         respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
-            return_value=httpx.Response(403, json={
-                "error": {"code": "ErrorAccessDenied", "message": "Access denied"}
-            })
+            return_value=httpx.Response(
+                403, json={"error": {"code": "ErrorAccessDenied", "message": "Access denied"}}
+            )
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("get_user_profile", {})
 
         text = _get_text(result)
-        assert "John Carnahan" in text
+        assert "Test User" in text
         assert "Mailbox Address" not in text
 
 
 # ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
+
 
 class TestMCPEmailTools:
     """Test consolidated email MCP tools."""
@@ -137,6 +139,7 @@ class TestMCPEmailTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_emails", {"top": 10})
 
@@ -152,6 +155,7 @@ class TestMCPEmailTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_emails", {"query": "weekly"})
 
@@ -166,6 +170,7 @@ class TestMCPEmailTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_emails", {"query": "nonexistent"})
 
@@ -180,6 +185,7 @@ class TestMCPEmailTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_emails", {})
 
@@ -192,6 +198,7 @@ class TestMCPEmailTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_emails", {"folder": "sentitems"})
 
@@ -205,6 +212,7 @@ class TestMCPEmailTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("read_email", {"message_id": msg_id})
 
@@ -220,8 +228,11 @@ class TestMCPEmailTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
-                result = await client.call_tool("read_email", {"message_id": SAMPLE_MESSAGE_2["id"]})
+                result = await client.call_tool(
+                    "read_email", {"message_id": SAMPLE_MESSAGE_2["id"]}
+                )
 
         text = _get_text(result)
         assert "HTML content" in text
@@ -229,11 +240,10 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_plain_text(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "send_email",
@@ -247,11 +257,10 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_html_body_auto_detected(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "send_email",
@@ -268,11 +277,10 @@ class TestMCPEmailTools:
     @respx.mock
     async def test_send_email_placeholder_not_mistaken_for_html(self, mcp_server):
         """'Dear <FirstName>,' must stay Text."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "send_email",
@@ -288,15 +296,19 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_with_cc(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "send_email",
-                    {"to": "alice@example.com", "subject": "Hi", "body": "Hello!", "cc": "bob@example.com"},
+                    {
+                        "to": "alice@example.com",
+                        "subject": "Hi",
+                        "body": "Hello!",
+                        "cc": "bob@example.com",
+                    },
                 )
 
         text = _get_text(result)
@@ -306,11 +318,10 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_multiple_recipients(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "send_email",
@@ -322,15 +333,19 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_explicit_text_overrides_html(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "send_email",
-                    {"to": "alice@example.com", "subject": "S", "body": "<p>HTML</p>", "body_type": "Text"},
+                    {
+                        "to": "alice@example.com",
+                        "subject": "S",
+                        "body": "<p>HTML</p>",
+                        "body_type": "Text",
+                    },
                 )
 
         payload = json.loads(route.calls[0].request.content)
@@ -338,11 +353,10 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_no_from_by_default(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "send_email",
@@ -354,11 +368,10 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_with_from_address(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "send_email",
@@ -378,10 +391,14 @@ class TestMCPEmailTools:
         from fastmcp.exceptions import ToolError
 
         respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
-            return_value=httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken", "message": "Token expired"}})
+            return_value=httpx.Response(
+                401,
+                json={"error": {"code": "InvalidAuthenticationToken", "message": "Token expired"}},
+            )
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="InvalidAuthenticationToken"):
                     await client.call_tool("list_emails", {})
@@ -390,6 +407,7 @@ class TestMCPEmailTools:
 # ---------------------------------------------------------------------------
 # Teams
 # ---------------------------------------------------------------------------
+
 
 class TestMCPTeamsTools:
     """Test consolidated Teams MCP tools."""
@@ -402,6 +420,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_teams", {})
 
@@ -418,6 +437,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_teams", {"team_id": team_id})
 
@@ -433,6 +453,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_teams", {})
 
@@ -445,6 +466,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_teams", {})
 
@@ -457,6 +479,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_chats", {})
 
@@ -471,6 +494,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_chats", {})
 
@@ -479,6 +503,7 @@ class TestMCPTeamsTools:
     async def test_list_chats_invalid_type(self, mcp_server):
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_chats", {"chat_type": "invalid"})
 
@@ -494,6 +519,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "read_teams_messages",
@@ -513,6 +539,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "read_teams_messages",
@@ -532,6 +559,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "read_teams_messages",
@@ -545,6 +573,7 @@ class TestMCPTeamsTools:
         """No IDs provided → returns helpful error."""
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("read_teams_messages", {})
 
@@ -554,6 +583,7 @@ class TestMCPTeamsTools:
         """Only team_id (no channel_id) → returns helpful error."""
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("read_teams_messages", {"team_id": "t1"})
 
@@ -564,11 +594,12 @@ class TestMCPTeamsTools:
         """team_id + channel_id → sends to channel."""
         team_id = "team-id-001"
         channel_id = "channel-id-001"
-        route = respx.post(
-            f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages"
-        ).mock(return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT))
+        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "send_teams_message",
@@ -583,11 +614,12 @@ class TestMCPTeamsTools:
     async def test_send_teams_message_to_chat(self, mcp_server):
         """chat_id → sends to chat."""
         chat_id = "chat-1on1-001"
-        route = respx.post(
-            f"{GRAPH_BASE_URL}/chats/{chat_id}/messages"
-        ).mock(return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT))
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "send_teams_message",
@@ -602,6 +634,7 @@ class TestMCPTeamsTools:
         """No IDs → helpful error, no API call made."""
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("send_teams_message", {"message": "Hello!"})
 
@@ -618,6 +651,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("get_teams_activity", {"hours": 1})
 
@@ -631,6 +665,7 @@ class TestMCPTeamsTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("get_teams_activity", {})
 
@@ -640,6 +675,7 @@ class TestMCPTeamsTools:
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
+
 
 class TestMCPFileTools:
     """Test consolidated file MCP tools."""
@@ -651,6 +687,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_sharepoint_sites", {"query": "engineering"})
 
@@ -665,6 +702,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_sharepoint_sites", {"query": "nope"})
 
@@ -678,6 +716,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_files", {})
 
@@ -692,6 +731,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_files", {"folder_path": "Documents"})
 
@@ -708,6 +748,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_files", {"site_id": site_id})
 
@@ -722,6 +763,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_files", {"query": "budget"})
 
@@ -736,6 +778,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_files", {"query": "nonexistent"})
 
@@ -748,6 +791,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_files", {})
 
@@ -761,6 +805,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "inspect_file",
@@ -780,6 +825,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "inspect_file",
@@ -802,6 +848,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "inspect_file",
@@ -822,8 +869,11 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
-                result = await client.call_tool("inspect_file", {"item_id": item_id, "read_content": True})
+                result = await client.call_tool(
+                    "inspect_file", {"item_id": item_id, "read_content": True}
+                )
 
         text = _get_text(result)
         # PPTX is 2.5 MB so it hits the "too large" branch (> 512 KB)
@@ -838,8 +888,11 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
-                result = await client.call_tool("inspect_file", {"item_id": item_id, "read_content": True})
+                result = await client.call_tool(
+                    "inspect_file", {"item_id": item_id, "read_content": True}
+                )
 
         text = _get_text(result)
         assert "too large" in text.lower()
@@ -856,6 +909,7 @@ class TestMCPFileTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "inspect_file",
@@ -869,10 +923,14 @@ class TestMCPFileTools:
         from fastmcp.exceptions import ToolError
 
         respx.get(f"{GRAPH_BASE_URL}/me/drive/root/children").mock(
-            return_value=httpx.Response(401, json={"error": {"code": "InvalidAuthenticationToken", "message": "Token expired"}})
+            return_value=httpx.Response(
+                401,
+                json={"error": {"code": "InvalidAuthenticationToken", "message": "Token expired"}},
+            )
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="InvalidAuthenticationToken"):
                     await client.call_tool("list_files", {})
@@ -888,6 +946,7 @@ class TestMCPUploadTool:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "upload_file",
@@ -906,6 +965,7 @@ class TestMCPUploadTool:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "upload_file",
@@ -923,6 +983,7 @@ class TestMCPUploadTool:
         ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "upload_file",
@@ -944,6 +1005,7 @@ class TestMCPUploadTool:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "upload_file", {"filename": "readme.txt", "content": "hello"}
@@ -971,11 +1033,10 @@ class TestMCPCopyOrRenameTool:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "copy_or_rename_file",
@@ -997,11 +1058,10 @@ class TestMCPCopyOrRenameTool:
         copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await client.call_tool(
                     "copy_or_rename_file",
@@ -1027,11 +1087,10 @@ class TestMCPCopyOrRenameTool:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED))
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="accessDenied"):
                     await client.call_tool(
@@ -1049,6 +1108,7 @@ class TestMCPCopyOrRenameTool:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "copy_or_rename_file",
@@ -1071,6 +1131,7 @@ class TestMCPCopyOrRenameTool:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "copy_or_rename_file",
@@ -1082,6 +1143,7 @@ class TestMCPCopyOrRenameTool:
     async def test_invalid_action(self, mcp_server):
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "copy_or_rename_file",
@@ -1098,12 +1160,13 @@ class TestMCPCopyOrRenameTool:
 
         item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
         respx.patch(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
-            return_value=httpx.Response(404, json={
-                "error": {"code": "ResourceNotFound", "message": "Item not found."}
-            })
+            return_value=httpx.Response(
+                404, json={"error": {"code": "ResourceNotFound", "message": "Item not found."}}
+            )
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="ResourceNotFound"):
                     await client.call_tool(
@@ -1115,6 +1178,7 @@ class TestMCPCopyOrRenameTool:
 # ---------------------------------------------------------------------------
 # Power BI
 # ---------------------------------------------------------------------------
+
 
 class TestMCPPowerBITools:
     """Tests for the Power BI MCP tools."""
@@ -1130,6 +1194,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_powerbi_workspaces", {})
 
@@ -1146,6 +1211,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_powerbi_workspaces", {})
 
@@ -1169,6 +1235,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_powerbi_content", {"workspace_id": ws_id})
 
@@ -1188,6 +1255,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "list_powerbi_content",
@@ -1207,6 +1275,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_powerbi_workspaces", {})
 
@@ -1229,10 +1298,9 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "list_powerbi_content", {"workspace_id": "me"}
-                )
+                result = await client.call_tool("list_powerbi_content", {"workspace_id": "me"})
 
         text = _get_text(result)
         assert "Sales" in text
@@ -1241,6 +1309,7 @@ class TestMCPPowerBITools:
     async def test_list_powerbi_content_invalid_type(self, mcp_server):
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "list_powerbi_content",
@@ -1253,11 +1322,12 @@ class TestMCPPowerBITools:
     async def test_query_dataset(self, mcp_server):
         ws_id = "ws-id-001"
         ds_id = "ds-id-001"
-        route = respx.post(f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets/{ds_id}/executeQueries").mock(
-            return_value=httpx.Response(200, json=SAMPLE_PBI_DAX_RESULT)
-        )
+        route = respx.post(
+            f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets/{ds_id}/executeQueries"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_PBI_DAX_RESULT))
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "query_dataset",
@@ -1280,6 +1350,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "refresh_dataset",
@@ -1299,6 +1370,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "query_dataset",
@@ -1318,6 +1390,7 @@ class TestMCPPowerBITools:
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "refresh_dataset",
@@ -1342,12 +1415,15 @@ class TestMCPPowerBITools:
         respx.get(f"{POWERBI_BASE_URL}/groups/{ws_id}/reports/{rpt_id}/exports/{export_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_PBI_EXPORT_SUCCEEDED)
         )
-        respx.get(f"{POWERBI_BASE_URL}/groups/{ws_id}/reports/{rpt_id}/exports/{export_id}/file").mock(
-            return_value=httpx.Response(200, content=b"%PDF fake")
-        )
-        with _mock_pbi_token(), patch("ms_graph_mcp.get_graph_token",
-                                      side_effect=PermissionError("Not connected.")):
+        respx.get(
+            f"{POWERBI_BASE_URL}/groups/{ws_id}/reports/{rpt_id}/exports/{export_id}/file"
+        ).mock(return_value=httpx.Response(200, content=b"%PDF fake"))
+        with (
+            _mock_pbi_token(),
+            patch("ms_graph_mcp.get_graph_token", side_effect=PermissionError("Not connected.")),
+        ):
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "export_report",
@@ -1376,9 +1452,9 @@ class TestMCPPowerBITools:
         respx.get(f"{POWERBI_BASE_URL}/groups/{ws_id}/reports/{rpt_id}/exports/{export_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_PBI_EXPORT_SUCCEEDED)
         )
-        respx.get(f"{POWERBI_BASE_URL}/groups/{ws_id}/reports/{rpt_id}/exports/{export_id}/file").mock(
-            return_value=httpx.Response(200, content=fake_pdf)
-        )
+        respx.get(
+            f"{POWERBI_BASE_URL}/groups/{ws_id}/reports/{rpt_id}/exports/{export_id}/file"
+        ).mock(return_value=httpx.Response(200, content=fake_pdf))
         # Graph: upload to OneDrive
         upload_route = respx.put(url__regex=r"/content$").mock(
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
@@ -1386,6 +1462,7 @@ class TestMCPPowerBITools:
 
         with _mock_pbi_token(), _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "export_report",
@@ -1405,6 +1482,7 @@ class TestMCPPowerBITools:
     async def test_export_report_invalid_format(self, mcp_server):
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "export_report",
@@ -1418,12 +1496,13 @@ class TestMCPPowerBITools:
         from fastmcp.exceptions import ToolError
 
         respx.get(f"{POWERBI_BASE_URL}/groups").mock(
-            return_value=httpx.Response(401, json={
-                "error": {"code": "Unauthorized", "message": "Token expired."}
-            })
+            return_value=httpx.Response(
+                401, json={"error": {"code": "Unauthorized", "message": "Token expired."}}
+            )
         )
         with _mock_pbi_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="Unauthorized"):
                     await client.call_tool("list_powerbi_workspaces", {})
@@ -1433,6 +1512,7 @@ class TestMCPPowerBITools:
 # Auth
 # ---------------------------------------------------------------------------
 
+
 class TestMCPAuth:
     """Test authentication behavior."""
 
@@ -1440,7 +1520,9 @@ class TestMCPAuth:
         from fastmcp import Client
         from fastmcp.exceptions import ToolError
 
-        with patch("ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")):
+        with patch(
+            "ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")
+        ):
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="Authorization required"):
                     await client.call_tool("list_emails", {})
@@ -1467,7 +1549,9 @@ class TestMCPAuth:
             ("upload_file", {"filename": "x.txt", "content": "y"}),
             ("copy_or_rename_file", {"item_id": "x", "new_name": "y"}),
         ]
-        with patch("ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")):
+        with patch(
+            "ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")
+        ):
             async with Client(mcp_server) as client:
                 for tool_name, args in graph_tools:
                     with pytest.raises(ToolError, match="Authorization required"):
@@ -1477,11 +1561,16 @@ class TestMCPAuth:
         pbi_tools = [
             ("list_powerbi_workspaces", {}),
             ("list_powerbi_content", {"workspace_id": "ws-1"}),
-            ("query_dataset", {"workspace_id": "ws-1", "dataset_id": "ds-1", "dax_query": "EVALUATE {1}"}),
+            (
+                "query_dataset",
+                {"workspace_id": "ws-1", "dataset_id": "ds-1", "dax_query": "EVALUATE {1}"},
+            ),
             ("refresh_dataset", {"workspace_id": "ws-1", "dataset_id": "ds-1"}),
             ("export_report", {"workspace_id": "ws-1", "report_id": "rpt-1"}),
         ]
-        with patch("ms_graph_mcp.get_powerbi_token", side_effect=PermissionError("Authorization required.")):
+        with patch(
+            "ms_graph_mcp.get_powerbi_token", side_effect=PermissionError("Authorization required.")
+        ):
             async with Client(mcp_server) as client:
                 for tool_name, args in pbi_tools:
                     with pytest.raises(ToolError, match="Authorization required"):

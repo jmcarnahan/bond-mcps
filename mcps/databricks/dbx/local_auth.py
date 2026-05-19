@@ -87,6 +87,7 @@ def get_local_token() -> str:
     _, token_url = _auth_endpoints(host)
 
     from auth import TokenStore, resolve_user_key_for_request
+
     store = TokenStore("databricks", user_key=resolve_user_key_for_request())
 
     # 1. Cached token (with refresh)
@@ -100,9 +101,7 @@ def get_local_token() -> str:
     # 2. Full browser flow
     token_data = _do_browser_auth(client_id, client_secret, host)
     if not token_data or "access_token" not in token_data:
-        raise PermissionError(
-            "Databricks authentication failed. Could not acquire a token."
-        )
+        raise PermissionError("Databricks authentication failed. Could not acquire a token.")
 
     if "expires_in" in token_data:
         token_data["expires_at"] = time.time() + token_data["expires_in"]
@@ -111,9 +110,7 @@ def get_local_token() -> str:
     return token_data["access_token"]
 
 
-def _do_browser_auth(
-    client_id: str, client_secret: str | None, host: str
-) -> dict | None:
+def _do_browser_auth(client_id: str, client_secret: str | None, host: str) -> dict | None:
     """Run OAuth2 authorization code + PKCE flow via the shared proxy."""
     from auth import AuthStateExpiredError, OAuthProxyClient
 
@@ -179,8 +176,12 @@ def _do_browser_auth(
         return None
 
     return _exchange_code(
-        client_id, client_secret,
-        callback_result["code"], redirect_uri, code_verifier, host,
+        client_id,
+        client_secret,
+        callback_result["code"],
+        redirect_uri,
+        code_verifier,
+        host,
     )
 
 
@@ -219,7 +220,8 @@ def _exchange_code(
             if not resp.is_success:
                 logger.error(
                     "Databricks token exchange failed: HTTP %d %s",
-                    resp.status_code, resp.text[:200],
+                    resp.status_code,
+                    resp.text[:200],
                 )
                 return None
             return resp.json()

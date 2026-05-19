@@ -221,6 +221,28 @@ def get_session_factory(url: str | None = None):
     return _state["session_factory"]
 
 
+from contextlib import contextmanager  # noqa: E402  (kept near the helper that needs it)
+
+
+@contextmanager
+def get_session(url: str | None = None):
+    """Yield a SQLAlchemy session that commits on exit and rolls back on error.
+
+    Convenience for callers (notably the AS code paths) that don't want to
+    instantiate a ``TokenRepository`` just to open a session.
+    """
+    factory = get_session_factory(url)
+    session = factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def reset_for_tests() -> None:
     """Drop cached engine + session factory. Call between tests."""
     with _engine_lock:
@@ -248,9 +270,7 @@ def ensure_schema_current(url: str | None = None) -> None:
 
     with engine.connect() as conn:
         try:
-            current = conn.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar()
+            current = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         except (OperationalError, ProgrammingError) as e:
             if not _is_missing_table_error(e):
                 # Don't mask permission, network, or other ProgrammingErrors

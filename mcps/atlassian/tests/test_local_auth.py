@@ -1,7 +1,7 @@
 """Tests for local_auth.py -- local Atlassian OAuth authentication."""
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,11 +34,17 @@ class TestGetLocalTokenAndCloudId:
         mock_store.refresh_if_needed.return_value = "cached-tok"
         mock_store.get_token.return_value = {"cloud_id": "cloud-123"}
 
-        with patch.dict(os.environ, {
-            "ATLASSIAN_CLIENT_ID": "cid",
-            "ATLASSIAN_CLIENT_SECRET": "secret",
-        }, clear=True), \
-             patch(_TOKEN_STORE_PATCH, return_value=mock_store):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ATLASSIAN_CLIENT_ID": "cid",
+                    "ATLASSIAN_CLIENT_SECRET": "secret",
+                },
+                clear=True,
+            ),
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+        ):
             token, cloud_id = get_local_token_and_cloud_id()
 
         assert token == "cached-tok"
@@ -51,14 +57,22 @@ class TestGetLocalTokenAndCloudId:
         mock_store.refresh_if_needed.return_value = None
         mock_store.get_token.return_value = None
 
-        with patch.dict(os.environ, {
-            "ATLASSIAN_CLIENT_ID": "cid",
-            "ATLASSIAN_CLIENT_SECRET": "secret",
-            "ATLASSIAN_CLOUD_ID": "env-cloud",
-        }, clear=True), \
-             patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("atlassian.local_auth._do_browser_auth",
-                   return_value={"access_token": "browser-tok", "expires_in": 3600}):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ATLASSIAN_CLIENT_ID": "cid",
+                    "ATLASSIAN_CLIENT_SECRET": "secret",
+                    "ATLASSIAN_CLOUD_ID": "env-cloud",
+                },
+                clear=True,
+            ),
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch(
+                "atlassian.local_auth._do_browser_auth",
+                return_value={"access_token": "browser-tok", "expires_in": 3600},
+            ),
+        ):
             token, cloud_id = get_local_token_and_cloud_id()
 
         assert token == "browser-tok"
@@ -72,12 +86,18 @@ class TestGetLocalTokenAndCloudId:
         mock_store.refresh_if_needed.return_value = None
         mock_store.get_token.return_value = None
 
-        with patch.dict(os.environ, {
-            "ATLASSIAN_CLIENT_ID": "cid",
-            "ATLASSIAN_CLIENT_SECRET": "secret",
-        }, clear=True), \
-             patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("atlassian.local_auth._do_browser_auth", return_value=None):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ATLASSIAN_CLIENT_ID": "cid",
+                    "ATLASSIAN_CLIENT_SECRET": "secret",
+                },
+                clear=True,
+            ),
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch("atlassian.local_auth._do_browser_auth", return_value=None),
+        ):
             with pytest.raises(PermissionError, match="authentication failed"):
                 get_local_token_and_cloud_id()
 
@@ -89,20 +109,28 @@ class TestDoBrowserAuth:
         from atlassian.local_auth import _do_browser_auth
 
         mock_proxy = MagicMock()
-        mock_proxy.get_redirect_uri.return_value = "http://localhost:8000/connections/atlassian_v2/callback"
+        mock_proxy.get_redirect_uri.return_value = (
+            "http://localhost:8000/connections/atlassian_v2/callback"
+        )
         mock_proxy.wait_for_callback.return_value = {
-            "status": "complete", "code": "authcode", "state": "test-state",
+            "status": "complete",
+            "code": "authcode",
+            "state": "test-state",
         }
 
-        mock_exchange = MagicMock(return_value={
-            "access_token": "new-tok",
-            "refresh_token": "ref-tok",
-        })
+        mock_exchange = MagicMock(
+            return_value={
+                "access_token": "new-tok",
+                "refresh_token": "ref-tok",
+            }
+        )
 
-        with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
-             patch("atlassian.local_auth.webbrowser"), \
-             patch("atlassian.local_auth.secrets") as mock_secrets, \
-             patch("atlassian.local_auth._exchange_code", mock_exchange):
+        with (
+            patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy),
+            patch("atlassian.local_auth.webbrowser"),
+            patch("atlassian.local_auth.secrets") as mock_secrets,
+            patch("atlassian.local_auth._exchange_code", mock_exchange),
+        ):
             mock_secrets.token_urlsafe.return_value = "test-state"
             result = _do_browser_auth("cid", "secret")
 
@@ -122,11 +150,15 @@ class TestDoBrowserAuth:
         from atlassian.local_auth import _do_browser_auth
 
         mock_proxy = MagicMock()
-        mock_proxy.get_redirect_uri.return_value = "http://localhost:8000/connections/atlassian_v2/callback"
+        mock_proxy.get_redirect_uri.return_value = (
+            "http://localhost:8000/connections/atlassian_v2/callback"
+        )
         mock_proxy.wait_for_callback.side_effect = TimeoutError("timed out")
 
-        with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
-             patch("atlassian.local_auth.webbrowser"):
+        with (
+            patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy),
+            patch("atlassian.local_auth.webbrowser"),
+        ):
             result = _do_browser_auth("cid", "secret")
 
         assert result is None

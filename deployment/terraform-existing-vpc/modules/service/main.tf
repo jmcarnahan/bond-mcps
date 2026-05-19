@@ -13,7 +13,13 @@ locals {
   }
 
   chart_values = {
-    nameOverride = var.service_key
+    # nameOverride must match the release name so the chart's `fullname`
+    # helper collapses to a single token (otherwise it produces
+    # `<release>-<nameOverride>` which can hit DNS-1123 limits *and* lets
+    # underscores leak into k8s metadata names). The service_key may use
+    # underscores (e.g. `auth_server`) — sanitize the same way the helm
+    # release name is sanitized.
+    nameOverride = replace(var.service_key, "_", "-")
 
     image = {
       repository = var.image_repository
@@ -24,6 +30,7 @@ locals {
     port        = var.container_port
     replicas    = var.replicas
     isAuthProxy = var.is_auth_proxy
+    command     = var.command
     env         = var.extra_env
     userKey     = var.user_key
 
@@ -57,12 +64,19 @@ locals {
     }
 
     jwt = {
-      enabled            = var.jwt_enabled
-      secretsManagerName = var.jwt_secrets_manager_name
-      issuer             = var.jwt_issuer
-      audience           = var.jwt_audience
-      algorithm          = var.jwt_algorithm
-      subClaim           = var.jwt_sub_claim
+      enabled = var.jwt_enabled
+      # Prefer JWKS URI when provided; otherwise fall through to the
+      # static PEM/secret stored in Secrets Manager.
+      jwksUri = var.jwt_jwks_uri
+      publicKey = {
+        secretsManagerName = var.jwt_secrets_manager_name
+      }
+      issuer    = var.jwt_issuer
+      audience  = var.jwt_audience
+      algorithm = var.jwt_algorithm
+      subClaim  = var.jwt_sub_claim
+      asBaseUrl = var.jwt_as_base_url
+      publicUrl = var.jwt_public_url
     }
 
     networkPolicy = {
@@ -92,6 +106,9 @@ locals {
       # Previously 200-499 to tolerate MCPs that lacked the route.
       successCodes   = "200-299"
       environmentTag = var.environment_tag
+      # CSV passed to alb.ingress.kubernetes.io/subnets when the shared VPC
+      # has no kubernetes.io/role/elb tags for auto-discovery.
+      subnets = length(var.ingress_subnets) > 0 ? join(",", var.ingress_subnets) : ""
     }
 
     probes = {
@@ -129,7 +146,11 @@ locals {
 }
 
 resource "helm_release" "service" {
-  name      = var.service_key
+  # Helm release names must match [a-z0-9]([-a-z0-9]*[a-z0-9])? — no underscores
+  # allowed. Service keys in var.services may contain underscores (e.g.
+  # `auth_server`), so sanitize for the release name; everything else (chart
+  # values, in-cluster DNS, hostnames) keeps the original key.
+  name      = replace(var.service_key, "_", "-")
   chart     = "${path.module}/${var.chart_path}"
   namespace = var.namespace
 

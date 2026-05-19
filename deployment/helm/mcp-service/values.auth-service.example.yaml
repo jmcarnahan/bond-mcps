@@ -1,0 +1,114 @@
+# Example values for deploying the bond-mcps Authorization Server via the
+# generic mcp-service chart. The AS reuses the auth/ image (auth/Dockerfile)
+# but starts a different process (`python -m auth.auth_server`).
+#
+# Copy this file, fill in placeholders, and pass to:
+#   helm install bond-mcps-as deployment/helm/mcp-service -f my-as.yaml
+#
+# **PREFERRED PATH**: do NOT install via `helm install` directly. Instead,
+# declare the AS as a service entry in `environments/<env>.tfvars` with
+# `is_auth_server = true` and run `terraform apply`. The terraform module
+# will compose these same values for you and automatically wire up the AS
+# credentials secret. This file is kept as a reference for what the chart
+# expects when you want to bypass terraform (rare).
+
+image:
+  repository: "<account>.dkr.ecr.<region>.amazonaws.com/bond-mcps-auth"
+  tag: "0.2.0"
+
+# Override the container entrypoint to start the Authorization Server.
+# The auth/ image's Dockerfile defaults to `python -m auth` (proxy server);
+# we replace it with the AS module + port flag here.
+command: ["python", "-m", "auth.auth_server", "--host", "0.0.0.0", "--port", "8001"]
+
+port: 8001
+replicas: 1   # The AS is stateless (DB-backed); replicas >1 are safe but unneeded for typical traffic.
+
+# Bond-AI-style userKey is irrelevant for the AS — it never reads tokens.db
+# as a user; it writes only oauth_* tables. Leave empty.
+userKey: ""
+
+# AS pods do not call the auth proxy.
+authProxy:
+  inject: false
+
+# AS-specific env (NOT secrets). Wires up the upstream OIDC IdP and self-URLs.
+env:
+  BOND_MCPS_AS_ENABLED: "1"
+  BOND_MCPS_AS_BASE_URL: "https://auth.mcps.example.com"
+  BOND_MCPS_UPSTREAM_IDP: "cognito"           # or "okta"
+  BOND_MCPS_UPSTREAM_ISSUER: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxxxx"
+  BOND_MCPS_UPSTREAM_REDIRECT_URI: "https://auth.mcps.example.com/oauth/upstream/callback"
+  BOND_MCPS_UPSTREAM_SCOPES: "openid email profile"
+  # Optional: restrict sign-up to specific email domains
+  # BOND_MCPS_UPSTREAM_ALLOWED_DOMAINS: "acme.com,bond.example"
+  # Optional: extra trusted hosts for OAuth-client redirect URIs (in
+  # addition to loopback, which is always allowed).
+  # BOND_MCPS_AS_ALLOWED_REDIRECT_HOSTS: "claude.ai,workstation.bond.example"
+
+secrets:
+  encryptionKey:
+    enabled: true
+    secretsManagerName: "bond-mcps/encryption-key"
+  db:
+    enabled: true
+    secretsManagerName: "bond-mcps/db-credentials"
+    sslmode: verify-full
+  oauth:
+    # AS-specific OAuth secret: the AS's own client credentials at the
+    # upstream IdP, plus the AS RSA signing key. SM JSON shape:
+    #   {
+    #     "BOND_MCPS_AS_PRIVATE_KEY_PEM": "<RSA PEM>",
+    #     "BOND_MCPS_UPSTREAM_CLIENT_ID": "...",
+    #     "BOND_MCPS_UPSTREAM_CLIENT_SECRET": "..."
+    #   }
+    enabled: true
+    secretsManagerName: "bond-mcps/as-credentials"
+
+# JWT-mode is irrelevant for the AS — it ISSUES JWTs but doesn't verify
+# incoming ones (no protected endpoints today).
+jwt:
+  enabled: false
+
+ingress:
+  enabled: true
+  host: "auth.mcps.example.com"
+  className: alb
+  certificateArn: "<acm cert arn>"
+  groupName: bond-mcps
+  groupOrder: 5         # match other bond-mcps services so they share the ALB
+  scheme: internet-facing
+  healthCheckPath: /healthz
+  successCodes: "200-299"
+  environmentTag: "dev"
+
+probes:
+  liveness:
+    type: http
+    path: /healthz
+    initialDelaySeconds: 15
+    periodSeconds: 10
+  readiness:
+    type: http
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+# Run alembic on AS pods so the oauth_* tables exist before traffic.
+# The existing migrate-db command covers all migrations including 0002.
+migrations:
+  enabled: true
+  command: ["bond-mcps", "migrate-db"]
+
+# AS doctor: validates DB URL, schema currency, encryption key.
+preflight:
+  enabled: true
+  command: ["bond-mcps", "doctor"]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi

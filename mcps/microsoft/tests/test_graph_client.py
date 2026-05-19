@@ -3,7 +3,6 @@
 import httpx
 import pytest
 import respx
-
 from ms_graph.graph_client import (
     GRAPH_BASE_URL,
     AsyncGraphClient,
@@ -41,9 +40,7 @@ class TestGraphClient:
 
     @respx.mock
     def test_post_sends_json(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             result = client.post("/me/sendMail", json_data={"message": {}})
 
@@ -87,7 +84,9 @@ class TestGraphClient:
             return_value=httpx.Response(
                 401,
                 json={"error": {"code": "InvalidAuthenticationToken", "message": "Token expired"}},
-                headers={"WWW-Authenticate": 'Bearer realm="", authorization_uri="https://login.microsoftonline.com/common/oauth2/authorize"'},
+                headers={
+                    "WWW-Authenticate": 'Bearer realm="", authorization_uri="https://login.microsoftonline.com/common/oauth2/authorize"'
+                },
             )
         )
         with GraphClient("expired-tok") as client:
@@ -104,7 +103,9 @@ class TestGraphClient:
             return_value=httpx.Response(201, json={"id": "msg-001", "body": {"content": "Hi"}})
         )
         with GraphClient("tok") as client:
-            result = client.post("/teams/t1/channels/c1/messages", json_data={"body": {"content": "Hi"}})
+            result = client.post(
+                "/teams/t1/channels/c1/messages", json_data={"body": {"content": "Hi"}}
+            )
 
         assert result == {"id": "msg-001", "body": {"content": "Hi"}}
 
@@ -113,7 +114,9 @@ class TestGraphClient:
         """200 response returns parsed JSON."""
         monitor_url = "https://api.onedrive.com/v1.0/monitor/abc"
         respx.get(monitor_url).mock(
-            return_value=httpx.Response(200, json={"status": "inProgress", "percentageComplete": 50.0})
+            return_value=httpx.Response(
+                200, json={"status": "inProgress", "percentageComplete": 50.0}
+            )
         )
         with GraphClient("tok") as client:
             result = client.get_operation_status(monitor_url)
@@ -125,7 +128,10 @@ class TestGraphClient:
         """303 response (Graph copy completion signal) returns parsed JSON body."""
         monitor_url = "https://api.onedrive.com/v1.0/monitor/abc"
         respx.get(monitor_url).mock(
-            return_value=httpx.Response(303, json={"status": "completed", "resourceId": "item-001", "percentageComplete": 100.0})
+            return_value=httpx.Response(
+                303,
+                json={"status": "completed", "resourceId": "item-001", "percentageComplete": 100.0},
+            )
         )
         with GraphClient("tok") as client:
             result = client.get_operation_status(monitor_url)
@@ -138,7 +144,9 @@ class TestGraphClient:
         """Non-2xx/3xx responses raise GraphError."""
         monitor_url = "https://api.onedrive.com/v1.0/monitor/abc"
         respx.get(monitor_url).mock(
-            return_value=httpx.Response(500, json={"error": {"code": "InternalError", "message": "Server error"}})
+            return_value=httpx.Response(
+                500, json={"error": {"code": "InternalError", "message": "Server error"}}
+            )
         )
         with GraphClient("tok") as client:
             with pytest.raises(GraphError) as exc_info:
@@ -189,9 +197,7 @@ class TestAsyncGraphClient:
 
     @respx.mock
     async def test_async_post(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             result = await client.post("/me/sendMail", json_data={"message": {}})
 
@@ -221,7 +227,9 @@ class TestAsyncGraphClient:
     async def test_async_get_operation_status_200(self):
         monitor_url = "https://api.onedrive.com/v1.0/monitor/abc"
         respx.get(monitor_url).mock(
-            return_value=httpx.Response(200, json={"status": "inProgress", "percentageComplete": 50.0})
+            return_value=httpx.Response(
+                200, json={"status": "inProgress", "percentageComplete": 50.0}
+            )
         )
         async with AsyncGraphClient("tok") as client:
             result = await client.get_operation_status(monitor_url)
@@ -233,7 +241,10 @@ class TestAsyncGraphClient:
         """303 response (Graph copy completion signal) returns parsed JSON body."""
         monitor_url = "https://api.onedrive.com/v1.0/monitor/abc"
         respx.get(monitor_url).mock(
-            return_value=httpx.Response(303, json={"status": "completed", "resourceId": "item-001", "percentageComplete": 100.0})
+            return_value=httpx.Response(
+                303,
+                json={"status": "completed", "resourceId": "item-001", "percentageComplete": 100.0},
+            )
         )
         async with AsyncGraphClient("tok") as client:
             result = await client.get_operation_status(monitor_url)
@@ -245,7 +256,9 @@ class TestAsyncGraphClient:
     async def test_async_get_operation_status_error_raises(self):
         monitor_url = "https://api.onedrive.com/v1.0/monitor/abc"
         respx.get(monitor_url).mock(
-            return_value=httpx.Response(500, json={"error": {"code": "InternalError", "message": "Server error"}})
+            return_value=httpx.Response(
+                500, json={"error": {"code": "InternalError", "message": "Server error"}}
+            )
         )
         async with AsyncGraphClient("tok") as client:
             with pytest.raises(GraphError) as exc_info:

@@ -389,7 +389,7 @@ Add the Microsoft MCP server to `bond_mcp_config` in your main deployment tfvars
 
 For a corporate deployment, your Azure AD admin will provide the tenant ID (a GUID like `a1b2c3d4-e5f6-7890-abcd-ef1234567890`). You can also find it on the App Registration **Overview** page as "Directory (tenant) ID".
 
-Example `bond_mcp_config` entry (add alongside existing entries like `sbel`):
+Example `bond_mcp_config` entry:
 
 ```json
 "microsoft": {

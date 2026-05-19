@@ -20,12 +20,16 @@ def test_import_github_token(repo, tmp_path):
 def test_import_atlassian_with_extras(repo, tmp_path):
     cache = tmp_path / ".bond_mcps"
     cache.mkdir()
-    (cache / "atlassian.json").write_text(json.dumps({
-        "access_token": "atk-1",
-        "refresh_token": "rtk-1",
-        "expires_at": time.time() + 3600,
-        "cloud_id": "atlassian-uuid",
-    }))
+    (cache / "atlassian.json").write_text(
+        json.dumps(
+            {
+                "access_token": "atk-1",
+                "refresh_token": "rtk-1",
+                "expires_at": time.time() + 3600,
+                "cloud_id": "atlassian-uuid",
+            }
+        )
+    )
 
     result = import_legacy_files(user_key="alice", cache_dir=cache, repo=repo)
     assert "atlassian" in result.imported
@@ -38,14 +42,16 @@ def test_import_atlassian_with_extras(repo, tmp_path):
 def test_import_microsoft_msal_blob(repo, tmp_path):
     cache = tmp_path / ".bond_mcps"
     cache.mkdir()
-    msal_blob = json.dumps({
-        "AccessToken": {
-            "home_account_id-login.microsoftonline.com-accesstoken-xxx-yyy": {
-                "credential_type": "AccessToken",
-                "secret": "abc",
-            }
-        },
-    })
+    msal_blob = json.dumps(
+        {
+            "AccessToken": {
+                "home_account_id-login.microsoftonline.com-accesstoken-xxx-yyy": {
+                    "credential_type": "AccessToken",
+                    "secret": "abc",
+                }
+            },
+        }
+    )
     (cache / "microsoft.json").write_text(msal_blob)
 
     result = import_legacy_files(user_key="alice", cache_dir=cache, repo=repo)
@@ -150,14 +156,18 @@ def test_msal_blob_round_trip_via_msal_lib(repo, tmp_path):
     This guards against silent corruption of Microsoft auth state.
     """
     import importlib.util
+
     if importlib.util.find_spec("msal") is None:
         import pytest
+
         pytest.skip("msal not installed in this environment")
     import msal
 
     cache_in = msal.SerializableTokenCache()
     # Inject some state so .serialize() returns a non-trivial blob
-    cache_in.deserialize('{"AccessToken": {"acct-x-y": {"credential_type": "AccessToken", "secret": "s"}}}')
+    cache_in.deserialize(
+        '{"AccessToken": {"acct-x-y": {"credential_type": "AccessToken", "secret": "s"}}}'
+    )
     blob = cache_in.serialize()
 
     cache = tmp_path / ".bond_mcps"

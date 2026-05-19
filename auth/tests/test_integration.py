@@ -10,22 +10,22 @@ with _ThreadingHTTPServer they are handled concurrently.
 import http.client
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 from auth.proxy_client import OAuthProxyClient
 from auth.proxy_server import (
     AuthProxyHandler,
-    _ThreadingHTTPServer,
     _lock,
     _pending,
+    _ThreadingHTTPServer,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _clear_state():
@@ -48,8 +48,7 @@ def threading_server():
     srv.server_close()
 
 
-def _send_browser_callback(port: int, provider: str, state: str,
-                           code: str, delay: float = 0.0):
+def _send_browser_callback(port: int, provider: str, state: str, code: str, delay: float = 0.0):
     """Simulate the browser redirect hitting the proxy after an optional delay."""
     if delay:
         time.sleep(delay)
@@ -67,6 +66,7 @@ def _send_browser_callback(port: int, provider: str, state: str,
 # ---------------------------------------------------------------------------
 # Core concurrency test — the exact production failure scenario
 # ---------------------------------------------------------------------------
+
 
 class TestConcurrentCallbackAndPolling:
     """Browser callback arrives while client is blocking in wait_for_callback."""
@@ -149,8 +149,8 @@ class TestConcurrentCallbackAndPolling:
 # End-to-end client ↔ server integration
 # ---------------------------------------------------------------------------
 
-class TestClientServerIntegration:
 
+class TestClientServerIntegration:
     def test_full_oauth_flow_e2e(self, threading_server):
         """Register → callback → wait_for_callback with a real server."""
         _, port = threading_server
@@ -161,7 +161,10 @@ class TestClientServerIntegration:
         client.register_auth("e2e-state", "atlassian_v2")
 
         status = _send_browser_callback(
-            port, "atlassian_v2", "e2e-state", "e2e-code",
+            port,
+            "atlassian_v2",
+            "e2e-state",
+            "e2e-code",
         )
         assert status == 200
 
@@ -200,7 +203,9 @@ class TestClientServerIntegration:
 
         with pytest.raises(TimeoutError, match="Timed out"):
             client.wait_for_callback(
-                "no-callback", timeout=1.5, poll_interval=0.2,
+                "no-callback",
+                timeout=1.5,
+                poll_interval=0.2,
             )
 
 
@@ -208,8 +213,8 @@ class TestClientServerIntegration:
 # Health check validation — rejects non-proxy services
 # ---------------------------------------------------------------------------
 
-class TestHealthCheckValidation:
 
+class TestHealthCheckValidation:
     def test_real_proxy_passes_health_check(self, threading_server):
         _, port = threading_server
         client = OAuthProxyClient(port=port)

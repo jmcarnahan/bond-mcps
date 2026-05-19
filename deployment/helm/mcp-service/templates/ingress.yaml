@@ -18,6 +18,9 @@ metadata:
     {{- if .Values.ingress.environmentTag }}
     alb.ingress.kubernetes.io/tags: {{ printf "bond-mcps-environment=%s" .Values.ingress.environmentTag | quote }}
     {{- end }}
+    {{- if .Values.ingress.subnets }}
+    alb.ingress.kubernetes.io/subnets: {{ .Values.ingress.subnets | quote }}
+    {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:

@@ -18,7 +18,11 @@ def test_postgres_with_strict_sslmode_passes(sslmode):
 
 @pytest.mark.parametrize("sslmode", ["disable", "allow", "prefer", ""])
 def test_postgres_without_strict_sslmode_raises(sslmode):
-    url = f"postgresql://user:pwd@host:5432/db?sslmode={sslmode}" if sslmode else "postgresql://user:pwd@host:5432/db"
+    url = (
+        f"postgresql://user:pwd@host:5432/db?sslmode={sslmode}"
+        if sslmode
+        else "postgresql://user:pwd@host:5432/db"
+    )
     with pytest.raises(ValueError, match="sslmode"):
         validate_db_url(url)
 

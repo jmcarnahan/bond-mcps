@@ -44,8 +44,13 @@ output "secrets_manager_secret_names" {
     {
       encryption_key = aws_secretsmanager_secret.encryption_key.name
       db_credentials = aws_secretsmanager_secret.db_credentials.name
-      jwt_public_key = aws_secretsmanager_secret.jwt_public_key.name
     },
+    length(aws_secretsmanager_secret.jwt_public_key) > 0
+    ? { jwt_public_key = aws_secretsmanager_secret.jwt_public_key[0].name }
+    : {},
+    length(aws_secretsmanager_secret.as_credentials) > 0
+    ? { as_credentials = aws_secretsmanager_secret.as_credentials[0].name }
+    : {},
     { for k, s in aws_secretsmanager_secret.oauth : "${k}_oauth" => s.name },
   )
 }
@@ -56,7 +61,8 @@ output "secrets_manager_secret_arns" {
   value = concat(
     [aws_secretsmanager_secret.encryption_key.arn],
     [aws_secretsmanager_secret.db_credentials.arn],
-    [aws_secretsmanager_secret.jwt_public_key.arn],
+    [for s in aws_secretsmanager_secret.jwt_public_key : s.arn],
+    [for s in aws_secretsmanager_secret.as_credentials : s.arn],
     [for s in aws_secretsmanager_secret.oauth : s.arn],
   )
 }

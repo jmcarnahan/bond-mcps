@@ -14,6 +14,7 @@ module "service" {
   service_key     = each.key
   environment_tag = var.environment
   ingress_scheme  = var.ingress_default_scheme
+  ingress_subnets = var.public_subnet_ids
   vpc_cidr        = data.aws_vpc.existing.cidr_block
   namespace       = kubernetes_namespace.bond_mcps.metadata[0].name
 
@@ -22,12 +23,24 @@ module "service" {
   container_port   = each.value.container_port
   replicas         = each.value.replicas
   is_auth_proxy    = each.value.is_auth_proxy
+  is_auth_server   = each.value.is_auth_server
   runs_migrations  = each.value.runs_migrations
+  command          = each.value.command
 
   user_key = "${local.name_prefix}-${each.key}"
 
-  hostname  = local.service_hostnames[each.key]
-  extra_env = each.value.extra_env
+  hostname = local.service_hostnames[each.key]
+  # Compose env in three layers: (1) operator-provided extra_env on the
+  # service (highest precedence), (2) AS-only system env when this is the
+  # AS, (3) MCP-only system env when this is a JWT-mode MCP. Layer order
+  # in `merge` is "later wins" so the operator's extra_env is applied last
+  # and overrides system defaults.
+  extra_env = merge(
+    each.value.is_auth_server ? local.as_env : (
+      (var.jwt_verification.enabled && !each.value.is_auth_proxy) ? local.mcp_env_overlay : {}
+    ),
+    each.value.extra_env,
+  )
   health    = each.value.health
   resources = each.value.resources
 
@@ -37,27 +50,39 @@ module "service" {
 
   encryption_key_secret_name = aws_secretsmanager_secret.encryption_key.name
   db_credentials_secret_name = aws_secretsmanager_secret.db_credentials.name
+  # The AS automatically pulls its credentials from the SM secret terraform
+  # creates for it (as-credentials). For MCPs, use the operator-specified
+  # oauth_secret_name (the per-provider OAuth app credentials).
   oauth_secret_name = (
-    each.value.oauth_secret_name != null && each.value.oauth_secret_name != ""
-    ? "${local.sm_prefix}${each.value.oauth_secret_name}"
-    : null
+    each.value.is_auth_server
+    ? local.sm_as_credentials
+    : (each.value.oauth_secret_name != null && each.value.oauth_secret_name != ""
+      ? "${local.sm_prefix}${each.value.oauth_secret_name}"
+    : null)
   )
 
   cluster_secret_store_name = "bond-mcps-aws-sm"
   acm_certificate_arn       = aws_acm_certificate_validation.wildcard.certificate_arn
 
-  jwt_enabled              = var.jwt_verification.enabled
-  jwt_secrets_manager_name = aws_secretsmanager_secret.jwt_public_key.name
-  jwt_issuer               = var.jwt_verification.issuer
-  jwt_audience             = var.jwt_verification.audience
-  jwt_algorithm            = var.jwt_verification.algorithm
-  jwt_sub_claim            = var.jwt_verification.sub_claim
+  # JWT verification config is only relevant for MCPs (and only when
+  # jwt_verification.enabled). The AS doesn't verify JWTs — it issues them.
+  jwt_enabled = var.jwt_verification.enabled && !each.value.is_auth_proxy && !each.value.is_auth_server
+  jwt_secrets_manager_name = (
+    local.enable_legacy_jwt_pk_secret ? aws_secretsmanager_secret.jwt_public_key[0].name : ""
+  )
+  jwt_jwks_uri    = local.jwks_uri_resolved
+  jwt_issuer      = var.jwt_verification.issuer
+  jwt_audience    = var.jwt_verification.audience
+  jwt_algorithm   = var.jwt_verification.algorithm
+  jwt_sub_claim   = var.jwt_verification.sub_claim
+  jwt_as_base_url = local.as_base_url_resolved
+  # Per-MCP public URL is the canonical hostname stitched together above.
+  jwt_public_url = local.service_hostnames[each.key] != null ? "https://${local.service_hostnames[each.key]}" : ""
 
   depends_on = [
     kubectl_manifest.cluster_secret_store, # ESO must be ready
     helm_release.alb_controller,           # so the ingress class resolves
     aws_rds_cluster_instance.bond_mcps,    # so preflight can reach the DB
     terraform_data.encryption_key_seeded,  # so preflight has a real key
-    terraform_data.jwt_public_key_seeded,  # so JWT mode (when enabled) has a real PEM
   ]
 }

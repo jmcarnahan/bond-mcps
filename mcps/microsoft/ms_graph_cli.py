@@ -58,25 +58,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from auth import log_discipline  # noqa: E402
+
 log_discipline.apply()
 
-from ms_graph.graph_client import GraphClient
-from ms_graph.local_auth import get_local_token, get_local_powerbi_token
-from ms_graph import mail, calendar, teams, files
-from ms_graph.power_bi import PowerBIClient
+from ms_graph import calendar, files, mail, teams
 from ms_graph import power_bi as pbi_ops
-
+from ms_graph.graph_client import GraphClient
+from ms_graph.local_auth import get_local_powerbi_token, get_local_token
+from ms_graph.power_bi import PowerBIClient
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _fmt_size(size: int) -> str:
     if size < 1024:
         return f"{size} B"
-    if size < 1024 ** 2:
+    if size < 1024**2:
         return f"{size / 1024:.1f} KB"
-    if size < 1024 ** 3:
+    if size < 1024**3:
         return f"{size / 1024 ** 2:.1f} MB"
     return f"{size / 1024 ** 3:.1f} GB"
 
@@ -104,6 +105,7 @@ def _fmt_drive_item(item: dict) -> str:
 # Profile
 # ---------------------------------------------------------------------------
 
+
 def cmd_whoami(args: argparse.Namespace) -> None:
     token = get_local_token()
     with GraphClient(token) as client:
@@ -122,6 +124,7 @@ def cmd_whoami(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
+
 
 def cmd_email_list(args: argparse.Namespace) -> None:
     token = get_local_token()
@@ -151,8 +154,7 @@ def cmd_email_read(args: argparse.Namespace) -> None:
 
     sender = msg.get("from", {}).get("emailAddress", {})
     to_addrs = ", ".join(
-        r.get("emailAddress", {}).get("address", "?")
-        for r in msg.get("toRecipients", [])
+        r.get("emailAddress", {}).get("address", "?") for r in msg.get("toRecipients", [])
     )
     print(f"From:    {sender.get('name', '?')} <{sender.get('address', '?')}>")
     print(f"Subject: {msg.get('subject', '(no subject)')}")
@@ -189,8 +191,10 @@ def cmd_email_send(args: argparse.Namespace) -> None:
 # Calendar
 # ---------------------------------------------------------------------------
 
+
 def cmd_calendar_list(args: argparse.Namespace) -> None:
-    from datetime import datetime, timedelta, timezone as tz
+    from datetime import datetime, timedelta
+    from datetime import timezone as tz
 
     start = args.start
     end = args.end
@@ -221,7 +225,11 @@ def cmd_calendar_list(args: argparse.Namespace) -> None:
         organizer = event.get("organizer", {}).get("emailAddress", {}).get("name", "")
 
         status = " [CANCELLED]" if is_cancelled else ""
-        time_str = "All day" if is_all_day else f"{start_info.get('dateTime', '?')} - {end_info.get('dateTime', '?')}"
+        time_str = (
+            "All day"
+            if is_all_day
+            else f"{start_info.get('dateTime', '?')} - {end_info.get('dateTime', '?')}"
+        )
 
         print(f"[{i}] {subject}{status}")
         print(f"     Time: {time_str}")
@@ -278,7 +286,9 @@ def cmd_calendar_get(args: argparse.Namespace) -> None:
 
 
 def cmd_calendar_create(args: argparse.Namespace) -> None:
-    attendee_list = [a.strip() for a in args.attendees.split(",") if a.strip()] if args.attendees else None
+    attendee_list = (
+        [a.strip() for a in args.attendees.split(",") if a.strip()] if args.attendees else None
+    )
 
     token = get_local_token()
     with GraphClient(token) as client:
@@ -354,6 +364,7 @@ def cmd_calendar_availability(args: argparse.Namespace) -> None:
 # Teams
 # ---------------------------------------------------------------------------
 
+
 def cmd_teams_list(args: argparse.Namespace) -> None:
     token = get_local_token()
     with GraphClient(token) as client:
@@ -403,7 +414,9 @@ def cmd_teams_read(args: argparse.Namespace) -> None:
             messages = teams.list_chat_messages(client, args.chat_id, top=args.top)
             source = f"chat {args.chat_id}"
         else:
-            messages = teams.list_channel_messages(client, args.team_id, args.channel_id, top=args.top)
+            messages = teams.list_channel_messages(
+                client, args.team_id, args.channel_id, top=args.top
+            )
             source = f"channel {args.channel_id}"
 
     if not messages:
@@ -438,6 +451,7 @@ def cmd_teams_activity(args: argparse.Namespace) -> None:
     # aget_teams_activity has no sync counterpart (it fans out across many channels
     # concurrently), so this is the one CLI command that needs asyncio.run().
     import asyncio
+
     from ms_graph.graph_client import AsyncGraphClient
 
     async def _run():
@@ -451,14 +465,19 @@ def cmd_teams_activity(args: argparse.Namespace) -> None:
         return
 
     sources = {row["source_name"] for row in activity}
-    print(f"Activity in the last {args.hours} hours: {len(activity)} messages across {len(sources)} sources\n")
+    print(
+        f"Activity in the last {args.hours} hours: {len(activity)} messages across {len(sources)} sources\n"
+    )
     for row in activity:
-        print(f"  [{row['timestamp']}] {row['source_name']} — {row['sender']}: {row['preview'][:80]}")
+        print(
+            f"  [{row['timestamp']}] {row['source_name']} — {row['sender']}: {row['preview'][:80]}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
+
 
 def cmd_files_sites(args: argparse.Namespace) -> None:
     token = get_local_token()
@@ -488,7 +507,9 @@ def cmd_files_list(args: argparse.Namespace) -> None:
                 return
             print(f"Search results for '{args.query}' ({len(results)}):\n")
             for i, item in enumerate(results, 1):
-                print(f"[{i}] {item.get('name', '?')}  ({_fmt_size(item.get('size', 0))})  [id: {item.get('id', '?')}]")
+                print(
+                    f"[{i}] {item.get('name', '?')}  ({_fmt_size(item.get('size', 0))})  [id: {item.get('id', '?')}]"
+                )
                 if item.get("_searchSummary"):
                     print(f"     {item['_searchSummary']}")
                 if item.get("webUrl"):
@@ -523,7 +544,9 @@ def cmd_files_inspect(args: argparse.Namespace) -> None:
     else:
         print(f"Type:     {item.get('file', {}).get('mimeType', '?')}")
         print(f"Size:     {_fmt_size(item.get('size', 0))}")
-    print(f"Modified: {item.get('lastModifiedDateTime', '?')} by {item.get('lastModifiedBy', {}).get('user', {}).get('displayName', '?')}")
+    print(
+        f"Modified: {item.get('lastModifiedDateTime', '?')} by {item.get('lastModifiedBy', {}).get('user', {}).get('displayName', '?')}"
+    )
     print(f"ID:       {item.get('id', '?')}")
     if item.get("webUrl"):
         print(f"URL:      {item['webUrl']}")
@@ -588,6 +611,7 @@ def cmd_files_rename(args: argparse.Namespace) -> None:
 # Power BI commands
 # ---------------------------------------------------------------------------
 
+
 def _resolve_workspace(workspace_id: str) -> str:
     """Translate 'me' to '' (My workspace uses root API paths, not /groups/{id})."""
     return "" if workspace_id.lower() == "me" else workspace_id
@@ -633,7 +657,9 @@ def cmd_pbi_content(args: argparse.Namespace) -> None:
     if reports:
         print(f"Reports ({len(reports)}):")
         for r in reports:
-            print(f"  {r.get('name', '?')}  [id: {r.get('id', '?')}]  dataset: {r.get('datasetId', '?')}")
+            print(
+                f"  {r.get('name', '?')}  [id: {r.get('id', '?')}]  dataset: {r.get('datasetId', '?')}"
+            )
         print()
     if dashboards:
         print(f"Dashboards ({len(dashboards)}):")
@@ -688,7 +714,7 @@ def cmd_pbi_export(args: argparse.Namespace) -> None:
         export_id = pbi_ops.start_export(client, ws, args.report_id, export_format, pages=pages)
         print(f"Export started (ID: {export_id}). Waiting for completion...")
         status = pbi_ops.poll_export(client, ws, args.report_id, export_id)
-        print(f"Export succeeded. Downloading...")
+        print("Export succeeded. Downloading...")
         data = pbi_ops.download_export(client, ws, args.report_id, export_id)
 
     ext = status.get("resourceFileExtension", f".{export_format.lower()}")
@@ -706,6 +732,7 @@ def cmd_pbi_export(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -815,7 +842,9 @@ def main() -> None:
 
     p = files_sub.add_parser("list", help="List or search files in OneDrive / SharePoint")
     p.add_argument("--path", default="", help="Folder path (e.g. Documents/Reports)")
-    p.add_argument("--site-id", dest="site_id", default="", help="SharePoint site ID (empty = OneDrive)")
+    p.add_argument(
+        "--site-id", dest="site_id", default="", help="SharePoint site ID (empty = OneDrive)"
+    )
     p.add_argument("--query", default="", help="Search query across all drives")
     p.add_argument("--top", type=int, default=20)
     p.set_defaults(func=cmd_files_list)
@@ -836,7 +865,9 @@ def main() -> None:
     p = files_sub.add_parser("copy", help="Server-side copy of a file")
     p.add_argument("item_id", help="Source file item ID")
     p.add_argument("new_name", help="Name for the copy (with extension)")
-    p.add_argument("--dest-folder", dest="dest_folder", default="", help="Destination folder item ID")
+    p.add_argument(
+        "--dest-folder", dest="dest_folder", default="", help="Destination folder item ID"
+    )
     p.add_argument("--site-id", dest="site_id", default="", help="SharePoint site ID of source")
     p.add_argument("--dest-drive", dest="dest_drive", default="", help="Destination drive ID")
     p.set_defaults(func=cmd_files_copy)
@@ -862,13 +893,15 @@ def main() -> None:
     p = pbi_sub.add_parser("query", help="Execute a DAX query against a dataset")
     p.add_argument("workspace_id")
     p.add_argument("dataset_id")
-    p.add_argument("dax_query", help='DAX query string (e.g. "EVALUATE TOPN(10, \'Sales\')")')
+    p.add_argument("dax_query", help="DAX query string (e.g. \"EVALUATE TOPN(10, 'Sales')\")")
     p.set_defaults(func=cmd_pbi_query)
 
     p = pbi_sub.add_parser("refresh", help="Trigger or inspect a dataset refresh")
     p.add_argument("workspace_id")
     p.add_argument("dataset_id")
-    p.add_argument("--history", action="store_true", help="Show refresh history instead of triggering")
+    p.add_argument(
+        "--history", action="store_true", help="Show refresh history instead of triggering"
+    )
     p.add_argument("--top", type=int, default=5, help="Number of history entries (default: 5)")
     p.set_defaults(func=cmd_pbi_refresh)
 
@@ -876,7 +909,9 @@ def main() -> None:
     p.add_argument("workspace_id")
     p.add_argument("report_id")
     p.add_argument("--format", default="PDF", help="Export format: PDF (default), PNG, or PPTX")
-    p.add_argument("--pages", default="", help="Comma-separated page names to export (default: all)")
+    p.add_argument(
+        "--pages", default="", help="Comma-separated page names to export (default: all)"
+    )
     p.add_argument("--out", default="", help="Output file path (default: report-<id>.<ext>)")
     p.set_defaults(func=cmd_pbi_export)
 

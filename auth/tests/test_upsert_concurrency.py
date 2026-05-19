@@ -10,7 +10,7 @@ import time
 
 from sqlalchemy import select
 
-from auth.db.models import ProviderToken, MsalTokenCache
+from auth.db.models import MsalTokenCache, ProviderToken
 from auth.db.session import get_session_factory
 
 
@@ -39,12 +39,16 @@ def test_concurrent_save_token_no_integrity_error(repo):
 
     factory = get_session_factory()
     with factory() as s:
-        rows = s.execute(
-            select(ProviderToken).where(
-                ProviderToken.user_key == "alice",
-                ProviderToken.provider == "github",
+        rows = (
+            s.execute(
+                select(ProviderToken).where(
+                    ProviderToken.user_key == "alice",
+                    ProviderToken.provider == "github",
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1  # exactly one row, not two from racing inserts
 
 
@@ -69,9 +73,11 @@ def test_concurrent_save_msal_cache_no_integrity_error(repo):
 
     factory = get_session_factory()
     with factory() as s:
-        rows = s.execute(
-            select(MsalTokenCache).where(MsalTokenCache.user_key == "alice")
-        ).scalars().all()
+        rows = (
+            s.execute(select(MsalTokenCache).where(MsalTokenCache.user_key == "alice"))
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1
 
 
@@ -85,12 +91,16 @@ def test_save_token_is_idempotent_across_repeats(repo):
 
     factory = get_session_factory()
     with factory() as s:
-        rows = s.execute(
-            select(ProviderToken).where(
-                ProviderToken.user_key == "alice",
-                ProviderToken.provider == "github",
+        rows = (
+            s.execute(
+                select(ProviderToken).where(
+                    ProviderToken.user_key == "alice",
+                    ProviderToken.provider == "github",
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1
 
 

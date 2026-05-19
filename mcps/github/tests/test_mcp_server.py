@@ -4,33 +4,34 @@ In-process FastMCP clients don't have HTTP request context, so we mock
 get_github_token() directly instead of get_http_headers().
 """
 
+from unittest.mock import patch
+
 import httpx
 import pytest
 import respx
-from unittest.mock import patch
-
 from github.github_client import GITHUB_API_BASE_URL
+
 from .conftest import (
-    SAMPLE_REPO,
-    SAMPLE_REPOS_RESPONSE,
-    SAMPLE_SEARCH_REPOS_RESPONSE,
-    SAMPLE_ISSUE,
-    SAMPLE_ISSUES_RESPONSE,
-    SAMPLE_COMMENTS_RESPONSE,
-    SAMPLE_CREATED_ISSUE,
-    SAMPLE_CREATED_COMMENT,
-    SAMPLE_PR,
-    SAMPLE_PRS_RESPONSE,
-    SAMPLE_CREATED_PR,
-    SAMPLE_MERGE_RESULT,
-    SAMPLE_FILE_CONTENT,
-    SAMPLE_DIRECTORY_LISTING,
-    SAMPLE_FILE_CREATE_RESULT,
-    SAMPLE_CODE_SEARCH_RESPONSE,
-    SAMPLE_USER,
     GITHUB_ERROR_401,
     GITHUB_ERROR_404,
     GITHUB_ERROR_422,
+    SAMPLE_CODE_SEARCH_RESPONSE,
+    SAMPLE_COMMENTS_RESPONSE,
+    SAMPLE_CREATED_COMMENT,
+    SAMPLE_CREATED_ISSUE,
+    SAMPLE_CREATED_PR,
+    SAMPLE_DIRECTORY_LISTING,
+    SAMPLE_FILE_CONTENT,
+    SAMPLE_FILE_CREATE_RESULT,
+    SAMPLE_ISSUE,
+    SAMPLE_ISSUES_RESPONSE,
+    SAMPLE_MERGE_RESULT,
+    SAMPLE_PR,
+    SAMPLE_PRS_RESPONSE,
+    SAMPLE_REPO,
+    SAMPLE_REPOS_RESPONSE,
+    SAMPLE_SEARCH_REPOS_RESPONSE,
+    SAMPLE_USER,
 )
 
 
@@ -48,12 +49,14 @@ def _get_text(result) -> str:
 def mcp_server():
     """Import and return the MCP server instance."""
     from github_mcp import mcp
+
     return mcp
 
 
 # ---------------------------------------------------------------------------
 # Repository tools
 # ---------------------------------------------------------------------------
+
 
 class TestMCPRepoTools:
     """Test repository MCP tools via in-process FastMCP client."""
@@ -65,6 +68,7 @@ class TestMCPRepoTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_repositories", {})
 
@@ -80,6 +84,7 @@ class TestMCPRepoTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_repositories", {})
 
@@ -93,8 +98,11 @@ class TestMCPRepoTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
-                result = await client.call_tool("get_repository", {"owner": "octocat", "repo": "my-project"})
+                result = await client.call_tool(
+                    "get_repository", {"owner": "octocat", "repo": "my-project"}
+                )
 
         text = _get_text(result)
         assert "octocat/my-project" in text
@@ -108,8 +116,11 @@ class TestMCPRepoTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
-                result = await client.call_tool("search_repositories", {"query": "machine learning"})
+                result = await client.call_tool(
+                    "search_repositories", {"query": "machine learning"}
+                )
 
         text = _get_text(result)
         assert "2 repository(ies)" in text
@@ -122,6 +133,7 @@ class TestMCPRepoTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("search_repositories", {"query": "nonexistent"})
 
@@ -133,6 +145,7 @@ class TestMCPRepoTools:
 # Issue tools
 # ---------------------------------------------------------------------------
 
+
 class TestMCPIssueTools:
     """Test issue MCP tools via in-process FastMCP client."""
 
@@ -143,6 +156,7 @@ class TestMCPIssueTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_issues", {"owner": "o", "repo": "r"})
 
@@ -159,6 +173,7 @@ class TestMCPIssueTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_issues", {"owner": "o", "repo": "r"})
 
@@ -175,8 +190,11 @@ class TestMCPIssueTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
-                result = await client.call_tool("get_issue", {"owner": "o", "repo": "r", "issue_number": 42})
+                result = await client.call_tool(
+                    "get_issue", {"owner": "o", "repo": "r", "issue_number": 42}
+                )
 
         text = _get_text(result)
         assert "Fix login bug" in text
@@ -191,6 +209,7 @@ class TestMCPIssueTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "create_issue",
@@ -209,6 +228,7 @@ class TestMCPIssueTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "update_issue",
@@ -226,6 +246,7 @@ class TestMCPIssueTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "add_issue_comment",
@@ -241,6 +262,7 @@ class TestMCPIssueTools:
 # Pull request tools
 # ---------------------------------------------------------------------------
 
+
 class TestMCPPullRequestTools:
     """Test pull request MCP tools via in-process FastMCP client."""
 
@@ -251,6 +273,7 @@ class TestMCPPullRequestTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_pull_requests", {"owner": "o", "repo": "r"})
 
@@ -266,6 +289,7 @@ class TestMCPPullRequestTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_pull_requests", {"owner": "o", "repo": "r"})
 
@@ -279,6 +303,7 @@ class TestMCPPullRequestTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "get_pull_request",
@@ -298,10 +323,17 @@ class TestMCPPullRequestTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "create_pull_request",
-                    {"owner": "o", "repo": "r", "title": "Fix bug", "head": "fix/parser", "base": "main"},
+                    {
+                        "owner": "o",
+                        "repo": "r",
+                        "title": "Fix bug",
+                        "head": "fix/parser",
+                        "base": "main",
+                    },
                 )
 
         text = _get_text(result)
@@ -315,6 +347,7 @@ class TestMCPPullRequestTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "add_pr_comment",
@@ -332,6 +365,7 @@ class TestMCPPullRequestTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "merge_pull_request",
@@ -347,6 +381,7 @@ class TestMCPPullRequestTools:
 # Code & content tools
 # ---------------------------------------------------------------------------
 
+
 class TestMCPCodeTools:
     """Test code and content MCP tools via in-process FastMCP client."""
 
@@ -357,6 +392,7 @@ class TestMCPCodeTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "get_file_content",
@@ -374,6 +410,7 @@ class TestMCPCodeTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "get_file_content",
@@ -391,10 +428,17 @@ class TestMCPCodeTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "create_or_update_file",
-                    {"owner": "o", "repo": "r", "path": "new.txt", "content": "Hello", "message": "Create"},
+                    {
+                        "owner": "o",
+                        "repo": "r",
+                        "path": "new.txt",
+                        "content": "Hello",
+                        "message": "Create",
+                    },
                 )
 
         text = _get_text(result)
@@ -408,6 +452,7 @@ class TestMCPCodeTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("search_code", {"query": "addClass"})
 
@@ -423,6 +468,7 @@ class TestMCPCodeTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("search_code", {"query": "nonexistent"})
 
@@ -434,6 +480,7 @@ class TestMCPCodeTools:
 # User tools
 # ---------------------------------------------------------------------------
 
+
 class TestMCPUserTools:
     """Test user MCP tools via in-process FastMCP client."""
 
@@ -444,6 +491,7 @@ class TestMCPUserTools:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("get_authenticated_user", {})
 
@@ -458,6 +506,7 @@ class TestMCPUserTools:
 # Auth tests
 # ---------------------------------------------------------------------------
 
+
 class TestMCPAuth:
     """Test authentication behavior."""
 
@@ -465,7 +514,9 @@ class TestMCPAuth:
         from fastmcp import Client
         from fastmcp.exceptions import ToolError
 
-        with patch("github_mcp.get_github_token", side_effect=PermissionError("Authorization required.")):
+        with patch(
+            "github_mcp.get_github_token", side_effect=PermissionError("Authorization required.")
+        ):
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="Authorization required"):
                     await client.call_tool("list_repositories", {})
@@ -486,15 +537,23 @@ class TestMCPAuth:
             ("add_issue_comment", {"owner": "o", "repo": "r", "issue_number": 1, "body": "X"}),
             ("list_pull_requests", {"owner": "o", "repo": "r"}),
             ("get_pull_request", {"owner": "o", "repo": "r", "pull_number": 1}),
-            ("create_pull_request", {"owner": "o", "repo": "r", "title": "T", "head": "h", "base": "b"}),
+            (
+                "create_pull_request",
+                {"owner": "o", "repo": "r", "title": "T", "head": "h", "base": "b"},
+            ),
             ("add_pr_comment", {"owner": "o", "repo": "r", "pull_number": 1, "body": "X"}),
             ("merge_pull_request", {"owner": "o", "repo": "r", "pull_number": 1}),
             ("get_file_content", {"owner": "o", "repo": "r", "path": "f"}),
-            ("create_or_update_file", {"owner": "o", "repo": "r", "path": "f", "content": "c", "message": "m"}),
+            (
+                "create_or_update_file",
+                {"owner": "o", "repo": "r", "path": "f", "content": "c", "message": "m"},
+            ),
             ("search_code", {"query": "test"}),
             ("get_authenticated_user", {}),
         ]
-        with patch("github_mcp.get_github_token", side_effect=PermissionError("Authorization required.")):
+        with patch(
+            "github_mcp.get_github_token", side_effect=PermissionError("Authorization required.")
+        ):
             async with Client(mcp_server) as client:
                 for tool_name, args in tool_calls:
                     with pytest.raises(ToolError, match="Authorization required"):
@@ -507,6 +566,7 @@ class TestMCPAuth:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_repositories", {})
 
@@ -521,6 +581,7 @@ class TestMCPAuth:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("get_repository", {"owner": "o", "repo": "r"})
 
@@ -538,6 +599,7 @@ class TestMCPAuth:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_repositories", {})
 
@@ -551,6 +613,7 @@ class TestMCPAuth:
         )
         with _mock_token():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "create_issue",

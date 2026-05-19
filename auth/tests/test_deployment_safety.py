@@ -35,6 +35,7 @@ def test_empty_directory_is_not_a_checkout(tmp_path):
 def test_default_db_url_raises_when_not_in_checkout(monkeypatch):
     """If the resolved repo_root has no markers, default_db_url refuses."""
     import auth.db.session as session_mod
+
     monkeypatch.setattr(session_mod, "_repo_root", lambda: __import__("pathlib").Path("/var/empty"))
     with pytest.raises(DeploymentConfigError, match="BOND_MCPS_DB_URL"):
         default_db_url()
@@ -51,9 +52,11 @@ def test_get_engine_propagates_deployment_error(monkeypatch):
     """get_engine should raise DeploymentConfigError too — not a confusing
     OperationalError after silently writing into a bad path."""
     import auth.db.session as session_mod
+
     monkeypatch.delenv("BOND_MCPS_DB_URL", raising=False)
     monkeypatch.setattr(
-        session_mod, "_repo_root",
+        session_mod,
+        "_repo_root",
         lambda: __import__("pathlib").Path("/var/empty"),
     )
     reset_for_tests()
@@ -71,7 +74,8 @@ def test_doctor_reports_deployment_error(monkeypatch, capsys):
 
     monkeypatch.delenv("BOND_MCPS_DB_URL", raising=False)
     monkeypatch.setattr(
-        session_mod, "_repo_root",
+        session_mod,
+        "_repo_root",
         lambda: __import__("pathlib").Path("/var/empty"),
     )
     reset_for_tests()

@@ -4,12 +4,12 @@ User operations — sync and async pairs.
 Uses Jira /myself (classic scopes) with fallback to /me (granular scopes).
 """
 
-from typing import Any, Dict
+from typing import Any
 
-from .atlassian_client import AtlassianClient, AsyncAtlassianClient, AtlassianError
+from .atlassian_client import AsyncAtlassianClient, AtlassianClient, AtlassianError
 
 
-def get_myself(client: AtlassianClient) -> Dict[str, Any]:
+def get_myself(client: AtlassianClient) -> dict[str, Any]:
     """Get the current authenticated user's info."""
     try:
         return client.get(f"{client.jira_base}/myself")
@@ -20,7 +20,7 @@ def get_myself(client: AtlassianClient) -> Dict[str, Any]:
         raise
 
 
-async def aget_myself(client: AsyncAtlassianClient) -> Dict[str, Any]:
+async def aget_myself(client: AsyncAtlassianClient) -> dict[str, Any]:
     """Get the current authenticated user's info (async)."""
     try:
         return await client.get(f"{client.jira_base}/myself")
@@ -31,7 +31,7 @@ async def aget_myself(client: AsyncAtlassianClient) -> Dict[str, Any]:
         raise
 
 
-def _normalize_me(data: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_me(data: dict[str, Any]) -> dict[str, Any]:
     """Normalize /me response to match Jira /myself field names."""
     return {
         "accountId": data.get("account_id", ""),

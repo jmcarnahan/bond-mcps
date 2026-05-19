@@ -33,13 +33,13 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-from github.github_client import GitHubClient, GitHubError
-from github import repos, issues, pulls, code
+from github import code, issues, pulls, repos
+from github.github_client import GitHubClient
 
 load_dotenv(Path(__file__).parent / ".env")
 
 from auth import log_discipline  # noqa: E402
+
 log_discipline.apply()
 
 
@@ -51,6 +51,7 @@ def _get_token() -> str:
     """
     try:
         from github.local_auth import get_local_token
+
         return get_local_token()
     except (PermissionError, RuntimeError) as e:
         # PermissionError: no env vars set / no auth available
@@ -62,6 +63,7 @@ def _get_token() -> str:
 # ---------------------------------------------------------------------------
 # Repository commands
 # ---------------------------------------------------------------------------
+
 
 def cmd_repos_list(args: argparse.Namespace) -> None:
     token = _get_token()
@@ -114,10 +116,13 @@ def cmd_repos_search(args: argparse.Namespace) -> None:
 # Issue commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_issues_list(args: argparse.Namespace) -> None:
     token = _get_token()
     with GitHubClient(token) as client:
-        issue_list = issues.list_issues(client, args.owner, args.repo, state=args.state, per_page=args.per_page)
+        issue_list = issues.list_issues(
+            client, args.owner, args.repo, state=args.state, per_page=args.per_page
+        )
 
     # Filter out PRs
     issue_list = [i for i in issue_list if "pull_request" not in i]
@@ -148,7 +153,9 @@ def cmd_issues_get(args: argparse.Namespace) -> None:
 def cmd_issues_create(args: argparse.Namespace) -> None:
     token = _get_token()
     with GitHubClient(token) as client:
-        issue = issues.create_issue(client, args.owner, args.repo, title=args.title, body=args.body or "")
+        issue = issues.create_issue(
+            client, args.owner, args.repo, title=args.title, body=args.body or ""
+        )
 
     print(f"Created issue #{issue.get('number', '?')}: {issue.get('title', '?')}")
     print(f"URL: {issue.get('html_url', '?')}")
@@ -158,10 +165,13 @@ def cmd_issues_create(args: argparse.Namespace) -> None:
 # Pull request commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_pulls_list(args: argparse.Namespace) -> None:
     token = _get_token()
     with GitHubClient(token) as client:
-        pr_list = pulls.list_pulls(client, args.owner, args.repo, state=args.state, per_page=args.per_page)
+        pr_list = pulls.list_pulls(
+            client, args.owner, args.repo, state=args.state, per_page=args.per_page
+        )
 
     if not pr_list:
         print("No pull requests found.")
@@ -182,7 +192,9 @@ def cmd_pulls_get(args: argparse.Namespace) -> None:
     print(f"State: {pr.get('state', '?')}")
     print(f"Author: @{pr.get('user', {}).get('login', '?')}")
     print(f"Branch: {pr.get('head', {}).get('ref', '?')} -> {pr.get('base', {}).get('ref', '?')}")
-    print(f"Changed Files: {pr.get('changed_files', '?')} | +{pr.get('additions', '?')} -{pr.get('deletions', '?')}")
+    print(
+        f"Changed Files: {pr.get('changed_files', '?')} | +{pr.get('additions', '?')} -{pr.get('deletions', '?')}"
+    )
     print(f"URL: {pr.get('html_url', '?')}")
     print()
     print(pr.get("body") or "(no description)")
@@ -191,6 +203,7 @@ def cmd_pulls_get(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Code commands
 # ---------------------------------------------------------------------------
+
 
 def cmd_code_get(args: argparse.Namespace) -> None:
     token = _get_token()
@@ -234,6 +247,7 @@ def cmd_code_search(args: argparse.Namespace) -> None:
 # User command
 # ---------------------------------------------------------------------------
 
+
 def cmd_user(args: argparse.Namespace) -> None:
     token = _get_token()
     with GitHubClient(token) as client:
@@ -257,8 +271,12 @@ def main() -> None:
     repos_sub = p_repos.add_subparsers(dest="repos_command", required=True)
 
     p_rlist = repos_sub.add_parser("list", help="List your repositories")
-    p_rlist.add_argument("--type", default="all", choices=["all", "owner", "public", "private", "member"])
-    p_rlist.add_argument("--sort", default="updated", choices=["created", "updated", "pushed", "full_name"])
+    p_rlist.add_argument(
+        "--type", default="all", choices=["all", "owner", "public", "private", "member"]
+    )
+    p_rlist.add_argument(
+        "--sort", default="updated", choices=["created", "updated", "pushed", "full_name"]
+    )
     p_rlist.add_argument("--per-page", type=int, default=30)
     p_rlist.set_defaults(func=cmd_repos_list)
 

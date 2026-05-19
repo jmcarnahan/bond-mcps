@@ -1,7 +1,7 @@
 """Tests for local_auth.py -- local MSAL authentication."""
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -24,10 +24,13 @@ class TestGetLocalToken:
     def test_returns_cached_token_silent(self):
         from ms_graph.local_auth import get_local_token
 
-        with patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}, clear=True), \
-             patch("ms_graph.local_auth._try_silent_under_lock",
-                   return_value="cached-tok") as silent, \
-             patch("ms_graph.local_auth._acquire_token_interactive") as interactive:
+        with (
+            patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}, clear=True),
+            patch(
+                "ms_graph.local_auth._try_silent_under_lock", return_value="cached-tok"
+            ) as silent,
+            patch("ms_graph.local_auth._acquire_token_interactive") as interactive,
+        ):
             token = get_local_token()
 
         assert token == "cached-tok"
@@ -37,10 +40,13 @@ class TestGetLocalToken:
     def test_falls_back_to_interactive_when_silent_returns_none(self):
         from ms_graph.local_auth import get_local_token
 
-        with patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}, clear=True), \
-             patch("ms_graph.local_auth._try_silent_under_lock", return_value=None), \
-             patch("ms_graph.local_auth._acquire_token_interactive",
-                   return_value="browser-tok") as interactive:
+        with (
+            patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}, clear=True),
+            patch("ms_graph.local_auth._try_silent_under_lock", return_value=None),
+            patch(
+                "ms_graph.local_auth._acquire_token_interactive", return_value="browser-tok"
+            ) as interactive,
+        ):
             token = get_local_token()
 
         assert token == "browser-tok"
@@ -49,9 +55,11 @@ class TestGetLocalToken:
     def test_raises_when_all_flows_fail(self):
         from ms_graph.local_auth import get_local_token
 
-        with patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}, clear=True), \
-             patch("ms_graph.local_auth._try_silent_under_lock", return_value=None), \
-             patch("ms_graph.local_auth._acquire_token_interactive", return_value=None):
+        with (
+            patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}, clear=True),
+            patch("ms_graph.local_auth._try_silent_under_lock", return_value=None),
+            patch("ms_graph.local_auth._acquire_token_interactive", return_value=None),
+        ):
             with pytest.raises(PermissionError, match="authentication failed"):
                 get_local_token()
 
@@ -65,11 +73,15 @@ class TestAcquireTokenInteractive:
         mock_app = MagicMock()
         mock_app.get_accounts.return_value = []
 
-        with patch("ms_graph.local_auth._load_token_cache"), \
-             patch("ms_graph.local_auth._save_token_cache"), \
-             patch("ms_graph.local_auth._create_msal_app", return_value=mock_app), \
-             patch("ms_graph.local_auth._acquire_token_browser",
-                   return_value={"access_token": "browser-tok"}) as mock_browser:
+        with (
+            patch("ms_graph.local_auth._load_token_cache"),
+            patch("ms_graph.local_auth._save_token_cache"),
+            patch("ms_graph.local_auth._create_msal_app", return_value=mock_app),
+            patch(
+                "ms_graph.local_auth._acquire_token_browser",
+                return_value={"access_token": "browser-tok"},
+            ) as mock_browser,
+        ):
             token = _acquire_token_interactive("cid", ["scope"])
 
         assert token == "browser-tok"
@@ -81,12 +93,16 @@ class TestAcquireTokenInteractive:
         mock_app = MagicMock()
         mock_app.get_accounts.return_value = []
 
-        with patch("ms_graph.local_auth._load_token_cache"), \
-             patch("ms_graph.local_auth._save_token_cache"), \
-             patch("ms_graph.local_auth._create_msal_app", return_value=mock_app), \
-             patch("ms_graph.local_auth._acquire_token_browser", return_value=None), \
-             patch("ms_graph.local_auth._acquire_token_device_code",
-                   return_value={"access_token": "device-tok"}) as mock_device:
+        with (
+            patch("ms_graph.local_auth._load_token_cache"),
+            patch("ms_graph.local_auth._save_token_cache"),
+            patch("ms_graph.local_auth._create_msal_app", return_value=mock_app),
+            patch("ms_graph.local_auth._acquire_token_browser", return_value=None),
+            patch(
+                "ms_graph.local_auth._acquire_token_device_code",
+                return_value={"access_token": "device-tok"},
+            ) as mock_device,
+        ):
             token = _acquire_token_interactive("cid", ["scope"])
 
         assert token == "device-tok"
@@ -98,11 +114,13 @@ class TestAcquireTokenInteractive:
         mock_app = MagicMock()
         mock_app.get_accounts.return_value = []
 
-        with patch("ms_graph.local_auth._load_token_cache"), \
-             patch("ms_graph.local_auth._save_token_cache"), \
-             patch("ms_graph.local_auth._create_msal_app", return_value=mock_app), \
-             patch("ms_graph.local_auth._acquire_token_browser", return_value=None), \
-             patch("ms_graph.local_auth._acquire_token_device_code", return_value=None):
+        with (
+            patch("ms_graph.local_auth._load_token_cache"),
+            patch("ms_graph.local_auth._save_token_cache"),
+            patch("ms_graph.local_auth._create_msal_app", return_value=mock_app),
+            patch("ms_graph.local_auth._acquire_token_browser", return_value=None),
+            patch("ms_graph.local_auth._acquire_token_device_code", return_value=None),
+        ):
             token = _acquire_token_interactive("cid", ["scope"])
 
         assert token is None
@@ -127,9 +145,11 @@ class TestTrySilentUnderLock:
         fake_repo.locked_msal_cache.return_value.__enter__.return_value = fake_handle
         fake_repo.locked_msal_cache.return_value.__exit__.return_value = False
 
-        with patch("ms_graph.local_auth._get_repo", return_value=fake_repo), \
-             patch("ms_graph.local_auth._user_key", return_value="alice"), \
-             patch("ms_graph.local_auth._create_msal_app", return_value=mock_app):
+        with (
+            patch("ms_graph.local_auth._get_repo", return_value=fake_repo),
+            patch("ms_graph.local_auth._user_key", return_value="alice"),
+            patch("ms_graph.local_auth._create_msal_app", return_value=mock_app),
+        ):
             assert _try_silent_under_lock("cid", ["scope"]) is None
 
         fake_repo.locked_msal_cache.assert_called_once_with("alice")
@@ -162,11 +182,14 @@ class TestTrySilentUnderLock:
             def serialize(self):
                 return '{"AccessToken": {"x": "y"}}'
 
-        with patch("ms_graph.local_auth._get_repo", return_value=fake_repo), \
-             patch("ms_graph.local_auth._user_key", return_value="alice"), \
-             patch("ms_graph.local_auth._create_msal_app", return_value=mock_app), \
-             patch("ms_graph.local_auth.msal.SerializableTokenCache",
-                   side_effect=lambda: DummyCache()):
+        with (
+            patch("ms_graph.local_auth._get_repo", return_value=fake_repo),
+            patch("ms_graph.local_auth._user_key", return_value="alice"),
+            patch("ms_graph.local_auth._create_msal_app", return_value=mock_app),
+            patch(
+                "ms_graph.local_auth.msal.SerializableTokenCache", side_effect=lambda: DummyCache()
+            ),
+        ):
             token = _try_silent_under_lock("cid", ["scope"])
 
         assert token == "silent-tok"
@@ -188,10 +211,14 @@ class TestCreateMsalApp:
         from ms_graph.local_auth import _create_msal_app
 
         cache = msal.SerializableTokenCache()
-        with patch.dict(os.environ, {
-            "MS_CLIENT_SECRET": "test-secret",
-            "MS_TENANT_ID": "consumers",
-        }, clear=True):
+        with patch.dict(
+            os.environ,
+            {
+                "MS_CLIENT_SECRET": "test-secret",
+                "MS_TENANT_ID": "consumers",
+            },
+            clear=True,
+        ):
             app = _create_msal_app("test-id", cache)
         assert isinstance(app, msal.ConfidentialClientApplication)
 
@@ -233,9 +260,12 @@ class TestAcquireTokenBrowserProxy:
         }
 
         mock_proxy = MagicMock()
-        mock_proxy.get_redirect_uri.return_value = "http://localhost:8000/connections/microsoft/callback"
+        mock_proxy.get_redirect_uri.return_value = (
+            "http://localhost:8000/connections/microsoft/callback"
+        )
         mock_proxy.wait_for_callback.return_value = {
-            "code": "authcode", "state": "msal-state-123",
+            "code": "authcode",
+            "state": "msal-state-123",
         }
 
         with patch("ms_graph.local_auth.webbrowser"):
@@ -248,6 +278,7 @@ class TestAcquireTokenBrowserProxy:
     def test_returns_none_when_proxy_not_running(self):
         """When proxy isn't running, _acquire_token_browser returns None."""
         from ms_graph.local_auth import _acquire_token_browser
+
         import auth
 
         mock_app = MagicMock()
@@ -268,7 +299,9 @@ class TestAcquireTokenBrowserProxy:
         }
 
         mock_proxy = MagicMock()
-        mock_proxy.get_redirect_uri.return_value = "http://localhost:8000/connections/microsoft/callback"
+        mock_proxy.get_redirect_uri.return_value = (
+            "http://localhost:8000/connections/microsoft/callback"
+        )
         mock_proxy.wait_for_callback.side_effect = TimeoutError("timed out")
 
         with patch("ms_graph.local_auth.webbrowser"):
@@ -279,11 +312,14 @@ class TestAcquireTokenBrowserProxy:
     def test_proxy_crash_returns_none(self):
         """RuntimeError from proxy (e.g., proxy crashed mid-flow)."""
         from ms_graph.local_auth import _acquire_token_browser
+
         import auth
 
         mock_proxy = MagicMock()
         mock_proxy.check_proxy.return_value = None  # passes
-        mock_proxy.get_redirect_uri.return_value = "http://localhost:8000/connections/microsoft/callback"
+        mock_proxy.get_redirect_uri.return_value = (
+            "http://localhost:8000/connections/microsoft/callback"
+        )
         mock_proxy.wait_for_callback.side_effect = RuntimeError("proxy died")
 
         mock_app = MagicMock()
@@ -292,8 +328,10 @@ class TestAcquireTokenBrowserProxy:
             "state": "s1",
         }
 
-        with patch.object(auth, "OAuthProxyClient", return_value=mock_proxy), \
-             patch("ms_graph.local_auth.webbrowser"):
+        with (
+            patch.object(auth, "OAuthProxyClient", return_value=mock_proxy),
+            patch("ms_graph.local_auth.webbrowser"),
+        ):
             result = _acquire_token_browser(mock_app, ["Mail.Read"])
 
         assert result is None
@@ -310,8 +348,10 @@ class TestMsalCachePersistence:
         mock_cache.serialize.return_value = '{"cache": "data"}'
 
         fake_repo = MagicMock()
-        with patch.object(la, "_get_repo", return_value=fake_repo), \
-             patch.object(la, "_user_key", return_value="alice"):
+        with (
+            patch.object(la, "_get_repo", return_value=fake_repo),
+            patch.object(la, "_user_key", return_value="alice"),
+        ):
             la._save_token_cache(mock_cache)
 
         fake_repo.save_msal_cache.assert_called_once_with("alice", '{"cache": "data"}')
@@ -323,21 +363,26 @@ class TestMsalCachePersistence:
         mock_cache.has_state_changed = False
 
         fake_repo = MagicMock()
-        with patch.object(la, "_get_repo", return_value=fake_repo), \
-             patch.object(la, "_user_key", return_value="alice"):
+        with (
+            patch.object(la, "_get_repo", return_value=fake_repo),
+            patch.object(la, "_user_key", return_value="alice"),
+        ):
             la._save_token_cache(mock_cache)
 
         fake_repo.save_msal_cache.assert_not_called()
 
     def test_load_deserializes_blob_from_repository(self):
         import json
+
         import ms_graph.local_auth as la
 
         blob = '{"AccessToken": {"acct-x": {"credential_type": "AccessToken"}}}'
         fake_repo = MagicMock()
         fake_repo.get_msal_cache.return_value = blob
-        with patch.object(la, "_get_repo", return_value=fake_repo), \
-             patch.object(la, "_user_key", return_value="alice"):
+        with (
+            patch.object(la, "_get_repo", return_value=fake_repo),
+            patch.object(la, "_user_key", return_value="alice"),
+        ):
             cache = la._load_token_cache()
 
         fake_repo.get_msal_cache.assert_called_once_with("alice")
@@ -349,8 +394,10 @@ class TestMsalCachePersistence:
 
         fake_repo = MagicMock()
         fake_repo.get_msal_cache.return_value = None
-        with patch.object(la, "_get_repo", return_value=fake_repo), \
-             patch.object(la, "_user_key", return_value="alice"):
+        with (
+            patch.object(la, "_get_repo", return_value=fake_repo),
+            patch.object(la, "_user_key", return_value="alice"),
+        ):
             cache = la._load_token_cache()
 
         # Empty MSAL cache serializes to a small JSON-ish value or empty string

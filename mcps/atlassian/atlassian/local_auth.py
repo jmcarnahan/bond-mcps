@@ -7,7 +7,6 @@ flow. Token caching and refresh via auth.TokenStore.
 
 import base64
 import hashlib
-import json
 import logging
 import os
 import secrets
@@ -72,6 +71,7 @@ def get_local_token_and_cloud_id() -> tuple[str, str]:
         )
 
     from auth import TokenStore, resolve_user_key_for_request
+
     store = TokenStore("atlassian", user_key=resolve_user_key_for_request())
 
     # 1. Try cached token (with refresh)
@@ -85,9 +85,7 @@ def get_local_token_and_cloud_id() -> tuple[str, str]:
     # 2. Full browser flow
     token_data = _do_browser_auth(client_id, client_secret)
     if not token_data or "access_token" not in token_data:
-        raise PermissionError(
-            "Atlassian authentication failed. Could not acquire a token."
-        )
+        raise PermissionError("Atlassian authentication failed. Could not acquire a token.")
 
     # Discover cloud ID
     cloud_id = os.environ.get("ATLASSIAN_CLOUD_ID")
@@ -172,8 +170,11 @@ def _do_browser_auth(client_id: str, client_secret: str) -> dict | None:
 
     # Exchange code for tokens
     return _exchange_code(
-        client_id, client_secret,
-        callback_result["code"], redirect_uri, code_verifier,
+        client_id,
+        client_secret,
+        callback_result["code"],
+        redirect_uri,
+        code_verifier,
     )
 
 
@@ -235,6 +236,6 @@ def _discover_cloud_id(access_token: str) -> str:
     # Genuinely multiple sites — need ATLASSIAN_CLOUD_ID env var
     site_names = [f"  {r.get('name', '?')} (id: {r['id']})" for r in unique]
     raise PermissionError(
-        f"Multiple Atlassian sites found. Set ATLASSIAN_CLOUD_ID to one of:\n"
+        "Multiple Atlassian sites found. Set ATLASSIAN_CLOUD_ID to one of:\n"
         + "\n".join(site_names)
     )

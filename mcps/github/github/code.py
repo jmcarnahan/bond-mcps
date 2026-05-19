@@ -6,9 +6,9 @@ All functions accept a GitHubClient or AsyncGitHubClient and return parsed dicts
 """
 
 import base64
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .github_client import GitHubClient, AsyncGitHubClient
+from .github_client import AsyncGitHubClient, GitHubClient
 
 # GitHub API caps per_page at 100
 MAX_PER_PAGE = 100
@@ -18,20 +18,66 @@ MAX_TEXT_DECODE_BYTES = 524_288
 
 # MIME prefixes and types we consider text-readable
 _TEXT_MIME_PREFIXES = ("text/",)
-_TEXT_MIME_TYPES = frozenset({
-    "application/json", "application/xml", "application/javascript",
-    "application/x-yaml", "application/x-sh", "application/sql",
-})
+_TEXT_MIME_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/x-yaml",
+        "application/x-sh",
+        "application/sql",
+    }
+)
 
 # File extensions considered text-readable (fallback)
-_TEXT_EXTENSIONS = frozenset({
-    ".txt", ".csv", ".json", ".md", ".py", ".js", ".ts", ".html", ".xml",
-    ".yaml", ".yml", ".log", ".cfg", ".ini", ".sh", ".sql", ".java", ".c",
-    ".cpp", ".css", ".svg", ".toml", ".tf", ".go", ".rs", ".rb", ".jsx",
-    ".tsx", ".vue", ".scss", ".less", ".bat", ".ps1", ".r", ".h", ".hpp",
-    ".swift", ".kt", ".gradle", ".properties", ".env", ".gitignore",
-    ".dockerfile", ".makefile",
-})
+_TEXT_EXTENSIONS = frozenset(
+    {
+        ".txt",
+        ".csv",
+        ".json",
+        ".md",
+        ".py",
+        ".js",
+        ".ts",
+        ".html",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".log",
+        ".cfg",
+        ".ini",
+        ".sh",
+        ".sql",
+        ".java",
+        ".c",
+        ".cpp",
+        ".css",
+        ".svg",
+        ".toml",
+        ".tf",
+        ".go",
+        ".rs",
+        ".rb",
+        ".jsx",
+        ".tsx",
+        ".vue",
+        ".scss",
+        ".less",
+        ".bat",
+        ".ps1",
+        ".r",
+        ".h",
+        ".hpp",
+        ".swift",
+        ".kt",
+        ".gradle",
+        ".properties",
+        ".env",
+        ".gitignore",
+        ".dockerfile",
+        ".makefile",
+    }
+)
 
 
 def _is_likely_text(name: str) -> bool:
@@ -56,7 +102,9 @@ def _decode_file_content(data: dict) -> dict:
     # Skip decode for files that are too large
     if size > MAX_TEXT_DECODE_BYTES:
         data["decoded_content"] = None
-        data["_decode_note"] = f"File too large to decode ({size} bytes, limit {MAX_TEXT_DECODE_BYTES})"
+        data["_decode_note"] = (
+            f"File too large to decode ({size} bytes, limit {MAX_TEXT_DECODE_BYTES})"
+        )
         return data
 
     raw = base64.b64decode(data["content"])
@@ -81,13 +129,14 @@ def _cap_per_page(per_page: int) -> int:
 # Synchronous
 # ---------------------------------------------------------------------------
 
+
 def get_file_content(
     client: GitHubClient,
     owner: str,
     repo: str,
     path: str,
     ref: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get a file's content from a repository. Returns decoded content for text files."""
     params = {}
     if ref:
@@ -105,10 +154,10 @@ def create_or_update_file(
     message: str,
     sha: str = "",
     branch: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create or update a file in a repository."""
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "message": message,
         "content": encoded,
     }
@@ -123,7 +172,7 @@ def search_code(
     client: GitHubClient,
     query: str,
     per_page: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search code across GitHub repositories."""
     data = client.get(
         "/search/code",
@@ -132,7 +181,7 @@ def search_code(
     return data.get("items", [])
 
 
-def get_authenticated_user(client: GitHubClient) -> Dict[str, Any]:
+def get_authenticated_user(client: GitHubClient) -> dict[str, Any]:
     """Get the authenticated user's profile."""
     return client.get("/user")
 
@@ -141,13 +190,14 @@ def get_authenticated_user(client: GitHubClient) -> Dict[str, Any]:
 # Asynchronous
 # ---------------------------------------------------------------------------
 
+
 async def aget_file_content(
     client: AsyncGitHubClient,
     owner: str,
     repo: str,
     path: str,
     ref: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get a file's content from a repository (async). Returns decoded content for text files."""
     params = {}
     if ref:
@@ -165,10 +215,10 @@ async def acreate_or_update_file(
     message: str,
     sha: str = "",
     branch: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create or update a file in a repository (async)."""
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "message": message,
         "content": encoded,
     }
@@ -183,7 +233,7 @@ async def asearch_code(
     client: AsyncGitHubClient,
     query: str,
     per_page: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search code across GitHub repositories (async)."""
     data = await client.get(
         "/search/code",
@@ -192,6 +242,6 @@ async def asearch_code(
     return data.get("items", [])
 
 
-async def aget_authenticated_user(client: AsyncGitHubClient) -> Dict[str, Any]:
+async def aget_authenticated_user(client: AsyncGitHubClient) -> dict[str, Any]:
     """Get the authenticated user's profile (async)."""
     return await client.get("/user")

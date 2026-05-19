@@ -5,8 +5,6 @@ are mocked with respx; the SQL connector (which uses raw sockets) is mocked at
 the dbx.client._connect boundary.
 """
 
-import os
-
 import pytest
 
 WORKSPACE_HOST = "https://dbc-test-12345.cloud.databricks.com"
