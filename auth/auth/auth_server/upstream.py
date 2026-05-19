@@ -194,9 +194,7 @@ class OIDCUpstreamIdP:
                 raise UpstreamAuthError("Allowed-domain check failed: no email in id_token.")
             domain = email.rsplit("@", 1)[1].lower()
             if domain not in self._allowed_domains:
-                raise UpstreamAuthError(
-                    f"Sign-in domain {domain!r} not in allowlist."
-                )
+                raise UpstreamAuthError(f"Sign-in domain {domain!r} not in allowlist.")
         return UpstreamUserInfo(
             sub=sub,
             email=email,
@@ -218,9 +216,7 @@ class OIDCUpstreamIdP:
             self._discovery = resp.json()
             for required in ("authorization_endpoint", "token_endpoint"):
                 if required not in self._discovery:
-                    raise UpstreamConfigError(
-                        f"Upstream discovery missing {required!r} at {url}."
-                    )
+                    raise UpstreamConfigError(f"Upstream discovery missing {required!r} at {url}.")
         return self._discovery
 
 

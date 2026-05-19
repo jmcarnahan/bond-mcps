@@ -26,6 +26,7 @@ Revision ID: 0002_oauth_authorization_server
 Revises: 0001_initial_schema
 Create Date: 2026-05-18
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa

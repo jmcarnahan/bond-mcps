@@ -24,7 +24,6 @@ exactly where the chain broke.
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -37,7 +36,6 @@ from starlette.testclient import TestClient
 from auth.alembic_config import upgrade_head
 from auth.db import reset_for_tests
 from auth.oauth_utils import generate_pkce_pair
-
 
 MCP_PUBLIC_URL = "http://github-mcp.test"
 AS_BASE_URL = "http://localhost:8001"
@@ -58,10 +56,14 @@ def keypair() -> tuple[str, str]:
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode()
-    pub = key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    pub = (
+        key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
     return priv, pub
 
 

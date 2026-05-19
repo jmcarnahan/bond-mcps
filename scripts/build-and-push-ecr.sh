@@ -56,6 +56,7 @@ services=(
 )
 
 cleanup_paths=()
+# shellcheck disable=SC2154  # `p` is bound inside the trap's own for-loop
 trap 'for p in "${cleanup_paths[@]}"; do rm -rf "$p"; done' EXIT
 
 for entry in "${services[@]}"; do

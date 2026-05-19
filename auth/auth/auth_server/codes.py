@@ -243,9 +243,7 @@ def consume_auth_code(
             raise AuthCodeError("redirect_uri does not match authorization code.")
         if row.code_challenge_method != "S256":
             raise AuthCodeError("Unsupported code_challenge_method.")
-        if not verify_pkce_s256(
-            code_verifier=code_verifier, code_challenge=row.code_challenge
-        ):
+        if not verify_pkce_s256(code_verifier=code_verifier, code_challenge=row.code_challenge):
             raise AuthCodeError("PKCE verification failed.")
 
         return IssuedAuthCode(
@@ -351,9 +349,9 @@ def _sweep_refresh_tokens(session, now: datetime) -> None:
     so a replayed token returns a useful 'already revoked' error rather
     than a generic 'unknown token'."""
     cutoff = now - timedelta(days=7)
-    session.query(OAuthRefreshToken).filter(
-        OAuthRefreshToken.expires_at < cutoff
-    ).delete(synchronize_session=False)
+    session.query(OAuthRefreshToken).filter(OAuthRefreshToken.expires_at < cutoff).delete(
+        synchronize_session=False
+    )
 
 
 def _aware(value: datetime) -> datetime:
@@ -368,13 +366,13 @@ def _aware(value: datetime) -> datetime:
 
 
 def _sweep_pending_auth(session, now: datetime) -> None:
-    session.query(OAuthPendingAuth).filter(
-        OAuthPendingAuth.expires_at < now
-    ).delete(synchronize_session=False)
+    session.query(OAuthPendingAuth).filter(OAuthPendingAuth.expires_at < now).delete(
+        synchronize_session=False
+    )
 
 
 def _sweep_auth_codes(session, now: datetime) -> None:
     cutoff = now - timedelta(minutes=10)
-    session.query(OAuthAuthCode).filter(
-        OAuthAuthCode.expires_at < cutoff
-    ).delete(synchronize_session=False)
+    session.query(OAuthAuthCode).filter(OAuthAuthCode.expires_at < cutoff).delete(
+        synchronize_session=False
+    )

@@ -38,9 +38,9 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPubl
 
 logger = logging.getLogger(__name__)
 
-ENV_PRIVATE_KEY_PEM   = "BOND_MCPS_AS_PRIVATE_KEY_PEM"
-ENV_PRIVATE_KEY_FILE  = "BOND_MCPS_AS_PRIVATE_KEY_FILE"
-ENV_PREVIOUS_KEY_PEM  = "BOND_MCPS_AS_PREVIOUS_KEY_PEM"
+ENV_PRIVATE_KEY_PEM = "BOND_MCPS_AS_PRIVATE_KEY_PEM"
+ENV_PRIVATE_KEY_FILE = "BOND_MCPS_AS_PRIVATE_KEY_FILE"
+ENV_PREVIOUS_KEY_PEM = "BOND_MCPS_AS_PREVIOUS_KEY_PEM"
 
 _DEFAULT_KEY_PATH = Path.home() / ".bond_mcps" / "jwt_signing_key.pem"
 

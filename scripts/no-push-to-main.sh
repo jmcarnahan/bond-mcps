@@ -10,7 +10,10 @@
 
 set -euo pipefail
 
-while read -r local_ref local_sha remote_ref remote_sha; do
+# git's pre-push hook protocol delivers four fields per line on stdin:
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+# Only `remote_ref` is interesting here; the rest are bound to `_`.
+while read -r _ _ remote_ref _; do
   case "$remote_ref" in
     refs/heads/main|refs/heads/master)
       echo "ERROR: direct push to ${remote_ref##*/} blocked." >&2

@@ -30,7 +30,6 @@ from typing import Callable
 from urllib.parse import urlencode
 
 import httpx
-from sqlalchemy import update
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
@@ -40,10 +39,8 @@ from auth.db.models import OAuthPendingAuth
 from auth.db.repository import build_default_resolver
 from auth.db.session import get_session
 from auth.oauth_utils import (
-    generate_opaque_secret,
     generate_pkce_pair,
     generate_state,
-    sha256_b64u,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,7 +183,9 @@ async def _start_connect(request: Request, config: ProviderConnectConfig) -> Res
     code_verifier, code_challenge = generate_pkce_pair()
     state = generate_state()
     redirect_uri = _redirect_uri(config)
-    _stash_pkce(state=state, user_key=consumed.user_key, code_verifier=code_verifier, provider=config.name)
+    _stash_pkce(
+        state=state, user_key=consumed.user_key, code_verifier=code_verifier, provider=config.name
+    )
 
     params = {
         "client_id": client_id,
@@ -404,6 +403,7 @@ def _default_token_shape(token_response: dict) -> dict:
     if exp := token_response.get("expires_in"):
         try:
             import time
+
             out["expires_at"] = time.time() + int(exp)
         except (TypeError, ValueError):
             pass

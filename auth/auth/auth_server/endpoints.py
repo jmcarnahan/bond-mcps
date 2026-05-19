@@ -29,7 +29,7 @@ from auth.auth_server.upstream import (
     UpstreamConfigError,
     get_upstream_idp,
 )
-from auth.oauth_utils import generate_pkce_pair, generate_state
+from auth.oauth_utils import generate_pkce_pair
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,9 @@ def run(host: str = "127.0.0.1", port: int = 8001) -> None:
     base_url = os.environ.get(ENV_AS_BASE_URL, "").strip()
     if not base_url:
         raise RuntimeError(f"{ENV_AS_BASE_URL} must be set.")
-    logger.info("bond-mcps Authorization Server listening on %s:%d (public %s)", host, port, base_url)
+    logger.info(
+        "bond-mcps Authorization Server listening on %s:%d (public %s)", host, port, base_url
+    )
     # Touch the signing key + DB once at boot so misconfig fails fast.
     load_signing_key()
     import uvicorn
@@ -268,9 +270,7 @@ async def oauth_upstream_callback(request: Request) -> Response:
 
     try:
         upstream = get_upstream_idp()
-        user_info = upstream.exchange_code(
-            code=code, code_verifier=pending.upstream_code_verifier
-        )
+        user_info = upstream.exchange_code(code=code, code_verifier=pending.upstream_code_verifier)
     except (UpstreamConfigError, UpstreamAuthError) as exc:
         logger.exception("Upstream code exchange failed")
         return RedirectResponse(
@@ -296,9 +296,7 @@ async def oauth_upstream_callback(request: Request) -> Response:
     params = {"code": auth_code}
     if pending.client_state:
         params["state"] = pending.client_state
-    return RedirectResponse(
-        f"{pending.redirect_uri}?{urlencode(params)}", status_code=302
-    )
+    return RedirectResponse(f"{pending.redirect_uri}?{urlencode(params)}", status_code=302)
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +312,10 @@ async def oauth_token(request: Request) -> Response:
     if grant_type == "refresh_token":
         return _handle_refresh_grant(form)
     return JSONResponse(
-        {"error": "unsupported_grant_type", "error_description": f"Unsupported grant_type={grant_type!r}."},
+        {
+            "error": "unsupported_grant_type",
+            "error_description": f"Unsupported grant_type={grant_type!r}.",
+        },
         status_code=400,
     )
 
@@ -326,7 +327,10 @@ def _handle_code_grant(form) -> Response:
     code_verifier = form.get("code_verifier")
     if not all([code, client_id, redirect_uri, code_verifier]):
         return JSONResponse(
-            {"error": "invalid_request", "error_description": "code, client_id, redirect_uri, code_verifier required."},
+            {
+                "error": "invalid_request",
+                "error_description": "code, client_id, redirect_uri, code_verifier required.",
+            },
             status_code=400,
         )
     try:
@@ -363,9 +367,7 @@ def _handle_refresh_grant(form) -> Response:
             status_code=400,
         )
     try:
-        issued = code_store.consume_refresh_token(
-            refresh_token, client_id=client_id
-        )
+        issued = code_store.consume_refresh_token(refresh_token, client_id=client_id)
     except code_store.AuthCodeError as exc:
         return JSONResponse(
             {"error": "invalid_grant", "error_description": str(exc)},
@@ -432,7 +434,10 @@ async def oauth_register(request: Request) -> Response:
         )
     if not isinstance(payload, dict):
         return JSONResponse(
-            {"error": "invalid_client_metadata", "error_description": "Body must be a JSON object."},
+            {
+                "error": "invalid_client_metadata",
+                "error_description": "Body must be a JSON object.",
+            },
             status_code=400,
         )
     try:
@@ -524,9 +529,7 @@ def _error_redirect_or_400(
             _client_redirect_with_error(redirect_uri, state, error=error, description=description),
             status_code=302,
         )
-    return JSONResponse(
-        {"error": error, "error_description": description}, status_code=400
-    )
+    return JSONResponse({"error": error, "error_description": description}, status_code=400)
 
 
 def _client_redirect_with_error(

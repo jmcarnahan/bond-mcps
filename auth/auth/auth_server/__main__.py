@@ -25,9 +25,7 @@ def main() -> None:
 
     from auth.auth_server import run
 
-    parser = argparse.ArgumentParser(
-        description="bond-mcps OAuth 2.1 Authorization Server"
-    )
+    parser = argparse.ArgumentParser(description="bond-mcps OAuth 2.1 Authorization Server")
     parser.add_argument(
         "--host",
         default=os.environ.get("BOND_MCPS_AS_HOST", "127.0.0.1"),

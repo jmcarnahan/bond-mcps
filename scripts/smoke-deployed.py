@@ -39,7 +39,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
-from typing import Callable, List
+from typing import List
 from urllib.parse import urljoin
 
 try:
@@ -118,10 +118,13 @@ def check_as(client: httpx.Client, as_url: str) -> Section:
     if meta.get("issuer", "").rstrip("/") == as_url.rstrip("/"):
         add(Result(True, f"AS issuer matches ({meta['issuer']})"))
     else:
-        add(Result(
-            False, "AS issuer mismatch",
-            f"metadata issuer={meta.get('issuer')!r} vs as-url={as_url!r}",
-        ))
+        add(
+            Result(
+                False,
+                "AS issuer mismatch",
+                f"metadata issuer={meta.get('issuer')!r} vs as-url={as_url!r}",
+            )
+        )
 
     grants = meta.get("grant_types_supported", [])
     if {"authorization_code", "refresh_token"}.issubset(grants):
@@ -132,18 +135,24 @@ def check_as(client: httpx.Client, as_url: str) -> Section:
     if meta.get("code_challenge_methods_supported") == ["S256"]:
         add(Result(True, "code_challenge_methods_supported = [S256]"))
     else:
-        add(Result(
-            False, "code_challenge_methods_supported",
-            f"got {meta.get('code_challenge_methods_supported')!r}",
-        ))
+        add(
+            Result(
+                False,
+                "code_challenge_methods_supported",
+                f"got {meta.get('code_challenge_methods_supported')!r}",
+            )
+        )
 
     if meta.get("token_endpoint_auth_methods_supported") == ["none"]:
         add(Result(True, "token_endpoint_auth_methods_supported = [none]"))
     else:
-        add(Result(
-            False, "token_endpoint_auth_methods_supported",
-            f"got {meta.get('token_endpoint_auth_methods_supported')!r}",
-        ))
+        add(
+            Result(
+                False,
+                "token_endpoint_auth_methods_supported",
+                f"got {meta.get('token_endpoint_auth_methods_supported')!r}",
+            )
+        )
 
     for ep in ("authorization_endpoint", "token_endpoint", "registration_endpoint", "jwks_uri"):
         if not isinstance(meta.get(ep), str) or not meta[ep].startswith(("http://", "https://")):
@@ -178,7 +187,9 @@ def check_as(client: httpx.Client, as_url: str) -> Section:
     }
     try:
         r = client.post(
-            meta["registration_endpoint"], json=dcr_payload, timeout=10,
+            meta["registration_endpoint"],
+            json=dcr_payload,
+            timeout=10,
         )
     except Exception as exc:
         add(Result(False, "POST /oauth/register (loopback)", str(exc)))
@@ -189,15 +200,21 @@ def check_as(client: httpx.Client, as_url: str) -> Section:
         if cid.startswith("bm-") and body.get("client_secret_expires_at") == 0:
             add(Result(True, f"DCR happy path → 201, client_id={cid}"))
         else:
-            add(Result(
-                False, "DCR response shape",
-                f"got {json.dumps(body)[:200]}",
-            ))
+            add(
+                Result(
+                    False,
+                    "DCR response shape",
+                    f"got {json.dumps(body)[:200]}",
+                )
+            )
     else:
-        add(Result(
-            False, "DCR happy path",
-            f"status={r.status_code} body={r.text[:200]}",
-        ))
+        add(
+            Result(
+                False,
+                "DCR happy path",
+                f"status={r.status_code} body={r.text[:200]}",
+            )
+        )
 
     # 5. DCR fail-closed — non-loopback HTTPS without allowlist entry
     dcr_evil = {
@@ -210,15 +227,20 @@ def check_as(client: httpx.Client, as_url: str) -> Section:
         add(Result(False, "POST /oauth/register (https unallowlisted)", str(exc)))
         return section
     if r.status_code == 400 and "ALLOWED_REDIRECT_HOSTS" in r.text:
-        add(Result(
-            True,
-            "DCR rejects non-loopback HTTPS by default (security guard)",
-        ))
+        add(
+            Result(
+                True,
+                "DCR rejects non-loopback HTTPS by default (security guard)",
+            )
+        )
     else:
-        add(Result(
-            False, "DCR fail-closed",
-            f"expected 400 + ALLOWED_REDIRECT_HOSTS hint; got {r.status_code}: {r.text[:200]}",
-        ))
+        add(
+            Result(
+                False,
+                "DCR fail-closed",
+                f"expected 400 + ALLOWED_REDIRECT_HOSTS hint; got {r.status_code}: {r.text[:200]}",
+            )
+        )
 
     return section
 
@@ -265,27 +287,36 @@ def check_mcp(client: httpx.Client, mcp_url: str, as_url: str) -> Section:
     if prm.get("resource", "").rstrip("/") == mcp_path_url.rstrip("/"):
         add(Result(True, f"PRM resource = {prm['resource']}"))
     else:
-        add(Result(
-            False, "PRM resource URI",
-            f"got {prm.get('resource')!r}; expected {mcp_path_url!r}",
-        ))
+        add(
+            Result(
+                False,
+                "PRM resource URI",
+                f"got {prm.get('resource')!r}; expected {mcp_path_url!r}",
+            )
+        )
 
     auth_servers = [s.rstrip("/") for s in (prm.get("authorization_servers") or [])]
     if as_url.rstrip("/") in auth_servers:
         add(Result(True, f"PRM authorization_servers includes {as_url}"))
     else:
-        add(Result(
-            False, "PRM authorization_servers",
-            f"got {auth_servers!r}; expected to contain {as_url!r}",
-        ))
+        add(
+            Result(
+                False,
+                "PRM authorization_servers",
+                f"got {auth_servers!r}; expected to contain {as_url!r}",
+            )
+        )
 
     if "header" in (prm.get("bearer_methods_supported") or []):
         add(Result(True, "PRM bearer_methods_supported includes 'header'"))
     else:
-        add(Result(
-            False, "PRM bearer_methods_supported",
-            f"got {prm.get('bearer_methods_supported')!r}",
-        ))
+        add(
+            Result(
+                False,
+                "PRM bearer_methods_supported",
+                f"got {prm.get('bearer_methods_supported')!r}",
+            )
+        )
 
     # 3. POST /mcp without Bearer → 401 with WWW-Authenticate Bearer ... resource_metadata=...
     init_body = {
@@ -300,7 +331,9 @@ def check_mcp(client: httpx.Client, mcp_url: str, as_url: str) -> Section:
     }
     try:
         r = client.post(
-            mcp_path_url, json=init_body, timeout=10,
+            mcp_path_url,
+            json=init_body,
+            timeout=10,
             headers={"Accept": "application/json, text/event-stream"},
         )
     except Exception as exc:
@@ -308,20 +341,26 @@ def check_mcp(client: httpx.Client, mcp_url: str, as_url: str) -> Section:
         return section
 
     if r.status_code != 401:
-        add(Result(
-            False, "POST /mcp without Bearer",
-            f"expected 401; got {r.status_code}",
-        ))
+        add(
+            Result(
+                False,
+                "POST /mcp without Bearer",
+                f"expected 401; got {r.status_code}",
+            )
+        )
         return section
 
     www_auth = r.headers.get("www-authenticate", "")
     if "Bearer" in www_auth and "resource_metadata=" in www_auth:
         add(Result(True, "401 includes WWW-Authenticate Bearer + resource_metadata"))
     else:
-        add(Result(
-            False, "WWW-Authenticate shape",
-            f"got {www_auth!r}",
-        ))
+        add(
+            Result(
+                False,
+                "WWW-Authenticate shape",
+                f"got {www_auth!r}",
+            )
+        )
 
     return section
 
@@ -337,15 +376,20 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--as-url", required=True,
+        "--as-url",
+        required=True,
         help="Authorization Server base URL, e.g. https://auth.mcps.example.com",
     )
     parser.add_argument(
-        "--mcp-url", action="append", default=[], dest="mcp_urls",
+        "--mcp-url",
+        action="append",
+        default=[],
+        dest="mcp_urls",
         help="MCP base URL (without /mcp suffix; or with). Pass once per MCP.",
     )
     parser.add_argument(
-        "--skip-tls-verify", action="store_true",
+        "--skip-tls-verify",
+        action="store_true",
         help="Disable TLS verification (for dev with self-signed certs).",
     )
     args = parser.parse_args(argv)
@@ -358,7 +402,9 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     transport_kwargs = {"verify": not args.skip_tls_verify}
-    with httpx.Client(follow_redirects=False, **transport_kwargs) as client:
+    # 30s timeout: smoke calls are short HTTP probes against a healthy stack;
+    # if a request hangs longer than that the service is broken anyway.
+    with httpx.Client(follow_redirects=False, timeout=30.0, **transport_kwargs) as client:
         sections: list[Section] = [check_as(client, args.as_url.rstrip("/"))]
         for mcp_url in args.mcp_urls:
             sections.append(check_mcp(client, mcp_url, args.as_url))
@@ -381,7 +427,9 @@ def main(argv: list[str] | None = None) -> int:
     print("  - WWW-Authenticate    → JWT mode env vars missing on the MCP pod")
     print("  - 401 from /healthz   → service down; check kubectl logs")
     print("  - TLS errors          → ACM cert validation pending; wait + retry")
-    print("  - 5xx everywhere      → SM secret unseeded; see docs/deployment/pre-deploy-checklist.md")
+    print(
+        "  - 5xx everywhere      → SM secret unseeded; see docs/deployment/pre-deploy-checklist.md"
+    )
     return 1
 
 
