@@ -169,9 +169,7 @@ def _persist(record: ClientRecord, *, replace: bool = False) -> None:
     with get_session() as session:
         existing = session.get(OAuthClient, record.client_id)
         if existing is not None and not replace:
-            raise ClientRegistrationError(
-                f"client_id collision: {record.client_id}"
-            )
+            raise ClientRegistrationError(f"client_id collision: {record.client_id}")
         if existing is not None:
             existing.client_name = record.client_name
             existing.redirect_uris = record.redirect_uris
@@ -228,12 +226,14 @@ def _ensure_allowed_redirect(uri: str) -> None:
     if parsed.scheme == "http":
         if host in {"localhost", "127.0.0.1", "::1"}:
             return
-        raise ClientRegistrationError(
-            f"Non-HTTPS redirect_uri only permitted on loopback: {uri}"
-        )
+        raise ClientRegistrationError(f"Non-HTTPS redirect_uri only permitted on loopback: {uri}")
     if parsed.scheme != "https":
         raise ClientRegistrationError(f"Unsupported redirect scheme: {parsed.scheme}")
-    allowed = {h.strip().lower() for h in os.environ.get(ENV_ALLOWED_REDIRECT_HOSTS, "").split(",") if h.strip()}
+    allowed = {
+        h.strip().lower()
+        for h in os.environ.get(ENV_ALLOWED_REDIRECT_HOSTS, "").split(",")
+        if h.strip()
+    }
     if not allowed:
         # Fail-closed: an unconfigured deployment must NOT accept arbitrary
         # HTTPS callbacks. Operator must explicitly opt in via

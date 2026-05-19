@@ -78,8 +78,7 @@ def consume_ticket(*, ticket: str, provider: str) -> ConsumedTicket:
             raise TicketError("Connect ticket expired.")
         if row.provider != provider:
             raise TicketError(
-                f"Ticket provider mismatch: bound to {row.provider!r}, "
-                f"used with {provider!r}."
+                f"Ticket provider mismatch: bound to {row.provider!r}, " f"used with {provider!r}."
             )
         return ConsumedTicket(user_key=row.user_key, provider=row.provider)
 

@@ -8,7 +8,6 @@ endpoints and basic DCR validation.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -22,7 +21,6 @@ from starlette.testclient import TestClient
 from auth.alembic_config import upgrade_head
 from auth.db import reset_for_tests
 from auth.oauth_utils import generate_pkce_pair
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -41,6 +39,14 @@ def signing_pem() -> str:
 
 @pytest.fixture
 def env(signing_pem, tmp_path, monkeypatch):
+    # Token encryption key — required because the AS encrypts pending-auth
+    # rows (PKCE code_verifier, upstream state) before persisting. Without
+    # this set, `encryption.encrypt()` raises TokenEncryptionError.
+    from auth import encryption
+
+    monkeypatch.setenv("BOND_MCPS_ENCRYPTION_KEY", encryption.generate_key())
+    monkeypatch.delenv("BOND_MCPS_ENCRYPTION_KEY_FILE", raising=False)
+
     monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{tmp_path / 'tokens.db'}")
     monkeypatch.setenv("BOND_MCPS_AS_PRIVATE_KEY_PEM", signing_pem)
     monkeypatch.setenv("BOND_MCPS_AS_BASE_URL", "http://localhost:8001")
@@ -49,7 +55,9 @@ def env(signing_pem, tmp_path, monkeypatch):
     monkeypatch.setenv("BOND_MCPS_UPSTREAM_ISSUER", "https://example.okta.com")
     monkeypatch.setenv("BOND_MCPS_UPSTREAM_CLIENT_ID", "upstream-cid")
     monkeypatch.setenv("BOND_MCPS_UPSTREAM_CLIENT_SECRET", "upstream-secret")
-    monkeypatch.setenv("BOND_MCPS_UPSTREAM_REDIRECT_URI", "http://localhost:8001/oauth/upstream/callback")
+    monkeypatch.setenv(
+        "BOND_MCPS_UPSTREAM_REDIRECT_URI", "http://localhost:8001/oauth/upstream/callback"
+    )
     reset_for_tests()
     upgrade_head()
     yield

@@ -11,6 +11,7 @@
 exclude_dirs = [".venv", "tests", "_shared_auth_pkg", "tmp"]
 skips = [
   "B101", # assert_used — fine in tests and asserts-for-invariants
+  "B105", # hardcoded_password_string — false positives on env-var NAME constants (e.g. "BOND_MCPS_AS_ACCESS_TOKEN_TTL_SECONDS")
   "B106", # hardcoded_password_funcarg — false positives on OAuth token endpoint URLs and env-var name strings
   "B107", # hardcoded_password_default
   "B110", # try/except/pass — we use this deliberately when swallowing best-effort cleanup errors
