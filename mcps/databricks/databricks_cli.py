@@ -26,18 +26,19 @@ import os
 import sys
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from auth import TokenStore
 from dbx import client as db
 from dbx.auth import AuthSource, get_auth_source
 from dbx.client import DatabricksError
-from dbx.errors import friendly_error, format_table, stringify
+from dbx.errors import format_table, friendly_error, stringify
 
+from auth import TokenStore
 
 _AUTH_LABELS = {
-    AuthSource.OAUTH:  "OAuth (DATABRICKS_CLIENT_ID)",
-    AuthSource.PAT:    "PAT (DATABRICKS_ACCESS_TOKEN)",
+    AuthSource.OAUTH: "OAuth (DATABRICKS_CLIENT_ID)",
+    AuthSource.PAT: "PAT (DATABRICKS_ACCESS_TOKEN)",
     AuthSource.BEARER: "backend Bearer header",
 }
 

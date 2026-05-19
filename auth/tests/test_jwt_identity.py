@@ -1,71 +1,45 @@
-"""Tests for auth.jwt_identity — JWT verification + user_key resolution."""
+"""Tests for auth.jwt_identity — the JWTVerifier/RemoteAuthProvider builders.
+
+We don't re-test JWT cryptography here — FastMCP's JWTVerifier owns that. We
+verify the env-var wiring: which keying source wins, how issuer/audience
+flow through, the CSV-list fan-out, and the on/off behaviour of
+``build_remote_auth_provider`` when JWT mode is disabled.
+"""
 
 from __future__ import annotations
 
 import os
-import time
 from unittest.mock import patch
 
-import jwt
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from auth.jwt_identity import (
     DEFAULT_ALGORITHM,
-    IdentityVerificationError,
+    DEFAULT_SUB_CLAIM,
     JWTConfigError,
+    build_remote_auth_provider,
+    build_verifier,
+    get_sub_claim,
     is_jwt_verification_enabled,
-    verify_identity_token,
+)
+
+JWT_ENV_KEYS = (
+    "BOND_MCPS_JWT_JWKS_URI",
+    "BOND_MCPS_JWT_PUBLIC_KEY",
+    "BOND_MCPS_JWT_ISSUER",
+    "BOND_MCPS_JWT_AUDIENCE",
+    "BOND_MCPS_JWT_ALGORITHM",
+    "BOND_MCPS_JWT_SUB_CLAIM",
+    "BOND_MCPS_AS_BASE_URL",
+    "BOND_MCPS_PUBLIC_URL",
 )
 
 
-# ---------------------------------------------------------------------------
-# Test fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def rsa_keypair() -> tuple[str, str]:
-    """Generate a fresh RSA-2048 keypair as PEM strings."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    private_pem = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode()
-    public_pem = key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
-    return private_pem, public_pem
-
-
-@pytest.fixture
-def signing_setup(rsa_keypair):
-    """Provide signing helpers + clean env for each test."""
-    private_pem, public_pem = rsa_keypair
-
-    def sign(payload: dict, *, algorithm: str = DEFAULT_ALGORITHM) -> str:
-        return jwt.encode(payload, private_pem, algorithm=algorithm)
-
-    # Each test starts with a clean BOND_MCPS_JWT_* env. patch.dict in tests
-    # will set what they need.
-    with patch.dict(
-        os.environ,
-        {
-            k: ""
-            for k in (
-                "BOND_MCPS_JWT_PUBLIC_KEY",
-                "BOND_MCPS_JWT_ISSUER",
-                "BOND_MCPS_JWT_AUDIENCE",
-                "BOND_MCPS_JWT_ALGORITHM",
-                "BOND_MCPS_JWT_SUB_CLAIM",
-            )
-        },
-        clear=False,
-    ):
-        yield sign, public_pem
+@pytest.fixture(autouse=True)
+def clean_env():
+    """Start each test with all JWT env vars cleared."""
+    with patch.dict(os.environ, {k: "" for k in JWT_ENV_KEYS}, clear=False):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -74,11 +48,16 @@ def signing_setup(rsa_keypair):
 
 
 class TestIsJWTVerificationEnabled:
-    def test_disabled_when_unset(self):
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": ""}):
-            assert is_jwt_verification_enabled() is False
+    def test_disabled_when_both_unset(self):
+        assert is_jwt_verification_enabled() is False
 
-    def test_enabled_when_set(self):
+    def test_enabled_when_jwks_uri_set(self):
+        with patch.dict(
+            os.environ, {"BOND_MCPS_JWT_JWKS_URI": "https://as.example.com/.well-known/jwks.json"}
+        ):
+            assert is_jwt_verification_enabled() is True
+
+    def test_enabled_when_public_key_set(self):
         with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----..."}):
             assert is_jwt_verification_enabled() is True
 
@@ -88,128 +67,151 @@ class TestIsJWTVerificationEnabled:
 
 
 # ---------------------------------------------------------------------------
-# verify_identity_token — happy path
+# get_sub_claim
 # ---------------------------------------------------------------------------
 
 
-class TestVerifyHappyPath:
-    def test_minimal_valid_token(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": "user-42", "exp": time.time() + 60})
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            assert verify_identity_token(token) == "user-42"
+class TestGetSubClaim:
+    def test_default(self):
+        assert get_sub_claim() == DEFAULT_SUB_CLAIM == "sub"
 
-    def test_issuer_and_audience_checked(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({
-            "sub": "user-42",
-            "iss": "bond-ai",
-            "aud": "bond-mcps",
-            "exp": time.time() + 60,
-        })
-        with patch.dict(os.environ, {
-            "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
-            "BOND_MCPS_JWT_ISSUER": "bond-ai",
-            "BOND_MCPS_JWT_AUDIENCE": "bond-mcps",
-        }):
-            assert verify_identity_token(token) == "user-42"
+    def test_override(self):
+        with patch.dict(os.environ, {"BOND_MCPS_JWT_SUB_CLAIM": "user_id"}):
+            assert get_sub_claim() == "user_id"
 
-    def test_custom_sub_claim(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"user_id": "u-9", "exp": time.time() + 60})
-        with patch.dict(os.environ, {
-            "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
-            "BOND_MCPS_JWT_SUB_CLAIM": "user_id",
-        }):
-            assert verify_identity_token(token) == "u-9"
+    def test_whitespace_override_falls_back_to_default(self):
+        with patch.dict(os.environ, {"BOND_MCPS_JWT_SUB_CLAIM": "   "}):
+            assert get_sub_claim() == "sub"
 
 
 # ---------------------------------------------------------------------------
-# verify_identity_token — failure modes
+# build_verifier — config validation
 # ---------------------------------------------------------------------------
 
 
-class TestVerifyFailures:
-    def test_unconfigured_raises_config_error(self, signing_setup):
-        sign, _ = signing_setup
-        token = sign({"sub": "u", "exp": time.time() + 60})
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": ""}):
-            with pytest.raises(JWTConfigError):
-                verify_identity_token(token)
+class TestBuildVerifier:
+    def test_missing_both_sources_raises(self):
+        with pytest.raises(JWTConfigError, match="must be set"):
+            build_verifier()
 
-    def test_invalid_signature(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": "u", "exp": time.time() + 60})
-        # Tamper with the signature segment
-        head, payload, _sig = token.split(".")
-        tampered = f"{head}.{payload}.AAAA"
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(tampered)
+    def test_both_sources_raises(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://as.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----...",
+            },
+        ):
+            with pytest.raises(JWTConfigError, match="Only one of"):
+                build_verifier()
 
-    def test_expired_token(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": "u", "exp": time.time() - 5})
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
+    def test_jwks_uri_path(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://as.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_ISSUER": "https://as.example.com",
+                "BOND_MCPS_JWT_AUDIENCE": "github-mcp",
+            },
+        ):
+            verifier = build_verifier()
+            # FastMCP exposes these as attributes on the verifier.
+            assert (
+                getattr(verifier, "jwks_uri", None)
+                == "https://as.example.com/.well-known/jwks.json"
+            )
+            assert getattr(verifier, "issuer", None) == "https://as.example.com"
+            assert getattr(verifier, "audience", None) == "github-mcp"
 
-    def test_missing_exp_claim_rejected(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": "u"})  # no exp
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
+    def test_public_key_path_default_algorithm(self):
+        pem = "-----BEGIN PUBLIC KEY-----\nstub\n-----END PUBLIC KEY-----"
+        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": pem}):
+            verifier = build_verifier()
+            assert getattr(verifier, "algorithm", None) == DEFAULT_ALGORITHM
 
-    def test_wrong_issuer(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": "u", "iss": "attacker", "exp": time.time() + 60})
-        with patch.dict(os.environ, {
-            "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
-            "BOND_MCPS_JWT_ISSUER": "bond-ai",
-        }):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
+    def test_explicit_algorithm(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_PUBLIC_KEY": "shared-secret",
+                "BOND_MCPS_JWT_ALGORITHM": "HS256",
+            },
+        ):
+            verifier = build_verifier()
+            assert getattr(verifier, "algorithm", None) == "HS256"
 
-    def test_wrong_audience(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": "u", "aud": "other", "exp": time.time() + 60})
-        with patch.dict(os.environ, {
-            "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
-            "BOND_MCPS_JWT_AUDIENCE": "bond-mcps",
-        }):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
+    def test_audience_csv_becomes_list(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_PUBLIC_KEY": "shared-secret",
+                "BOND_MCPS_JWT_ALGORITHM": "HS256",
+                "BOND_MCPS_JWT_AUDIENCE": "github-mcp, atlassian-mcp ,ms-graph-mcp",
+            },
+        ):
+            verifier = build_verifier()
+            audience = getattr(verifier, "audience", None)
+            assert audience == ["github-mcp", "atlassian-mcp", "ms-graph-mcp"]
 
-    def test_missing_sub_claim(self, signing_setup):
-        sign, public_pem = signing_setup
-        # Token has exp but no sub claim. PyJWT's options.require catches this.
-        token = sign({"foo": "bar", "exp": time.time() + 60})
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
+    def test_single_audience_stays_scalar(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_PUBLIC_KEY": "shared-secret",
+                "BOND_MCPS_JWT_ALGORITHM": "HS256",
+                "BOND_MCPS_JWT_AUDIENCE": "github-mcp",
+            },
+        ):
+            verifier = build_verifier()
+            assert getattr(verifier, "audience", None) == "github-mcp"
 
-    def test_empty_sub_claim_rejected(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": "   ", "exp": time.time() + 60})
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
 
-    def test_non_string_sub_claim_rejected(self, signing_setup):
-        sign, public_pem = signing_setup
-        token = sign({"sub": 12345, "exp": time.time() + 60})
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
+# ---------------------------------------------------------------------------
+# build_remote_auth_provider — on/off + required env
+# ---------------------------------------------------------------------------
 
-    def test_wrong_algorithm_rejected(self, signing_setup):
-        sign, public_pem = signing_setup
-        # Token signed with RS256 but config expects HS256 — won't match.
-        token = sign({"sub": "u", "exp": time.time() + 60})
-        with patch.dict(os.environ, {
-            "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
-            "BOND_MCPS_JWT_ALGORITHM": "HS256",
-        }):
-            with pytest.raises(IdentityVerificationError):
-                verify_identity_token(token)
+
+class TestBuildRemoteAuthProvider:
+    def test_returns_none_when_disabled(self):
+        assert build_remote_auth_provider("github") is None
+
+    def test_requires_as_base_url(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_PUBLIC_KEY": "shared-secret",
+                "BOND_MCPS_JWT_ALGORITHM": "HS256",
+                "BOND_MCPS_PUBLIC_URL": "https://github-mcp.example.com",
+            },
+        ):
+            with pytest.raises(JWTConfigError, match="BOND_MCPS_AS_BASE_URL"):
+                build_remote_auth_provider("github")
+
+    def test_requires_rs_public_url(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_PUBLIC_KEY": "shared-secret",
+                "BOND_MCPS_JWT_ALGORITHM": "HS256",
+                "BOND_MCPS_AS_BASE_URL": "https://auth.example.com",
+            },
+        ):
+            with pytest.raises(JWTConfigError, match="BOND_MCPS_PUBLIC_URL"):
+                build_remote_auth_provider("github")
+
+    def test_returns_remote_auth_provider_when_configured(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_PUBLIC_KEY": "shared-secret",
+                "BOND_MCPS_JWT_ALGORITHM": "HS256",
+                "BOND_MCPS_AS_BASE_URL": "https://auth.example.com",
+                "BOND_MCPS_PUBLIC_URL": "https://github-mcp.example.com",
+                "BOND_MCPS_JWT_ISSUER": "https://auth.example.com",
+                "BOND_MCPS_JWT_AUDIENCE": "github-mcp",
+            },
+        ):
+            from fastmcp.server.auth import RemoteAuthProvider
+
+            provider = build_remote_auth_provider("github")
+            assert isinstance(provider, RemoteAuthProvider)

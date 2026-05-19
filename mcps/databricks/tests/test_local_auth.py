@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import WORKSPACE_HOST, CLIENT_ID, CLIENT_SECRET
+from tests.conftest import CLIENT_ID, CLIENT_SECRET, WORKSPACE_HOST
 
 _TOKEN_STORE_PATCH = "auth.TokenStore"
 _PROXY_CLIENT_PATCH = "auth.OAuthProxyClient"
@@ -13,23 +13,37 @@ _PROXY_CLIENT_PATCH = "auth.OAuthProxyClient"
 class TestHostHelpers:
     def test_normalize_adds_scheme(self):
         from dbx.local_auth import _normalize_host
-        assert _normalize_host("dbc-abc.cloud.databricks.com") == "https://dbc-abc.cloud.databricks.com"
+
+        assert (
+            _normalize_host("dbc-abc.cloud.databricks.com")
+            == "https://dbc-abc.cloud.databricks.com"
+        )
 
     def test_normalize_strips_trailing_slash(self):
         from dbx.local_auth import _normalize_host
-        assert _normalize_host("https://dbc-abc.cloud.databricks.com/") == "https://dbc-abc.cloud.databricks.com"
+
+        assert (
+            _normalize_host("https://dbc-abc.cloud.databricks.com/")
+            == "https://dbc-abc.cloud.databricks.com"
+        )
 
     def test_normalize_preserves_existing_scheme(self):
         from dbx.local_auth import _normalize_host
+
         assert _normalize_host("http://localhost:8080") == "http://localhost:8080"
 
     def test_host_without_scheme(self):
         from dbx.local_auth import host_without_scheme
-        assert host_without_scheme("https://dbc-abc.cloud.databricks.com") == "dbc-abc.cloud.databricks.com"
+
+        assert (
+            host_without_scheme("https://dbc-abc.cloud.databricks.com")
+            == "dbc-abc.cloud.databricks.com"
+        )
         assert host_without_scheme("dbc-abc.cloud.databricks.com") == "dbc-abc.cloud.databricks.com"
 
     def test_auth_endpoints_use_host(self):
         from dbx.local_auth import _auth_endpoints
+
         a, t = _auth_endpoints("dbc-abc.cloud.databricks.com")
         assert a == "https://dbc-abc.cloud.databricks.com/oidc/v1/authorize"
         assert t == "https://dbc-abc.cloud.databricks.com/oidc/v1/token"
@@ -38,17 +52,20 @@ class TestHostHelpers:
 class TestGetLocalToken:
     def test_raises_without_client_id(self):
         from dbx.local_auth import get_local_token
+
         with pytest.raises(PermissionError, match="DATABRICKS_CLIENT_ID"):
             get_local_token()
 
     def test_raises_without_host(self, monkeypatch):
         from dbx.local_auth import get_local_token
+
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", CLIENT_ID)
         with pytest.raises(PermissionError, match="DATABRICKS_HOST"):
             get_local_token()
 
     def test_returns_cached_token(self, monkeypatch):
         from dbx.local_auth import get_local_token
+
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", CLIENT_ID)
         monkeypatch.setenv("DATABRICKS_HOST", WORKSPACE_HOST)
 
@@ -64,6 +81,7 @@ class TestGetLocalToken:
 
     def test_falls_back_to_browser_when_no_cache(self, monkeypatch):
         from dbx.local_auth import get_local_token
+
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", CLIENT_ID)
         monkeypatch.setenv("DATABRICKS_CLIENT_SECRET", CLIENT_SECRET)
         monkeypatch.setenv("DATABRICKS_HOST", WORKSPACE_HOST)
@@ -77,8 +95,10 @@ class TestGetLocalToken:
             "expires_in": 3600,
         }
 
-        with patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("dbx.local_auth._do_browser_auth", return_value=browser_result):
+        with (
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch("dbx.local_auth._do_browser_auth", return_value=browser_result),
+        ):
             tok = get_local_token()
 
         assert tok == "browser-tok"
@@ -89,20 +109,24 @@ class TestGetLocalToken:
 
     def test_raises_when_browser_auth_fails(self, monkeypatch):
         from dbx.local_auth import get_local_token
+
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", CLIENT_ID)
         monkeypatch.setenv("DATABRICKS_HOST", WORKSPACE_HOST)
 
         mock_store = MagicMock()
         mock_store.refresh_if_needed.return_value = None
 
-        with patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("dbx.local_auth._do_browser_auth", return_value=None):
+        with (
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch("dbx.local_auth._do_browser_auth", return_value=None),
+        ):
             with pytest.raises(PermissionError, match="authentication failed"):
                 get_local_token()
 
     def test_secret_optional(self, monkeypatch):
         """Public OAuth apps don't have a client_secret — flow must still work."""
         from dbx.local_auth import get_local_token
+
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", CLIENT_ID)
         monkeypatch.setenv("DATABRICKS_HOST", WORKSPACE_HOST)
         # No CLIENT_SECRET
@@ -110,9 +134,12 @@ class TestGetLocalToken:
         mock_store = MagicMock()
         mock_store.refresh_if_needed.return_value = None
 
-        with patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("dbx.local_auth._do_browser_auth",
-                   return_value={"access_token": "tok"}) as do_browser:
+        with (
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch(
+                "dbx.local_auth._do_browser_auth", return_value={"access_token": "tok"}
+            ) as do_browser,
+        ):
             get_local_token()
 
         # _do_browser_auth must receive None for client_secret in public-app mode
@@ -133,13 +160,15 @@ class TestDoBrowserAuth:
             "state": "test-state",
         }
 
-        with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
-             patch("dbx.local_auth.webbrowser"), \
-             patch("dbx.local_auth.secrets.token_urlsafe", return_value="test-state"), \
-             patch(
-                 "dbx.local_auth._exchange_code",
-                 return_value={"access_token": "new-tok", "refresh_token": "ref"},
-             ):
+        with (
+            patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy),
+            patch("dbx.local_auth.webbrowser"),
+            patch("dbx.local_auth.secrets.token_urlsafe", return_value="test-state"),
+            patch(
+                "dbx.local_auth._exchange_code",
+                return_value={"access_token": "new-tok", "refresh_token": "ref"},
+            ),
+        ):
             result = _do_browser_auth(CLIENT_ID, CLIENT_SECRET, WORKSPACE_HOST)
 
         assert result == {"access_token": "new-tok", "refresh_token": "ref"}
@@ -150,33 +179,41 @@ class TestDoBrowserAuth:
 
     def test_returns_none_when_proxy_not_running(self):
         from dbx.local_auth import _do_browser_auth
+
         with patch(_PROXY_CLIENT_PATCH) as MockProxy:
             MockProxy.return_value.check_proxy.side_effect = RuntimeError("not running")
             assert _do_browser_auth(CLIENT_ID, CLIENT_SECRET, WORKSPACE_HOST) is None
 
     def test_returns_none_on_timeout(self):
         from dbx.local_auth import _do_browser_auth
+
         mock_proxy = MagicMock()
         mock_proxy.get_redirect_uri.return_value = (
             "http://localhost:8000/connections/databricks/callback"
         )
         mock_proxy.wait_for_callback.side_effect = TimeoutError("timed out")
-        with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
-             patch("dbx.local_auth.webbrowser"):
+        with (
+            patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy),
+            patch("dbx.local_auth.webbrowser"),
+        ):
             assert _do_browser_auth(CLIENT_ID, CLIENT_SECRET, WORKSPACE_HOST) is None
 
     def test_state_mismatch_returns_none(self):
         from dbx.local_auth import _do_browser_auth
+
         mock_proxy = MagicMock()
         mock_proxy.get_redirect_uri.return_value = (
             "http://localhost:8000/connections/databricks/callback"
         )
         mock_proxy.wait_for_callback.return_value = {
-            "code": "x", "state": "DIFFERENT",
+            "code": "x",
+            "state": "DIFFERENT",
         }
-        with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
-             patch("dbx.local_auth.webbrowser"), \
-             patch("dbx.local_auth.secrets.token_urlsafe", return_value="expected-state"):
+        with (
+            patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy),
+            patch("dbx.local_auth.webbrowser"),
+            patch("dbx.local_auth.secrets.token_urlsafe", return_value="expected-state"),
+        ):
             result = _do_browser_auth(CLIENT_ID, CLIENT_SECRET, WORKSPACE_HOST)
         assert result is None
 
@@ -210,19 +247,28 @@ class TestExchangeCode:
         )
 
         _exchange_code(
-            CLIENT_ID, CLIENT_SECRET, "code-abc", "http://localhost/cb",
-            "verifier", WORKSPACE_HOST,
+            CLIENT_ID,
+            CLIENT_SECRET,
+            "code-abc",
+            "http://localhost/cb",
+            "verifier",
+            WORKSPACE_HOST,
         )
         body = route.calls.last.request.content.decode()
         assert f"client_secret={CLIENT_SECRET}" in body
 
     def test_returns_none_on_non_2xx(self, respx_mock):
         from dbx.local_auth import _exchange_code
+
         respx_mock.post(f"{WORKSPACE_HOST}/oidc/v1/token").respond(
             400, json={"error": "invalid_grant"}
         )
         result = _exchange_code(
-            CLIENT_ID, CLIENT_SECRET, "code", "http://localhost/cb",
-            "verifier", WORKSPACE_HOST,
+            CLIENT_ID,
+            CLIENT_SECRET,
+            "code",
+            "http://localhost/cb",
+            "verifier",
+            WORKSPACE_HOST,
         )
         assert result is None

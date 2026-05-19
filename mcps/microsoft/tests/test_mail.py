@@ -5,13 +5,15 @@ import json
 import httpx
 import pytest
 import respx
-
-from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient
 from ms_graph import mail
+from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient
 from ms_graph.mail import _detect_body_type
+
 from .conftest import (
-    SAMPLE_MESSAGE, SAMPLE_MESSAGES_RESPONSE, SAMPLE_USER_PROFILE,
     SAMPLE_MAILBOX_SETTINGS,
+    SAMPLE_MESSAGE,
+    SAMPLE_MESSAGES_RESPONSE,
+    SAMPLE_USER_PROFILE,
 )
 
 
@@ -40,9 +42,9 @@ class TestProfileSync:
             return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
         )
         respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
-            return_value=httpx.Response(403, json={
-                "error": {"code": "ErrorAccessDenied", "message": "Access denied"}
-            })
+            return_value=httpx.Response(
+                403, json={"error": {"code": "ErrorAccessDenied", "message": "Access denied"}}
+            )
         )
         with GraphClient("tok") as client:
             profile = mail.get_profile(client)
@@ -75,9 +77,9 @@ class TestProfileAsync:
             return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
         )
         respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
-            return_value=httpx.Response(403, json={
-                "error": {"code": "ErrorAccessDenied", "message": "Access denied"}
-            })
+            return_value=httpx.Response(
+                403, json={"error": {"code": "ErrorAccessDenied", "message": "Access denied"}}
+            )
         )
         async with AsyncGraphClient("tok") as client:
             profile = await mail.aget_profile(client)
@@ -125,9 +127,7 @@ class TestMailSync:
 
     @respx.mock
     def test_send_message(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -140,13 +140,13 @@ class TestMailSync:
         payload = json.loads(route.calls[0].request.content)
         assert payload["message"]["subject"] == "Hello"
         assert len(payload["message"]["toRecipients"]) == 1
-        assert payload["message"]["toRecipients"][0]["emailAddress"]["address"] == "alice@example.com"
+        assert (
+            payload["message"]["toRecipients"][0]["emailAddress"]["address"] == "alice@example.com"
+        )
 
     @respx.mock
     def test_send_message_with_cc(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -162,9 +162,7 @@ class TestMailSync:
 
     @respx.mock
     def test_send_message_with_from_address(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -179,9 +177,7 @@ class TestMailSync:
 
     @respx.mock
     def test_send_message_without_from_address(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -230,9 +226,7 @@ class TestMailAsync:
 
     @respx.mock
     async def test_asend_message(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -245,9 +239,7 @@ class TestMailAsync:
 
     @respx.mock
     async def test_asend_message_with_from_address(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -279,90 +271,84 @@ class TestMailAsync:
 _DETECT_CASES = [
     # --- Full HTML documents ---
     ("<html><body><h1>Title</h1><p>Content</p></body></html>", "HTML", "full HTML document"),
-    ("<!DOCTYPE html><html><body><p>x</p></body></html>",     "HTML", "doctype + html doc"),
-
+    ("<!DOCTYPE html><html><body><p>x</p></body></html>", "HTML", "doctype + html doc"),
     # --- Common inline fragments (the primary use case) ---
-    ("<p>Hello <strong>world</strong>!</p>",                   "HTML", "p + strong fragment"),
-    ("<strong>bold text</strong>",                             "HTML", "strong tag only"),
-    ("<em>italic</em>",                                        "HTML", "em tag"),
-    ("<b>bold</b> and <i>italic</i>",                          "HTML", "b and i tags"),
-    ('<a href="https://example.com">Click here</a>',           "HTML", "anchor with href"),
-    ('<a href="https://example.com">link</a> for info',        "HTML", "anchor in sentence"),
-    ("Line 1<br>Line 2",                                       "HTML", "br tag inline"),
-    ("Line 1<br/>Line 2",                                      "HTML", "br self-closing"),
-    ("Line 1<br />Line 2",                                     "HTML", "br with space"),
-    ("<p>Para 1</p><p>Para 2</p>",                             "HTML", "multiple paragraphs"),
-    ("<ul><li>Item 1</li><li>Item 2</li></ul>",                "HTML", "unordered list"),
-    ("<ol><li>First</li><li>Second</li></ol>",                 "HTML", "ordered list"),
-    ("<div>section</div>",                                     "HTML", "div block"),
-    ('<div class="foo">styled</div>',                          "HTML", "div with class attr"),
-    ('<img src="pic.png" alt="photo">',                        "HTML", "img tag"),
-    ("<table><tr><td>cell</td></tr></table>",                  "HTML", "table"),
-    ("<h1>Heading</h1><p>Body text.</p>",                      "HTML", "h1 + p"),
-    ("<h2>Sub</h2><p>text</p>",                                "HTML", "h2"),
-    ("Run <code>git pull</code> now",                          "HTML", "code inline"),
-    ("<pre>def foo():\n    pass</pre>",                        "HTML", "pre block"),
-    ("<blockquote>quoted text</blockquote>",                   "HTML", "blockquote"),
-    ("<hr>",                                                   "HTML", "hr divider"),
-    ("<span>inline</span>",                                    "HTML", "span"),
-    ("<del>removed</del> <ins>added</ins>",                    "HTML", "del + ins"),
-    ("<mark>highlighted</mark>",                               "HTML", "mark"),
-    ("<sup>1</sup> footnote",                                  "HTML", "sup"),
-    ("<sub>2</sub>",                                           "HTML", "sub"),
-    ("<small>fine print</small>",                              "HTML", "small"),
-
+    ("<p>Hello <strong>world</strong>!</p>", "HTML", "p + strong fragment"),
+    ("<strong>bold text</strong>", "HTML", "strong tag only"),
+    ("<em>italic</em>", "HTML", "em tag"),
+    ("<b>bold</b> and <i>italic</i>", "HTML", "b and i tags"),
+    ('<a href="https://example.com">Click here</a>', "HTML", "anchor with href"),
+    ('<a href="https://example.com">link</a> for info', "HTML", "anchor in sentence"),
+    ("Line 1<br>Line 2", "HTML", "br tag inline"),
+    ("Line 1<br/>Line 2", "HTML", "br self-closing"),
+    ("Line 1<br />Line 2", "HTML", "br with space"),
+    ("<p>Para 1</p><p>Para 2</p>", "HTML", "multiple paragraphs"),
+    ("<ul><li>Item 1</li><li>Item 2</li></ul>", "HTML", "unordered list"),
+    ("<ol><li>First</li><li>Second</li></ol>", "HTML", "ordered list"),
+    ("<div>section</div>", "HTML", "div block"),
+    ('<div class="foo">styled</div>', "HTML", "div with class attr"),
+    ('<img src="pic.png" alt="photo">', "HTML", "img tag"),
+    ("<table><tr><td>cell</td></tr></table>", "HTML", "table"),
+    ("<h1>Heading</h1><p>Body text.</p>", "HTML", "h1 + p"),
+    ("<h2>Sub</h2><p>text</p>", "HTML", "h2"),
+    ("Run <code>git pull</code> now", "HTML", "code inline"),
+    ("<pre>def foo():\n    pass</pre>", "HTML", "pre block"),
+    ("<blockquote>quoted text</blockquote>", "HTML", "blockquote"),
+    ("<hr>", "HTML", "hr divider"),
+    ("<span>inline</span>", "HTML", "span"),
+    ("<del>removed</del> <ins>added</ins>", "HTML", "del + ins"),
+    ("<mark>highlighted</mark>", "HTML", "mark"),
+    ("<sup>1</sup> footnote", "HTML", "sup"),
+    ("<sub>2</sub>", "HTML", "sub"),
+    ("<small>fine print</small>", "HTML", "small"),
     # --- Case insensitivity ---
-    ("<P>uppercase tag</P>",                                   "HTML", "uppercase P tag"),
-    ("<STRONG>BOLD</STRONG>",                                  "HTML", "uppercase STRONG"),
-    ("<Div>Mixed case</Div>",                                  "HTML", "mixed case Div"),
-    ("<A HREF='x'>link</A>",                                   "HTML", "uppercase A HREF"),
-    ("<BR>",                                                   "HTML", "uppercase BR"),
-
+    ("<P>uppercase tag</P>", "HTML", "uppercase P tag"),
+    ("<STRONG>BOLD</STRONG>", "HTML", "uppercase STRONG"),
+    ("<Div>Mixed case</Div>", "HTML", "mixed case Div"),
+    ("<A HREF='x'>link</A>", "HTML", "uppercase A HREF"),
+    ("<BR>", "HTML", "uppercase BR"),
     # --- Mixed content (HTML embedded in prose) ---
-    ("Please see <strong>Section 3</strong> for details.",     "HTML", "strong in sentence"),
-    ("Visit <a href='x'>our site</a> for more.",               "HTML", "anchor in prose"),
-    ("Hi,\n\nSee <p>this paragraph</p>\n\nThanks",            "HTML", "p in multiline body"),
-
+    ("Please see <strong>Section 3</strong> for details.", "HTML", "strong in sentence"),
+    ("Visit <a href='x'>our site</a> for more.", "HTML", "anchor in prose"),
+    ("Hi,\n\nSee <p>this paragraph</p>\n\nThanks", "HTML", "p in multiline body"),
     # --- Unicode content with HTML ---
-    ("<p>Héllo Wörld</p>",                                     "HTML", "unicode chars with p tag"),
-    ("<strong>日本語</strong>",                                 "HTML", "CJK with strong"),
-
+    ("<p>Héllo Wörld</p>", "HTML", "unicode chars with p tag"),
+    ("<strong>日本語</strong>", "HTML", "CJK with strong"),
     # --- Plain text: should never trigger ---
-    ("Hello world, plain text.",                               "Text", "simple plain text"),
-    ("",                                                       "Text", "empty string"),
-    ("   \n  \t  ",                                            "Text", "whitespace only"),
-    ("No markup here at all.",                                 "Text", "prose, no markup"),
-    ("Line 1\nLine 2\nLine 3",                                 "Text", "multiline plain"),
-
+    ("Hello world, plain text.", "Text", "simple plain text"),
+    ("", "Text", "empty string"),
+    ("   \n  \t  ", "Text", "whitespace only"),
+    ("No markup here at all.", "Text", "prose, no markup"),
+    ("Line 1\nLine 2\nLine 3", "Text", "multiline plain"),
     # --- False-positive traps: angle brackets that are NOT HTML ---
-    ("Dear <FirstName>,",                                      "Text", "angle-bracket placeholder name"),
-    ("Hello <Alice>!",                                         "Text", "angle-bracket name in greeting"),
-    ("Hi <username>, your token is <token>",                   "Text", "template-style placeholders"),
-    ("if x<y and z>w return true",                             "Text", "math comparison operators"),
-    ("if (x<y) { return; }",                                   "Text", "code: x<y comparison"),
-    ("price < $100 and discount > 10%",                        "Text", "less-than/greater-than in prose"),
-    ("5 < 10",                                                 "Text", "numeric comparison"),
-    ("Result should be <expected",                             "Text", "single unclosed angle"),
-    ("<foo>bar</foo>",                                         "Text", "made-up XML tag not in whitelist"),
-    ("<note>reminder</note>",                                  "Text", "XML-style note tag"),
-    ("<CustomTag>value</CustomTag>",                           "Text", "non-HTML custom element"),
-    ("<Vector<int>>",                                          "Text", "C++ template syntax"),
-
+    ("Dear <FirstName>,", "Text", "angle-bracket placeholder name"),
+    ("Hello <Alice>!", "Text", "angle-bracket name in greeting"),
+    ("Hi <username>, your token is <token>", "Text", "template-style placeholders"),
+    ("if x<y and z>w return true", "Text", "math comparison operators"),
+    ("if (x<y) { return; }", "Text", "code: x<y comparison"),
+    ("price < $100 and discount > 10%", "Text", "less-than/greater-than in prose"),
+    ("5 < 10", "Text", "numeric comparison"),
+    ("Result should be <expected", "Text", "single unclosed angle"),
+    ("<foo>bar</foo>", "Text", "made-up XML tag not in whitelist"),
+    ("<note>reminder</note>", "Text", "XML-style note tag"),
+    ("<CustomTag>value</CustomTag>", "Text", "non-HTML custom element"),
+    ("<Vector<int>>", "Text", "C++ template syntax"),
     # --- Markdown (must stay Text) ---
-    ("**bold** and *italic*",                                  "Text", "markdown bold/italic"),
-    ("# Heading\n\nParagraph text.",                           "Text", "markdown heading"),
-    ("[click here](https://example.com)",                      "Text", "markdown link"),
-    ("Visit https://example.com for more.",                    "Text", "plain URL"),
-    ("> quoted block",                                         "Text", "markdown blockquote"),
-    ("- item one\n- item two",                                 "Text", "markdown list"),
-
+    ("**bold** and *italic*", "Text", "markdown bold/italic"),
+    ("# Heading\n\nParagraph text.", "Text", "markdown heading"),
+    ("[click here](https://example.com)", "Text", "markdown link"),
+    ("Visit https://example.com for more.", "Text", "plain URL"),
+    ("> quoted block", "Text", "markdown blockquote"),
+    ("- item one\n- item two", "Text", "markdown list"),
     # --- Large bodies ---
-    ("x" * 100_000,                                            "Text", "100k char plain text"),
-    ("<p>" + "x" * 100_000 + "</p>",                           "HTML", "100k char wrapped in p"),
+    ("x" * 100_000, "Text", "100k char plain text"),
+    ("<p>" + "x" * 100_000 + "</p>", "HTML", "100k char wrapped in p"),
 ]
 
 
-@pytest.mark.parametrize("body,expected,description", _DETECT_CASES, ids=[c[2] for c in _DETECT_CASES])
+@pytest.mark.parametrize(
+    "body,expected,description", _DETECT_CASES, ids=[c[2] for c in _DETECT_CASES]
+)
 def test_detect_body_type(body, expected, description):
     assert _detect_body_type(body) == expected
 
@@ -371,14 +357,13 @@ def test_detect_body_type(body, expected, description):
 # body_type parameter — sync send_message
 # ---------------------------------------------------------------------------
 
+
 class TestBodyTypeParameterSync:
     """Tests for body_type parameter in sync send_message."""
 
     @respx.mock
     def test_auto_detects_html_fragment(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -393,9 +378,7 @@ class TestBodyTypeParameterSync:
     @respx.mock
     def test_auto_detects_anchor_link(self):
         """Regression: anchor tags must be detected so links render as hyperlinks."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -409,9 +392,7 @@ class TestBodyTypeParameterSync:
 
     @respx.mock
     def test_auto_detects_plain_text(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -426,9 +407,7 @@ class TestBodyTypeParameterSync:
     @respx.mock
     def test_auto_placeholder_not_mistaken_for_html(self):
         """'Dear <FirstName>,' must stay Text — not be mis-sent as HTML which would strip the name."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -443,9 +422,7 @@ class TestBodyTypeParameterSync:
     @respx.mock
     def test_auto_math_comparison_stays_text(self):
         """Bodies with < > as comparison operators must not be mis-classified as HTML."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -459,9 +436,7 @@ class TestBodyTypeParameterSync:
 
     @respx.mock
     def test_explicit_html_overrides_plain_body(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -476,9 +451,7 @@ class TestBodyTypeParameterSync:
 
     @respx.mock
     def test_explicit_text_overrides_html_body(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         with GraphClient("tok") as client:
             mail.send_message(
                 client,
@@ -518,14 +491,13 @@ class TestBodyTypeParameterSync:
 # body_type parameter — async asend_message
 # ---------------------------------------------------------------------------
 
+
 class TestBodyTypeParameterAsync:
     """Tests for body_type parameter in async asend_message."""
 
     @respx.mock
     async def test_auto_detects_html_fragment(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -540,9 +512,7 @@ class TestBodyTypeParameterAsync:
     @respx.mock
     async def test_auto_detects_anchor_link(self):
         """Regression: anchor tags must be detected so links render as hyperlinks."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -556,9 +526,7 @@ class TestBodyTypeParameterAsync:
 
     @respx.mock
     async def test_auto_detects_plain_text(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -573,9 +541,7 @@ class TestBodyTypeParameterAsync:
     @respx.mock
     async def test_auto_placeholder_not_mistaken_for_html(self):
         """'Dear <FirstName>,' must stay Text."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -589,9 +555,7 @@ class TestBodyTypeParameterAsync:
 
     @respx.mock
     async def test_explicit_html_overrides_plain_body(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -606,9 +570,7 @@ class TestBodyTypeParameterAsync:
 
     @respx.mock
     async def test_explicit_text_overrides_html_body(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,

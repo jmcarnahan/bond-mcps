@@ -5,15 +5,16 @@ Revises:
 Create Date: 2026-05-17
 
 """
-from typing import Sequence, Union
+
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0001_initial_schema"
-down_revision: Union[str, None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -29,12 +30,16 @@ def upgrade() -> None:
         sa.Column("extra_metadata", sa.JSON(), nullable=False),
         sa.Column("key_version", sa.Integer(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.PrimaryKeyConstraint("user_key", "provider"),
     )
@@ -44,12 +49,16 @@ def upgrade() -> None:
         sa.Column("cache_data_encrypted", sa.LargeBinary(), nullable=False),
         sa.Column("key_version", sa.Integer(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.PrimaryKeyConstraint("user_key"),
     )

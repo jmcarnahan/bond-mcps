@@ -3,24 +3,26 @@
 import httpx
 import pytest
 import respx
-
 from atlassian.atlassian_client import (
-    AsyncAtlassianClient, AtlassianClient, AtlassianError,
+    AsyncAtlassianClient,
+    AtlassianClient,
+    AtlassianError,
 )
+
 from .conftest import (
     CLOUD_ID,
     JIRA_BASE,
-    SAMPLE_PROJECTS_RESPONSE,
-    SAMPLE_SEARCH_RESPONSE,
+    SAMPLE_COMMENTS_RESPONSE,
     SAMPLE_COUNT_RESPONSE,
+    SAMPLE_CREATED_ISSUE,
+    SAMPLE_CREATED_VERSION,
     SAMPLE_ISSUE,
     SAMPLE_ISSUE_2,
-    SAMPLE_COMMENTS_RESPONSE,
-    SAMPLE_CREATED_ISSUE,
+    SAMPLE_PROJECTS_RESPONSE,
+    SAMPLE_SEARCH_RESPONSE,
     SAMPLE_TRANSITIONS,
-    SAMPLE_VERSIONS_RESPONSE,
-    SAMPLE_CREATED_VERSION,
     SAMPLE_USERS_RESPONSE,
+    SAMPLE_VERSIONS_RESPONSE,
 )
 
 TOKEN = "test-token"
@@ -33,6 +35,7 @@ class TestListProjects:
             return_value=httpx.Response(200, json=SAMPLE_PROJECTS_RESPONSE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await jira.alist_projects(client)
         assert len(result) == 2
@@ -44,6 +47,7 @@ class TestListProjects:
             return_value=httpx.Response(200, json={"values": [], "total": 0})
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await jira.alist_projects(client)
         assert result == []
@@ -56,6 +60,7 @@ class TestSearchIssues:
             return_value=httpx.Response(200, json=SAMPLE_SEARCH_RESPONSE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             data = await jira.asearch_issues(client, jql="project = PROJ")
         issues = data["issues"]
@@ -68,6 +73,7 @@ class TestSearchIssues:
             return_value=httpx.Response(200, json={"issues": [], "isLast": True})
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             data = await jira.asearch_issues(client, jql="project = NONE")
         assert data["issues"] == []
@@ -80,6 +86,7 @@ class TestCountIssues:
             return_value=httpx.Response(200, json=SAMPLE_COUNT_RESPONSE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             count = await jira.acount_issues(client, jql="project = PROJ")
         assert count == 42
@@ -92,6 +99,7 @@ class TestGetIssue:
             return_value=httpx.Response(200, json=SAMPLE_ISSUE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             issue = await jira.aget_issue(client, "PROJ-42")
         assert issue["key"] == "PROJ-42"
@@ -105,6 +113,7 @@ class TestGetIssueComments:
             return_value=httpx.Response(200, json=SAMPLE_COMMENTS_RESPONSE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             comments = await jira.aget_issue_comments(client, "PROJ-42")
         assert len(comments) == 2
@@ -118,10 +127,9 @@ class TestCreateIssue:
             return_value=httpx.Response(201, json=SAMPLE_CREATED_ISSUE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
-            result = await jira.acreate_issue(
-                client, project_key="PROJ", summary="New bug"
-            )
+            result = await jira.acreate_issue(client, project_key="PROJ", summary="New bug")
         assert result["key"] == "PROJ-100"
         # Verify the request payload
         body = route.calls[0].request.content
@@ -134,6 +142,7 @@ class TestCreateIssue:
             return_value=httpx.Response(201, json=SAMPLE_CREATED_ISSUE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await jira.acreate_issue(
                 client,
@@ -150,10 +159,9 @@ class TestCreateIssue:
 class TestUpdateIssue:
     @respx.mock
     async def test_update_issue(self):
-        respx.put(f"{JIRA_BASE}/issue/PROJ-42").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.put(f"{JIRA_BASE}/issue/PROJ-42").mock(return_value=httpx.Response(204))
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             # Should not raise — 204 is success
             await jira.aupdate_issue(client, "PROJ-42", summary="Updated title")
@@ -163,10 +171,12 @@ class TestAddComment:
     @respx.mock
     async def test_add_comment(self):
         from .conftest import SAMPLE_CREATED_COMMENT
+
         respx.post(f"{JIRA_BASE}/issue/PROJ-42/comment").mock(
             return_value=httpx.Response(201, json=SAMPLE_CREATED_COMMENT)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await jira.aadd_issue_comment(client, "PROJ-42", "Great work!")
         assert result["id"] == "10200"
@@ -178,10 +188,9 @@ class TestTransitionIssue:
         respx.get(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
             return_value=httpx.Response(200, json=SAMPLE_TRANSITIONS)
         )
-        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(return_value=httpx.Response(204))
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             matched = await jira.atransition_issue(client, "PROJ-42", "Done")
         assert matched == "Done"
@@ -191,10 +200,9 @@ class TestTransitionIssue:
         respx.get(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
             return_value=httpx.Response(200, json=SAMPLE_TRANSITIONS)
         )
-        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(return_value=httpx.Response(204))
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             matched = await jira.atransition_issue(client, "PROJ-42", "in progress")
         assert matched == "In Progress"
@@ -205,6 +213,7 @@ class TestTransitionIssue:
             return_value=httpx.Response(200, json=SAMPLE_TRANSITIONS)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             with pytest.raises(AtlassianError, match="not available"):
                 await jira.atransition_issue(client, "PROJ-42", "Invalid Status")
@@ -214,17 +223,22 @@ class TestTransitionIssue:
 # search_all_issues pagination
 # ---------------------------------------------------------------------------
 
+
 class TestSearchAllIssues:
     @respx.mock
     async def test_single_page(self):
         """When isLast=True on first page, returns those issues only."""
         respx.get(f"{JIRA_BASE}/search/jql").mock(
-            return_value=httpx.Response(200, json={
-                "issues": [SAMPLE_ISSUE],
-                "isLast": True,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "issues": [SAMPLE_ISSUE],
+                    "isLast": True,
+                },
+            )
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             issues = await jira.asearch_all_issues(client, "project = PROJ")
         assert len(issues) == 1
@@ -249,6 +263,7 @@ class TestSearchAllIssues:
             ]
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             issues = await jira.asearch_all_issues(client, "project = PROJ")
         assert len(issues) == 2
@@ -263,13 +278,14 @@ class TestSearchAllIssues:
             "isLast": False,
             "nextPageToken": "more",
         }
-        respx.get(f"{JIRA_BASE}/search/jql").mock(
-            return_value=httpx.Response(200, json=page1)
-        )
+        respx.get(f"{JIRA_BASE}/search/jql").mock(return_value=httpx.Response(200, json=page1))
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             issues = await jira.asearch_all_issues(
-                client, "project = PROJ", max_total=1,
+                client,
+                "project = PROJ",
+                max_total=1,
             )
         assert len(issues) == 1
 
@@ -281,10 +297,9 @@ class TestSearchAllIssues:
             "isLast": False,
             # No nextPageToken
         }
-        respx.get(f"{JIRA_BASE}/search/jql").mock(
-            return_value=httpx.Response(200, json=page1)
-        )
+        respx.get(f"{JIRA_BASE}/search/jql").mock(return_value=httpx.Response(200, json=page1))
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             issues = await jira.asearch_all_issues(client, "project = PROJ")
         assert len(issues) == 1
@@ -297,10 +312,9 @@ class TestSearchAllIssues:
             "isLast": False,
             "nextPageToken": "shouldnotfollow",
         }
-        respx.get(f"{JIRA_BASE}/search/jql").mock(
-            return_value=httpx.Response(200, json=page1)
-        )
+        respx.get(f"{JIRA_BASE}/search/jql").mock(return_value=httpx.Response(200, json=page1))
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             issues = await jira.asearch_all_issues(client, "project = PROJ")
         assert len(issues) == 0
@@ -310,6 +324,7 @@ class TestSearchAllIssues:
 # Project Versions
 # ---------------------------------------------------------------------------
 
+
 class TestGetProjectVersions:
     @respx.mock
     async def test_get_all_versions(self):
@@ -317,6 +332,7 @@ class TestGetProjectVersions:
             return_value=httpx.Response(200, json=SAMPLE_VERSIONS_RESPONSE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             versions = await jira.aget_project_versions(client, "PROJ")
         assert len(versions) == 2
@@ -326,9 +342,12 @@ class TestGetProjectVersions:
     @respx.mock
     async def test_get_versions_status_filter(self):
         route = respx.get(f"{JIRA_BASE}/project/PROJ/version").mock(
-            return_value=httpx.Response(200, json={"values": [SAMPLE_VERSIONS_RESPONSE["values"][0]], "isLast": True})
+            return_value=httpx.Response(
+                200, json={"values": [SAMPLE_VERSIONS_RESPONSE["values"][0]], "isLast": True}
+            )
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             versions = await jira.aget_project_versions(client, "PROJ", status="released")
         assert len(versions) == 1
@@ -342,6 +361,7 @@ class TestCreateVersion:
             return_value=httpx.Response(201, json=SAMPLE_CREATED_VERSION)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await jira.acreate_version(
                 client,
@@ -361,6 +381,7 @@ class TestCreateVersion:
 # Search Users
 # ---------------------------------------------------------------------------
 
+
 class TestSearchUsers:
     @respx.mock
     async def test_search_users(self):
@@ -368,6 +389,7 @@ class TestSearchUsers:
             return_value=httpx.Response(200, json=SAMPLE_USERS_RESPONSE)
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             users = await jira.asearch_users(client, "alice")
         assert len(users) == 2
@@ -376,10 +398,9 @@ class TestSearchUsers:
 
     @respx.mock
     async def test_search_users_empty(self):
-        respx.get(f"{JIRA_BASE}/user/search").mock(
-            return_value=httpx.Response(200, json=[])
-        )
+        respx.get(f"{JIRA_BASE}/user/search").mock(return_value=httpx.Response(200, json=[]))
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             users = await jira.asearch_users(client, "nobody")
         assert users == []
@@ -389,9 +410,11 @@ class TestSearchUsers:
 # ADF mention support
 # ---------------------------------------------------------------------------
 
+
 class TestTextToAdfMentions:
     def test_plain_text_unchanged(self):
         from atlassian.jira import _text_to_adf
+
         adf = _text_to_adf("Hello world")
         content = adf["content"][0]["content"]
         assert len(content) == 1
@@ -400,6 +423,7 @@ class TestTextToAdfMentions:
 
     def test_mention_produces_mention_node(self):
         from atlassian.jira import _text_to_adf
+
         adf = _text_to_adf("Hi @{abc123} please review")
         content = adf["content"][0]["content"]
         assert len(content) == 3
@@ -410,6 +434,7 @@ class TestTextToAdfMentions:
 
     def test_multiple_mentions(self):
         from atlassian.jira import _text_to_adf
+
         adf = _text_to_adf("@{user1} and @{user2}")
         content = adf["content"][0]["content"]
         mention_nodes = [c for c in content if c["type"] == "mention"]
@@ -419,6 +444,7 @@ class TestTextToAdfMentions:
 
     def test_mention_only(self):
         from atlassian.jira import _text_to_adf
+
         adf = _text_to_adf("@{onlyuser}")
         content = adf["content"][0]["content"]
         assert len(content) == 1
@@ -430,6 +456,7 @@ class TestTextToAdfMentions:
 # Sync client operations (M3/M9 from review)
 # ---------------------------------------------------------------------------
 
+
 class TestSyncOperations:
     @respx.mock
     def test_sync_list_projects(self):
@@ -437,6 +464,7 @@ class TestSyncOperations:
             return_value=httpx.Response(200, json=SAMPLE_PROJECTS_RESPONSE)
         )
         from atlassian import jira
+
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             result = jira.list_projects(client)
         assert len(result) == 2
@@ -447,6 +475,7 @@ class TestSyncOperations:
             return_value=httpx.Response(200, json=SAMPLE_SEARCH_RESPONSE)
         )
         from atlassian import jira
+
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             data = jira.search_issues(client, "project = PROJ")
         assert len(data["issues"]) == 2
@@ -457,6 +486,7 @@ class TestSyncOperations:
             return_value=httpx.Response(200, json=SAMPLE_COUNT_RESPONSE)
         )
         from atlassian import jira
+
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             count = jira.count_issues(client, "project = PROJ")
         assert count == 42
@@ -480,6 +510,7 @@ class TestSyncOperations:
             ]
         )
         from atlassian import jira
+
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             issues = jira.search_all_issues(client, "project = PROJ")
         assert len(issues) == 2
@@ -490,6 +521,7 @@ class TestSyncOperations:
             return_value=httpx.Response(200, json=SAMPLE_ISSUE)
         )
         from atlassian import jira
+
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             issue = jira.get_issue(client, "PROJ-42")
         assert issue["key"] == "PROJ-42"
@@ -500,6 +532,7 @@ class TestSyncOperations:
             return_value=httpx.Response(201, json=SAMPLE_CREATED_ISSUE)
         )
         from atlassian import jira
+
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             result = jira.create_issue(client, "PROJ", "New bug")
         assert result["key"] == "PROJ-100"
@@ -509,10 +542,9 @@ class TestSyncOperations:
         respx.get(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
             return_value=httpx.Response(200, json=SAMPLE_TRANSITIONS)
         )
-        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(return_value=httpx.Response(204))
         from atlassian import jira
+
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             matched = jira.transition_issue(client, "PROJ-42", "Done")
         assert matched == "Done"

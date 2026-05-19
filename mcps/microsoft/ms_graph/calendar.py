@@ -5,10 +5,10 @@ All functions accept a GraphClient or AsyncGraphClient and return parsed dicts.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import quote
 
-from .graph_client import GraphClient, AsyncGraphClient
+from .graph_client import AsyncGraphClient, GraphClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +22,13 @@ def _safe_id(value: str) -> str:
 # Synchronous
 # ---------------------------------------------------------------------------
 
+
 def list_calendar_events(
     client: GraphClient,
     start_datetime: str,
     end_datetime: str,
     top: int = 25,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List calendar events in a date range using calendarView."""
     data = client.get(
         "/me/calendarView",
@@ -45,7 +46,7 @@ def list_calendar_events(
 def get_calendar_event(
     client: GraphClient,
     event_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get full details of a calendar event by ID."""
     return client.get(f"/me/events/{_safe_id(event_id)}")
 
@@ -58,13 +59,13 @@ def create_calendar_event(
     end_datetime: str,
     end_timezone: str,
     body: str = "",
-    attendees: Optional[List[str]] = None,
+    attendees: list[str] | None = None,
     location: str = "",
     is_online_meeting: bool = False,
     is_all_day: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a calendar event."""
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "subject": subject,
         "start": {"dateTime": start_datetime, "timeZone": start_timezone},
         "end": {"dateTime": end_datetime, "timeZone": end_timezone},
@@ -73,8 +74,7 @@ def create_calendar_event(
         payload["body"] = {"contentType": "Text", "content": body}
     if attendees:
         payload["attendees"] = [
-            {"emailAddress": {"address": addr}, "type": "required"}
-            for addr in attendees
+            {"emailAddress": {"address": addr}, "type": "required"} for addr in attendees
         ]
     if location:
         payload["location"] = {"displayName": location}
@@ -88,13 +88,13 @@ def create_calendar_event(
 
 def check_availability(
     client: GraphClient,
-    schedules: List[str],
+    schedules: list[str],
     start_datetime: str,
     start_timezone: str,
     end_datetime: str,
     end_timezone: str,
     availability_view_interval: int = 30,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Check free/busy information for a list of users."""
     payload = {
         "schedules": schedules,
@@ -109,12 +109,13 @@ def check_availability(
 # Asynchronous
 # ---------------------------------------------------------------------------
 
+
 async def alist_calendar_events(
     client: AsyncGraphClient,
     start_datetime: str,
     end_datetime: str,
     top: int = 25,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List calendar events in a date range using calendarView (async)."""
     data = await client.get(
         "/me/calendarView",
@@ -132,7 +133,7 @@ async def alist_calendar_events(
 async def aget_calendar_event(
     client: AsyncGraphClient,
     event_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get full details of a calendar event by ID (async)."""
     return await client.get(f"/me/events/{_safe_id(event_id)}")
 
@@ -145,13 +146,13 @@ async def acreate_calendar_event(
     end_datetime: str,
     end_timezone: str,
     body: str = "",
-    attendees: Optional[List[str]] = None,
+    attendees: list[str] | None = None,
     location: str = "",
     is_online_meeting: bool = False,
     is_all_day: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a calendar event (async)."""
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "subject": subject,
         "start": {"dateTime": start_datetime, "timeZone": start_timezone},
         "end": {"dateTime": end_datetime, "timeZone": end_timezone},
@@ -160,8 +161,7 @@ async def acreate_calendar_event(
         payload["body"] = {"contentType": "Text", "content": body}
     if attendees:
         payload["attendees"] = [
-            {"emailAddress": {"address": addr}, "type": "required"}
-            for addr in attendees
+            {"emailAddress": {"address": addr}, "type": "required"} for addr in attendees
         ]
     if location:
         payload["location"] = {"displayName": location}
@@ -175,13 +175,13 @@ async def acreate_calendar_event(
 
 async def acheck_availability(
     client: AsyncGraphClient,
-    schedules: List[str],
+    schedules: list[str],
     start_datetime: str,
     start_timezone: str,
     end_datetime: str,
     end_timezone: str,
     availability_view_interval: int = 30,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Check free/busy information for a list of users (async)."""
     payload = {
         "schedules": schedules,

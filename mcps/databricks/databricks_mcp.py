@@ -39,8 +39,10 @@ from starlette.responses import JSONResponse
 load_dotenv(Path(__file__).parent / ".env")
 
 from dbx import client as db
-from dbx.client import DatabricksError, MAX_FETCH_ROWS
-from dbx.errors import friendly_error, format_table, stringify
+from dbx.client import MAX_FETCH_ROWS, DatabricksError
+from dbx.errors import format_table, friendly_error, stringify
+
+from auth.jwt_identity import build_remote_auth_provider
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ async def _lifespan(app):
     is configured — PAT and backend modes do not need the proxy."""
     if os.environ.get("DATABRICKS_CLIENT_ID"):
         from auth import OAuthProxyClient
+
         proxy = OAuthProxyClient()
         try:
             proxy.check_proxy()
@@ -76,7 +79,9 @@ async def _lifespan(app):
     yield
 
 
-mcp = FastMCP("Databricks MCP Server", lifespan=_lifespan)
+mcp = FastMCP(
+    "Databricks MCP Server", lifespan=_lifespan, auth=build_remote_auth_provider("databricks")
+)
 
 
 # Liveness/readiness probe. Returns 200 immediately if the ASGI app is up.
@@ -140,9 +145,7 @@ def _format_result(result: dict, query: str) -> str:
         return f"No rows returned.\n\nColumns: {', '.join(columns)}"
 
     preview = rows[:_MAX_PREVIEW_ROWS]
-    table = format_table(
-        columns, [[stringify(v) for v in row] for row in preview]
-    )
+    table = format_table(columns, [[stringify(v) for v in row] for row in preview])
 
     marker = "+" if truncated else ""
     if total > _MAX_PREVIEW_ROWS:
@@ -203,9 +206,7 @@ async def list_schemas(catalog: str) -> str:
         return err
     if not schemas:
         return f"No schemas visible in catalog `{catalog}`."
-    return f"{len(schemas)} schema(s) in `{catalog}`:\n" + "\n".join(
-        f"  {s}" for s in schemas
-    )
+    return f"{len(schemas)} schema(s) in `{catalog}`:\n" + "\n".join(f"  {s}" for s in schemas)
 
 
 @mcp.tool()

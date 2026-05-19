@@ -20,11 +20,11 @@ Usage:
     poetry run python test_teams_api.py
 """
 
-import json
-import sys
 import os
+import sys
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from ms_graph.graph_client import GraphClient, GraphError
@@ -92,12 +92,15 @@ def test_list_channels(client: GraphClient, team_id: str, team_name: str) -> lis
     return channels
 
 
-def test_read_channel_messages(client: GraphClient, team_id: str, channel_id: str, channel_name: str):
+def test_read_channel_messages(
+    client: GraphClient, team_id: str, channel_id: str, channel_name: str
+):
     header(f"TEST 3: Read Messages from Channel '{channel_name}'")
 
     # This requires ChannelMessage.Read.All scope
     data = api_call(
-        client, "GET",
+        client,
+        "GET",
         f"/teams/{team_id}/channels/{channel_id}/messages",
         params={"$top": "5"},
     )
@@ -123,6 +126,7 @@ def test_read_channel_messages(client: GraphClient, team_id: str, channel_id: st
         content = body.get("content", "")
         if body.get("contentType") == "html" and content:
             import re
+
             content = re.sub(r"<[^>]+>", "", content).strip()
         content_preview = content[:200] if content else "(no body text)"
 
@@ -149,20 +153,45 @@ def test_read_channel_messages(client: GraphClient, team_id: str, channel_id: st
         print(f"      ID: {msg.get('id', '?')}")
 
         # Also dump raw keys for debugging
-        extra_keys = [k for k in msg.keys() if k not in (
-            "id", "replyToId", "etag", "messageType", "createdDateTime",
-            "lastModifiedDateTime", "lastEditedDateTime", "deletedDateTime",
-            "subject", "summary", "chatId", "importance", "locale",
-            "webUrl", "policyViolation", "eventDetail", "from", "body",
-            "attachments", "mentions", "reactions", "hostedContents",
-            "channelIdentity", "onBehalfOf",
-        )]
+        extra_keys = [
+            k
+            for k in msg.keys()
+            if k
+            not in (
+                "id",
+                "replyToId",
+                "etag",
+                "messageType",
+                "createdDateTime",
+                "lastModifiedDateTime",
+                "lastEditedDateTime",
+                "deletedDateTime",
+                "subject",
+                "summary",
+                "chatId",
+                "importance",
+                "locale",
+                "webUrl",
+                "policyViolation",
+                "eventDetail",
+                "from",
+                "body",
+                "attachments",
+                "mentions",
+                "reactions",
+                "hostedContents",
+                "channelIdentity",
+                "onBehalfOf",
+            )
+        ]
         if extra_keys:
             print(f"      Extra fields: {extra_keys}")
         print()
 
 
-def test_send_channel_message(client: GraphClient, team_id: str, channel_id: str, channel_name: str):
+def test_send_channel_message(
+    client: GraphClient, team_id: str, channel_id: str, channel_name: str
+):
     header(f"TEST 4: Send Messages to Channel '{channel_name}'")
 
     print("  This test sends 2 messages: plain text and HTML formatted.\n")
@@ -174,9 +203,15 @@ def test_send_channel_message(client: GraphClient, team_id: str, channel_id: str
     # 4a: Plain text message
     print("\n  --- 4a: Plain text message ---")
     result = api_call(
-        client, "POST",
+        client,
+        "POST",
         f"/teams/{team_id}/channels/{channel_id}/messages",
-        json_data={"body": {"contentType": "text", "content": "[Test] Plain text message from bond-ai test script"}},
+        json_data={
+            "body": {
+                "contentType": "text",
+                "content": "[Test] Plain text message from bond-ai test script",
+            }
+        },
     )
     if result:
         print(f"  SUCCESS - Message ID: {result.get('id', '?')}")
@@ -194,7 +229,8 @@ def test_send_channel_message(client: GraphClient, team_id: str, channel_id: str
         "<p><em>Sent by test_teams_api.py</em></p>"
     )
     result = api_call(
-        client, "POST",
+        client,
+        "POST",
         f"/teams/{team_id}/channels/{channel_id}/messages",
         json_data={"body": {"contentType": "html", "content": html_body}},
     )
@@ -204,19 +240,22 @@ def test_send_channel_message(client: GraphClient, team_id: str, channel_id: str
     # Now re-read to see how our messages appear
     print("\n  --- Re-reading channel to verify messages ---")
     data = api_call(
-        client, "GET",
+        client,
+        "GET",
         f"/teams/{team_id}/channels/{channel_id}/messages",
         params={"$top": "3"},
     )
     if data:
         for msg in data.get("value", [])[:3]:
             sender = msg.get("from") or {}
-            user_info = (sender.get("user") or {})
+            user_info = sender.get("user") or {}
             body = msg.get("body") or {}
             content = body.get("content", "")[:150]
-            print(f"    - From: {user_info.get('displayName', '?')}, "
-                  f"Type: {body.get('contentType', '?')}, "
-                  f"Content: {content}")
+            print(
+                f"    - From: {user_info.get('displayName', '?')}, "
+                f"Type: {body.get('contentType', '?')}, "
+                f"Content: {content}"
+            )
 
 
 def test_list_chats(client: GraphClient) -> list:
@@ -224,9 +263,14 @@ def test_list_chats(client: GraphClient) -> list:
 
     # This requires Chat.Read or Chat.ReadWrite scope
     data = api_call(
-        client, "GET",
+        client,
+        "GET",
         "/me/chats",
-        params={"$top": "15", "$expand": "members", "$orderby": "lastMessagePreview/createdDateTime desc"},
+        params={
+            "$top": "15",
+            "$expand": "members",
+            "$orderby": "lastMessagePreview/createdDateTime desc",
+        },
     )
     if not data:
         print("\n  NOTE: Listing chats requires 'Chat.Read' or 'Chat.ReadWrite' scope.")
@@ -266,7 +310,8 @@ def test_read_chat_messages(client: GraphClient, chat_id: str, chat_label: str):
     header(f"TEST 6: Read Messages from Chat '{chat_label}'")
 
     data = api_call(
-        client, "GET",
+        client,
+        "GET",
         f"/me/chats/{chat_id}/messages",
         params={"$top": "5"},
     )
@@ -290,6 +335,7 @@ def test_read_chat_messages(client: GraphClient, chat_id: str, chat_label: str):
         content = body.get("content", "")
         if body.get("contentType") == "html" and content:
             import re
+
             content = re.sub(r"<[^>]+>", "", content).strip()
         content_preview = content[:120] if content else "(empty)"
 
@@ -310,14 +356,17 @@ def test_send_chat_message(client: GraphClient, chat_id: str, chat_label: str):
 
     test_msg = "[Test] Automated Teams API test from bond-ai test script"
     result = api_call(
-        client, "POST",
+        client,
+        "POST",
         f"/me/chats/{chat_id}/messages",
         json_data={"body": {"content": test_msg}},
     )
     if result:
         print(f"  SUCCESS - Message ID: {result.get('id', '?')}")
     else:
-        print("\n  NOTE: Sending chat messages requires 'Chat.ReadWrite' or 'ChatMessage.Send' scope.")
+        print(
+            "\n  NOTE: Sending chat messages requires 'Chat.ReadWrite' or 'ChatMessage.Send' scope."
+        )
 
 
 def pick_index(items: list, label: str) -> int | None:
@@ -418,7 +467,7 @@ def main():
     print("  Any 403 errors indicate missing OAuth scopes that need to be")
     print("  added to the Azure app registration and re-consented.\n")
     print("  To re-consent with new scopes, delete the token cache:")
-    print(f"    rm ~/.bond_mcps/microsoft.json\n")
+    print("    rm ~/.bond_mcps/microsoft.json\n")
 
     client.close()
 

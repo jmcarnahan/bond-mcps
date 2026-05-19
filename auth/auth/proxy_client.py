@@ -28,6 +28,7 @@ class AuthStateExpiredError(TimeoutError):
     working; callers that need to distinguish "user took too long" from "state
     was already used" can catch this specifically.
     """
+
     pass
 
 
@@ -93,9 +94,7 @@ class OAuthProxyClient:
                         return data
             except urllib.error.HTTPError as e:
                 if e.code == 404:
-                    raise AuthStateExpiredError(
-                        "Auth state expired or already consumed"
-                    ) from e
+                    raise AuthStateExpiredError("Auth state expired or already consumed") from e
                 raise
             except urllib.error.URLError:
                 raise RuntimeError("Auth proxy is not running")

@@ -14,6 +14,17 @@ variable "ingress_scheme" {
   description = "ALB scheme — internet-facing or internal."
 }
 
+variable "ingress_subnets" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Explicit subnet IDs for the ALB. Required when the shared VPC's public
+    subnets are not tagged with `kubernetes.io/role/elb` (the default
+    auto-discovery hook the AWS Load Balancer Controller uses). When empty,
+    the controller falls back to tag-based discovery.
+  EOT
+}
+
 variable "vpc_cidr" {
   type        = string
   description = <<-EOT
@@ -161,6 +172,36 @@ variable "jwt_algorithm" {
 variable "jwt_sub_claim" {
   type    = string
   default = "sub"
+}
+
+variable "jwt_jwks_uri" {
+  type        = string
+  default     = ""
+  description = "JWKS URI for the bond-mcps Authorization Server (preferred over static PEM for prod)."
+}
+
+variable "jwt_as_base_url" {
+  type        = string
+  default     = ""
+  description = "Public URL of the bond-mcps AS. Surfaced in protected-resource-metadata so MCP clients can discover the AS."
+}
+
+variable "jwt_public_url" {
+  type        = string
+  default     = ""
+  description = "Public URL of *this* MCP. Used as the resource server URL in the metadata document."
+}
+
+variable "command" {
+  type        = list(string)
+  default     = []
+  description = "Container command override. Empty list = use image default."
+}
+
+variable "is_auth_server" {
+  type        = bool
+  default     = false
+  description = "Marks this service as the bond-mcps OAuth 2.1 Authorization Server. Implies command override + secret wiring."
 }
 
 variable "chart_path" {

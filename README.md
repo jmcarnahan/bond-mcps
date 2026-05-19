@@ -26,23 +26,62 @@ The MCP ports are configurable — see the `Makefile` (`MS_GRAPH_PORT`, `GITHUB_
 
 ## Architecture
 
-Each MCP:
-- Receives pre-authenticated Bearer tokens from a calling backend (e.g. Bond AI)
-- Exposes tools via the MCP protocol (FastMCP, `streamable-http` transport)
-- Runs as a standalone process — locally for development, or in a shared cloud cluster (deployment TBD)
-- For local-only use, can drive its own OAuth flow via the `auth` package's callback proxy
+bond-mcps supports two deployment modes; both are documented end-to-end
+in [`docs/deployment/oauth-resource-server.md`](docs/deployment/oauth-resource-server.md).
+
+### Laptop / single-user mode (default)
+
+Each MCP runs as a `streamable-http` FastMCP server. Authorization is
+either a pre-resolved provider Bearer token (legacy Bond AI backend
+forwarding) or local browser OAuth via the `auth` proxy. `tokens.db` is
+keyed by `BOND_MCPS_USER_ID` (or `$USER`).
 
 ```
-Client (Bond AI backend, Claude Code, MCP client)
-    │  Authorization: Bearer <user-token>
+Client (Claude Code, CLI, Bond AI backend)
+    │  Authorization: Bearer <provider-token>     (laptop / backend forwarding)
     ▼
 MCP server (FastMCP, streamable-http)
     │
-    └──> External provider API (Microsoft Graph / GitHub / Atlassian)
+    └──> External provider API (Microsoft Graph / GitHub / Atlassian / Databricks)
 
-For local OAuth (no backend):
-  CLI ──> auth proxy (port 8000) ──> browser ──> provider login ──> token cache
+For local OAuth bootstrap:
+  CLI ──> auth proxy (port 8000) ──> browser ──> provider login ──> tokens.db
 ```
+
+### Multi-user / deployed mode (OAuth 2.1 Resource Server)
+
+Each MCP is wrapped in FastMCP's `RemoteAuthProvider`, which advertises an
+RFC 9728 protected-resource-metadata document and returns
+`401 + WWW-Authenticate` on missing/invalid JWTs. The bond-mcps
+Authorization Server (`auth.auth_server`, port 8001 by default) issues
+those JWTs after upstream Cognito or Okta sign-in. `tokens.db` is keyed by
+the JWT's `sub` claim — different users on the same MCP write to
+different rows.
+
+bond-ai is no longer part of the auth path. If bond-ai wants to call
+bond-mcps it does OAuth like any other client — see
+[`docs/migration/bond-ai-client.md`](docs/migration/bond-ai-client.md).
+
+```
+Claude Code (any workstation) ──┐
+                                │  Authorization: Bearer <bond-mcps-jwt>
+bond-ai (peer client) ──────────┤
+                                │
+                                ▼
+                      MCP Resource Server
+                                │
+                                ▼
+                      External provider API
+
+         bond-mcps AS  (auth/auth_server, port 8001)
+         └── /.well-known/oauth-authorization-server  (RFC 8414)
+         └── /.well-known/jwks.json
+         └── /oauth/authorize → upstream Cognito/Okta → /oauth/token
+         └── /oauth/register   (RFC 7591 DCR)
+```
+
+Try it locally with `make dev-multitenant` (boots both the proxy and the
+AS, plus the 4 MCPs in JWT mode).
 
 ## Prerequisites
 
@@ -87,11 +126,17 @@ Without these, the MCP servers boot but every tool call fails with `PermissionEr
 
 ```bash
 make install          # poetry install in auth/ + each MCP
+make hooks-install    # one-time per clone — installs pre-commit + pre-push hooks
 make dev              # boots auth proxy + 3 MCPs in the background
 make status           # shows [up]/[down] per service
 make logs             # tail all log files (Ctrl-C to detach; processes keep running)
 make stop             # shut everything down
 ```
+
+`make hooks-install` wires up `.git/hooks/pre-commit` and `.git/hooks/pre-push`
+(gitleaks, bandit, ruff, terraform_fmt, shellcheck, file hygiene, and a
+no-direct-push-to-main guard). Run `make hooks-run` to lint the whole repo
+on demand. The same harness runs in CI via `.github/workflows/lint.yml`.
 
 `make dev` first runs `check-ports` (uses `lsof`) and refuses to start if any of 8000/18001/18002/18003/18004 is already in use — it names the offending process. Override any port: `MS_GRAPH_PORT=29001 make dev`, or `AUTH_PORT=9000 make dev` for the auth proxy (the proxy reads `BOND_AUTH_PROXY_PORT`, which the Makefile sets from `AUTH_PORT`).
 

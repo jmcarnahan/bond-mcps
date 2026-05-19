@@ -6,24 +6,24 @@ from unittest.mock import patch
 import httpx
 import pytest
 import respx
-
-from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
 from ms_graph import files
+from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
+
 from .conftest import (
+    SAMPLE_COPY_COMPLETED,
+    SAMPLE_COPY_FAILED,
+    SAMPLE_COPY_IN_PROGRESS,
     SAMPLE_DRIVE_CHILDREN_RESPONSE,
     SAMPLE_DRIVE_ITEM_BINARY,
     SAMPLE_DRIVE_ITEM_FILE,
     SAMPLE_DRIVE_ITEM_FOLDER,
     SAMPLE_DRIVE_ITEM_LARGE_TEXT,
     SAMPLE_DRIVE_ITEM_WORD,
-    SAMPLE_UPLOADED_FILE,
-    SAMPLE_COPY_IN_PROGRESS,
-    SAMPLE_COPY_COMPLETED,
-    SAMPLE_COPY_FAILED,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_EMPTY,
     SAMPLE_SITE,
     SAMPLE_SITES_RESPONSE,
+    SAMPLE_UPLOADED_FILE,
 )
 
 
@@ -162,7 +162,12 @@ class TestFilesSync:
         respx.post(f"{GRAPH_BASE_URL}/search/query").mock(
             return_value=httpx.Response(
                 400,
-                json={"error": {"code": "BadRequest", "message": "This API is not supported for MSA accounts"}},
+                json={
+                    "error": {
+                        "code": "BadRequest",
+                        "message": "This API is not supported for MSA accounts",
+                    }
+                },
             )
         )
         respx.get(f"{GRAPH_BASE_URL}/me/drive/root/search(q='report')").mock(
@@ -310,7 +315,12 @@ class TestFilesAsync:
         respx.post(f"{GRAPH_BASE_URL}/search/query").mock(
             return_value=httpx.Response(
                 400,
-                json={"error": {"code": "BadRequest", "message": "This API is not supported for MSA accounts"}},
+                json={
+                    "error": {
+                        "code": "BadRequest",
+                        "message": "This API is not supported for MSA accounts",
+                    }
+                },
             )
         )
         respx.get(f"{GRAPH_BASE_URL}/me/drive/root/search(q='report')").mock(
@@ -337,6 +347,7 @@ class TestFilesAsync:
 # Upload tests
 # ---------------------------------------------------------------------------
 
+
 class TestUploadSync:
     """Synchronous upload_file tests."""
 
@@ -346,7 +357,9 @@ class TestUploadSync:
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         with GraphClient("tok") as client:
-            item = files.upload_file(client, folder_path="", filename="report.md", content="# Hello")
+            item = files.upload_file(
+                client, folder_path="", filename="report.md", content="# Hello"
+            )
 
         assert item["name"] == "report.md"
         assert route.calls[0].request.headers["Content-Type"] == "text/markdown"
@@ -358,7 +371,9 @@ class TestUploadSync:
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         with GraphClient("tok") as client:
-            files.upload_file(client, folder_path="Documents", filename="data.csv", content="a,b\n1,2")
+            files.upload_file(
+                client, folder_path="Documents", filename="data.csv", content="a,b\n1,2"
+            )
 
         assert route.called
         assert route.calls[0].request.headers["Content-Type"] == "text/csv"
@@ -399,14 +414,17 @@ class TestUploadSync:
             files.upload_file(client, folder_path="", filename="file.bin", content="data")
         assert route.calls[0].request.headers["Content-Type"] == "application/octet-stream"
 
-    @pytest.mark.parametrize("ext,expected_ct", [
-        ("report.txt",  "text/plain"),
-        ("page.html",   "text/html"),
-        ("data.json",   "application/json"),
-        ("config.yaml", "application/yaml"),
-        ("config.yml",  "application/yaml"),
-        ("schema.xml",  "application/xml"),
-    ])
+    @pytest.mark.parametrize(
+        "ext,expected_ct",
+        [
+            ("report.txt", "text/plain"),
+            ("page.html", "text/html"),
+            ("data.json", "application/json"),
+            ("config.yaml", "application/yaml"),
+            ("config.yml", "application/yaml"),
+            ("schema.xml", "application/xml"),
+        ],
+    )
     @respx.mock
     def test_upload_content_type_inference(self, ext, expected_ct):
         route = respx.put(url__regex=r"/content$").mock(
@@ -430,7 +448,9 @@ class TestUploadSync:
         big_content = "x" * 4_000_001
         with pytest.raises(ValueError, match="4 MB"):
             async with AsyncGraphClient("tok") as client:
-                await files.aupload_file(client, folder_path="", filename="big.txt", content=big_content)
+                await files.aupload_file(
+                    client, folder_path="", filename="big.txt", content=big_content
+                )
 
 
 class TestUploadAsync:
@@ -442,7 +462,9 @@ class TestUploadAsync:
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         async with AsyncGraphClient("tok") as client:
-            item = await files.aupload_file(client, folder_path="", filename="notes.md", content="hello")
+            item = await files.aupload_file(
+                client, folder_path="", filename="notes.md", content="hello"
+            )
         assert item["id"] == SAMPLE_UPLOADED_FILE["id"]
         assert route.calls[0].request.headers["Content-Type"] == "text/markdown"
 
@@ -452,7 +474,9 @@ class TestUploadAsync:
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         async with AsyncGraphClient("tok") as client:
-            await files.aupload_file(client, folder_path="Reports", filename="summary.csv", content="x,y")
+            await files.aupload_file(
+                client, folder_path="Reports", filename="summary.csv", content="x,y"
+            )
         assert route.called
         assert route.calls[0].request.headers["Content-Type"] == "text/csv"
 
@@ -464,7 +488,11 @@ class TestUploadAsync:
         ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
         async with AsyncGraphClient("tok") as client:
             await files.aupload_file(
-                client, folder_path="Docs", filename="page.html", content="<p>hi</p>", site_id=site_id
+                client,
+                folder_path="Docs",
+                filename="page.html",
+                content="<p>hi</p>",
+                site_id=site_id,
             )
         assert route.called
 
@@ -472,9 +500,9 @@ class TestUploadAsync:
     async def test_aupload_bytes_pdf(self):
         """aupload_bytes uploads raw binary with the specified content-type."""
         pdf_bytes = b"%PDF-1.4 fake content"
-        route = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/Power BI Exports/report.pdf:/content").mock(
-            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
-        )
+        route = respx.put(
+            f"{GRAPH_BASE_URL}/me/drive/root:/Power BI Exports/report.pdf:/content"
+        ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
         async with AsyncGraphClient("tok") as client:
             item = await files.aupload_bytes(
                 client,
@@ -524,9 +552,7 @@ class TestCopySync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             result = files.copy_drive_item(client, item_id=item_id, new_name="template-copy.docx")
 
@@ -543,9 +569,7 @@ class TestCopySync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(303, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(303, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             result = files.copy_drive_item(client, item_id=item_id, new_name="template-copy.docx")
 
@@ -584,9 +608,7 @@ class TestCopySync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED))
         with pytest.raises(GraphError, match="accessDenied"):
             with GraphClient("tok") as client:
                 files.copy_drive_item(client, item_id=item_id, new_name="copy.docx")
@@ -601,12 +623,12 @@ class TestCopySync:
         copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             files.copy_drive_item(
-                client, item_id=item_id, new_name="archived.docx",
+                client,
+                item_id=item_id,
+                new_name="archived.docx",
                 destination_folder_id=dest_folder_id,
             )
 
@@ -623,9 +645,7 @@ class TestCopySync:
         respx.post(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             result = files.copy_drive_item(
                 client, item_id=item_id, new_name="sp-copy.docx", site_id=site_id
@@ -643,9 +663,7 @@ class TestCopySync:
         copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             files.copy_drive_item(client, item_id=item_id, new_name="copy.docx")
 
@@ -666,7 +684,6 @@ class TestCopySync:
             with GraphClient("tok") as client:
                 files.copy_drive_item(client, item_id=item_id, new_name="copy.docx")
 
-
     @respx.mock
     def test_copy_times_out(self):
         """Raises CopyTimeout when the operation never completes within the deadline."""
@@ -677,10 +694,9 @@ class TestCopySync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_IN_PROGRESS)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_IN_PROGRESS))
         import ms_graph.files as files_mod
+
         with patch.object(files_mod, "_COPY_POLL_TIMEOUT", 0):
             with pytest.raises(GraphError, match="CopyTimeout"):
                 with GraphClient("tok") as client:
@@ -703,11 +719,11 @@ class TestCopyAsync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         async with AsyncGraphClient("tok") as client:
-            result = await files.acopy_drive_item(client, item_id=item_id, new_name="async-copy.docx")
+            result = await files.acopy_drive_item(
+                client, item_id=item_id, new_name="async-copy.docx"
+            )
 
         assert result["status"] == "completed"
         assert result["resourceId"] == SAMPLE_COPY_COMPLETED["resourceId"]
@@ -722,11 +738,11 @@ class TestCopyAsync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(303, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(303, json=SAMPLE_COPY_COMPLETED))
         async with AsyncGraphClient("tok") as client:
-            result = await files.acopy_drive_item(client, item_id=item_id, new_name="async-copy.docx")
+            result = await files.acopy_drive_item(
+                client, item_id=item_id, new_name="async-copy.docx"
+            )
 
         assert result["status"] == "completed"
         assert result["resourceId"] == SAMPLE_COPY_COMPLETED["resourceId"]
@@ -740,9 +756,7 @@ class TestCopyAsync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED))
         with pytest.raises(GraphError, match="accessDenied"):
             async with AsyncGraphClient("tok") as client:
                 await files.acopy_drive_item(client, item_id=item_id, new_name="copy.docx")
@@ -757,9 +771,7 @@ class TestCopyAsync:
         copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         async with AsyncGraphClient("tok") as client:
             await files.acopy_drive_item(
                 client, item_id=item_id, new_name="copy.docx", destination_folder_id=dest
@@ -778,10 +790,9 @@ class TestCopyAsync:
         respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
-        respx.get(MONITOR_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_COPY_IN_PROGRESS)
-        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_IN_PROGRESS))
         import ms_graph.files as files_mod
+
         with patch.object(files_mod, "_COPY_POLL_TIMEOUT", 0):
             with pytest.raises(GraphError, match="CopyTimeout"):
                 async with AsyncGraphClient("tok") as client:
@@ -842,9 +853,9 @@ class TestRenameSync:
     def test_rename_propagates_graph_error(self):
         item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
         respx.patch(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
-            return_value=httpx.Response(404, json={
-                "error": {"code": "ResourceNotFound", "message": "Item not found."}
-            })
+            return_value=httpx.Response(
+                404, json={"error": {"code": "ResourceNotFound", "message": "Item not found."}}
+            )
         )
         with pytest.raises(GraphError, match="ResourceNotFound"):
             with GraphClient("tok") as client:
@@ -861,7 +872,9 @@ class TestRenameAsync:
             return_value=httpx.Response(200, json=SAMPLE_RENAMED_FILE)
         )
         async with AsyncGraphClient("tok") as client:
-            item = await files.arename_drive_item(client, item_id=item_id, new_name="renamed-report.csv")
+            item = await files.arename_drive_item(
+                client, item_id=item_id, new_name="renamed-report.csv"
+            )
 
         assert item["name"] == "renamed-report.csv"
         body = json.loads(route.calls[0].request.content)
@@ -872,7 +885,9 @@ class TestRenameAsync:
         site_id = "site-id-001"
         item_id = SAMPLE_DRIVE_ITEM_WORD["id"]
         route = respx.patch(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}").mock(
-            return_value=httpx.Response(200, json={**SAMPLE_DRIVE_ITEM_WORD, "name": "final-doc.docx"})
+            return_value=httpx.Response(
+                200, json={**SAMPLE_DRIVE_ITEM_WORD, "name": "final-doc.docx"}
+            )
         )
         async with AsyncGraphClient("tok") as client:
             item = await files.arename_drive_item(
@@ -886,9 +901,9 @@ class TestRenameAsync:
     async def test_arename_propagates_graph_error(self):
         item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
         respx.patch(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
-            return_value=httpx.Response(403, json={
-                "error": {"code": "AccessDenied", "message": "Cannot rename."}
-            })
+            return_value=httpx.Response(
+                403, json={"error": {"code": "AccessDenied", "message": "Cannot rename."}}
+            )
         )
         with pytest.raises(GraphError, match="AccessDenied"):
             async with AsyncGraphClient("tok") as client:

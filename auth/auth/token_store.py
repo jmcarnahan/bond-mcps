@@ -57,64 +57,61 @@ def current_user_key() -> str:
 
 
 def resolve_user_key_for_request() -> str:
-    """Resolve the user_key for the current HTTP request.
+    """Resolve the user_key for the current MCP tool invocation.
 
-    Multi-tenant deployments enable per-request identity by setting
-    BOND_MCPS_JWT_PUBLIC_KEY (see auth.jwt_identity). When set, every
-    HTTP-bound request must carry an ``X-Bond-Auth: Bearer <jwt>`` header;
-    the JWT's signature is verified and the configured claim (default
-    ``sub``) becomes the user_key.
+    Multi-tenant mode is enabled by setting one of ``BOND_MCPS_JWT_JWKS_URI``
+    or ``BOND_MCPS_JWT_PUBLIC_KEY`` and wiring each MCP with
+    ``auth=build_remote_auth_provider(...)`` (see ``auth.jwt_identity``).
 
-    Behavior matrix:
-      - Outside an HTTP request context (CLI, startup, tests): fall back to
-        ``current_user_key()`` (env-based). The JWT requirement only applies
-        to live request handling.
-      - In an HTTP context, JWT verification disabled (env unset): fall back
-        to ``current_user_key()``. This is the single-tenant deploy mode.
-      - In an HTTP context, JWT verification enabled, header present and
-        valid: return the JWT-derived user_key.
-      - In an HTTP context, JWT verification enabled, header missing or
-        invalid: raise ``IdentityVerificationError`` (caller must identify;
-        we will not silently write to the env-based tenant row).
+    In that mode, FastMCP's middleware has already validated the
+    ``Authorization: Bearer <jwt>`` header before any tool runs and made the
+    decoded claims available via ``get_access_token()``. We just read the
+    configured sub claim and return it.
+
+    Outside an HTTP context (CLI invocations, startup, tests), or when JWT
+    mode is disabled, fall back to the env-based :func:`current_user_key`.
     """
-    # Lazy import: fastmcp may not be installed in pure-auth test envs.
+    if not _jwt_mode_enabled():
+        return current_user_key()
+
+    # Lazy import: fastmcp is only present in MCP runtimes, not in the bare
+    # auth CLI / proxy server.
     try:
-        from fastmcp.server.dependencies import get_http_headers
+        from fastmcp.server.dependencies import get_access_token
     except ImportError:
         return current_user_key()
 
     try:
-        headers = get_http_headers(include={"x-bond-auth"})
-        in_http_context = True
+        access = get_access_token()
     except Exception:
-        # Not running inside a fastmcp request (CLI, startup, tests).
-        in_http_context = False
-        headers = {}
-
-    # Cheap inline env check — keeps auth.jwt_identity (and pyjwt) out of the
-    # import graph entirely when JWT verification is disabled. A stale local
-    # .venv without pyjwt still works for local-dev Path-2 flows.
-    jwt_enabled = bool(os.environ.get("BOND_MCPS_JWT_PUBLIC_KEY", "").strip())
-
-    if not jwt_enabled or not in_http_context:
-        # Single-tenant deploy (env-based) or non-HTTP context (CLI, startup,
-        # tests). The JWT requirement only applies to live HTTP requests.
+        # No active FastMCP request context (CLI, startup, tests).
         return current_user_key()
 
-    # JWT mode + HTTP context: pyjwt MUST be available. Import now.
-    from auth.jwt_identity import IdentityVerificationError, verify_identity_token
+    if access is None:
+        # Middleware would normally reject unauthenticated requests with 401,
+        # so this branch is reachable only outside a request context.
+        return current_user_key()
 
-    bond_auth = headers.get("x-bond-auth", "") if headers else ""
-    if not bond_auth.startswith("Bearer "):
-        raise IdentityVerificationError(
-            "Multi-tenant mode is enabled (BOND_MCPS_JWT_PUBLIC_KEY is set) "
-            "but this request lacks an `X-Bond-Auth: Bearer <jwt>` header. "
-            "Identify the caller via a signed JWT or unset the public key "
-            "config to revert to single-tenant mode."
-        )
+    from auth.jwt_identity import get_sub_claim
 
-    token = bond_auth[len("Bearer "):].strip()
-    return verify_identity_token(token)
+    sub_claim = get_sub_claim()
+    user_key = access.claims.get(sub_claim)
+    if not isinstance(user_key, str) or not user_key.strip():
+        # Defensive: middleware required the claim, so this should be unreachable.
+        raise RuntimeError(f"Validated JWT is missing a usable {sub_claim!r} claim.")
+    return user_key
+
+
+def _jwt_mode_enabled() -> bool:
+    """Cheap inline check; mirrors auth.jwt_identity.is_jwt_verification_enabled.
+
+    Inlined to avoid importing auth.jwt_identity (and through it, fastmcp) in
+    the laptop / single-tenant code path.
+    """
+    return bool(
+        os.environ.get("BOND_MCPS_JWT_JWKS_URI", "").strip()
+        or os.environ.get("BOND_MCPS_JWT_PUBLIC_KEY", "").strip()
+    )
 
 
 class TokenStore:
@@ -149,9 +146,7 @@ class TokenStore:
     def clear(self) -> None:
         self.repo.clear_token(self.user_key, self.provider)
 
-    def refresh_if_needed(
-        self, client_id: str, client_secret: str, token_url: str
-    ) -> str | None:
+    def refresh_if_needed(self, client_id: str, client_secret: str, token_url: str) -> str | None:
         """Refresh the access token if expired. Returns new access_token or None.
 
         Wraps the read → refresh → write in a row-level lock so concurrent
@@ -168,15 +163,20 @@ class TokenStore:
             if not refresh_token:
                 return None
 
+            logger.info(
+                "Refreshing %s access_token (user_key=%s, token_url=%s)",
+                self.provider,
+                self.user_key,
+                token_url,
+            )
             try:
-                new_data = _do_refresh(
-                    client_id, client_secret, token_url, refresh_token
-                )
+                new_data = _do_refresh(client_id, client_secret, token_url, refresh_token)
             except Exception:
                 logger.exception("Token refresh failed for %s", self.provider)
                 return None
 
             if not new_data or "access_token" not in new_data:
+                logger.warning("Token refresh for %s returned no access_token", self.provider)
                 return None
 
             if "expires_in" in new_data:
@@ -184,6 +184,14 @@ class TokenStore:
                 new_data.pop("expires_in", None)
 
             locked.update(new_data)
+            logger.info(
+                "Refreshed %s access_token (user_key=%s, expires_in=%ss)",
+                self.provider,
+                self.user_key,
+                int(new_data.get("expires_at", 0) - time.time())
+                if new_data.get("expires_at")
+                else "?",
+            )
             return locked.data["access_token"]
 
     @staticmethod

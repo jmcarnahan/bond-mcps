@@ -17,8 +17,8 @@ import datetime as _dt
 import logging
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -41,7 +41,7 @@ _RESERVED_FIELDS = {
 }
 
 
-def _default_resolver(url: str = "") -> encryption.EncryptionKeyResolver:
+def build_default_resolver(url: str = "") -> encryption.EncryptionKeyResolver:
     """Build the standard resolver for a given DB URL.
 
     Postgres URLs require an env-var key (no file fallback). SQLite URLs
@@ -52,6 +52,11 @@ def _default_resolver(url: str = "") -> encryption.EncryptionKeyResolver:
         url = os.environ.get("BOND_MCPS_DB_URL", "")
     is_postgres = url.startswith("postgres")  # matches postgres:// and postgresql://
     return encryption.EncryptionKeyResolver(allow_file_fallback=not is_postgres)
+
+
+# Legacy private alias — kept so existing callers keep working until they're
+# migrated to the public name. Both names produce identical objects.
+_default_resolver = build_default_resolver
 
 
 class TokenRepository:
@@ -172,9 +177,7 @@ class TokenRepository:
             if row is not None:
                 s.delete(row)
 
-    def _encode_provider_token_values(
-        self, user_key: str, provider: str, data: dict
-    ) -> dict:
+    def _encode_provider_token_values(self, user_key: str, provider: str, data: dict) -> dict:
         """Encrypt and shape a token-data dict into column values for upsert."""
         access_blob, key_version = encryption.encrypt(
             _to_bytes(data["access_token"]),
@@ -191,9 +194,7 @@ class TokenRepository:
             resolver=self._resolver,
         )
         scopes = data.get("scopes")
-        scopes_str = (
-            scopes if isinstance(scopes, str) or scopes is None else " ".join(scopes)
-        )
+        scopes_str = scopes if isinstance(scopes, str) or scopes is None else " ".join(scopes)
         extras = {k: v for k, v in data.items() if k not in _RESERVED_FIELDS}
         return {
             "access_token_encrypted": access_blob,
@@ -241,7 +242,7 @@ class TokenRepository:
         session.execute(stmt)
 
     @contextmanager
-    def locked_token(self, user_key: str, provider: str) -> Iterator["LockedToken"]:
+    def locked_token(self, user_key: str, provider: str) -> Iterator[LockedToken]:
         """Open a write-locked context for the read-modify-write refresh path.
 
         SQLite: BEGIN IMMEDIATE so concurrent processes block on the lock.
@@ -306,7 +307,7 @@ class TokenRepository:
                 s.delete(row)
 
     @contextmanager
-    def locked_msal_cache(self, user_key: str) -> Iterator["LockedMsalCache"]:
+    def locked_msal_cache(self, user_key: str) -> Iterator[LockedMsalCache]:
         """Open a write-locked context spanning the entire MSAL R-M-W cycle.
 
         MSAL's silent acquisition rotates the refresh_token on every call.
@@ -399,7 +400,14 @@ class LockedToken:
                 locked.update(new_data)
     """
 
-    def __init__(self, repo: TokenRepository, session: Session, user_key: str, provider: str, row: ProviderToken | None):
+    def __init__(
+        self,
+        repo: TokenRepository,
+        session: Session,
+        user_key: str,
+        provider: str,
+        row: ProviderToken | None,
+    ):
         self._repo = repo
         self._session = session
         self._user_key = user_key
@@ -437,20 +445,14 @@ class LockedToken:
         prior_extras = dict(self._row.extra_metadata or {}) if self._row else {}
         merged = {**prior_extras, **new_data}
 
-        values = self._repo._encode_provider_token_values(
-            self._user_key, self._provider, merged
-        )
-        self._repo._upsert_provider_token(
-            self._session, self._user_key, self._provider, values
-        )
+        values = self._repo._encode_provider_token_values(self._user_key, self._provider, merged)
+        self._repo._upsert_provider_token(self._session, self._user_key, self._provider, values)
         # The upsert bypasses the ORM, so the session's identity map still
         # holds the stale snapshot of self._row. Expire it (if cached) and
         # re-read from the DB so locked.data reflects the just-written row.
         if self._row is not None:
             self._session.expire(self._row)
-        self._row = self._session.get(
-            ProviderToken, (self._user_key, self._provider)
-        )
+        self._row = self._session.get(ProviderToken, (self._user_key, self._provider))
         self._data = self._repo._decode_row(self._row)
 
 
@@ -504,9 +506,7 @@ class LockedMsalCache:
             field="cache_data",
             resolver=self._repo._resolver,
         )
-        self._repo._upsert_msal_cache(
-            self._session, self._user_key, blob_bytes, version
-        )
+        self._repo._upsert_msal_cache(self._session, self._user_key, blob_bytes, version)
 
 
 def _to_bytes(s: str | bytes | None) -> bytes | None:

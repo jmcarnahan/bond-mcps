@@ -148,7 +148,7 @@ aws eks update-kubeconfig --name bond-mcps-dev-eks --region us-west-2
 kubectl -n bond-mcps get pods             # 5 deployments, all Running
 kubectl -n bond-mcps get ingress          # 5 ingresses, all sharing one ALB
 
-curl https://auth.mcps.ai.example.com/health   # → {"status":"ok"}
+curl https://auth.<base_domain>/health   # → {"status":"ok"}
 ```
 
 If a pod is in `Init:CrashLoopBackoff`, check the preflight initContainer logs:

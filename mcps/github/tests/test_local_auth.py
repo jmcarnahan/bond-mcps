@@ -1,7 +1,7 @@
 """Tests for local_auth.py -- local GitHub OAuth authentication."""
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,9 +25,11 @@ class TestGetLocalToken:
         mock_store = MagicMock()
         mock_store.get_token.return_value = {"access_token": "cached-tok"}
 
-        with patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True), \
-             patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("github.local_auth._verify_token", return_value=True):
+        with (
+            patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True),
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch("github.local_auth._verify_token", return_value=True),
+        ):
             token = get_local_token()
 
         assert token == "cached-tok"
@@ -38,10 +40,12 @@ class TestGetLocalToken:
         mock_store = MagicMock()
         mock_store.get_token.return_value = {"access_token": "expired-tok"}
 
-        with patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True), \
-             patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("github.local_auth._verify_token", return_value=False), \
-             patch("github.local_auth._do_browser_auth", return_value="new-tok"):
+        with (
+            patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True),
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch("github.local_auth._verify_token", return_value=False),
+            patch("github.local_auth._do_browser_auth", return_value="new-tok"),
+        ):
             token = get_local_token()
 
         assert token == "new-tok"
@@ -53,10 +57,12 @@ class TestGetLocalToken:
         mock_store = MagicMock()
         mock_store.get_token.return_value = None
 
-        with patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True), \
-             patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("github.local_auth._do_browser_auth", return_value=None), \
-             patch("github.local_auth._do_device_code_auth", return_value="device-tok"):
+        with (
+            patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True),
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch("github.local_auth._do_browser_auth", return_value=None),
+            patch("github.local_auth._do_device_code_auth", return_value="device-tok"),
+        ):
             token = get_local_token()
 
         assert token == "device-tok"
@@ -67,10 +73,12 @@ class TestGetLocalToken:
         mock_store = MagicMock()
         mock_store.get_token.return_value = None
 
-        with patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True), \
-             patch(_TOKEN_STORE_PATCH, return_value=mock_store), \
-             patch("github.local_auth._do_browser_auth", return_value=None), \
-             patch("github.local_auth._do_device_code_auth", return_value=None):
+        with (
+            patch.dict(os.environ, {"GITHUB_CLIENT_ID": "cid"}, clear=True),
+            patch(_TOKEN_STORE_PATCH, return_value=mock_store),
+            patch("github.local_auth._do_browser_auth", return_value=None),
+            patch("github.local_auth._do_device_code_auth", return_value=None),
+        ):
             with pytest.raises(PermissionError, match="authentication failed"):
                 get_local_token()
 
@@ -82,15 +90,20 @@ class TestDoBrowserAuth:
         from github.local_auth import _do_browser_auth
 
         mock_proxy = MagicMock()
-        mock_proxy.get_redirect_uri.return_value = "http://localhost:8000/connections/github/callback"
+        mock_proxy.get_redirect_uri.return_value = (
+            "http://localhost:8000/connections/github/callback"
+        )
         mock_proxy.wait_for_callback.return_value = {
-            "code": "authcode", "state": "test-state",
+            "code": "authcode",
+            "state": "test-state",
         }
 
-        with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
-             patch("github.local_auth.webbrowser"), \
-             patch("github.local_auth.secrets") as mock_secrets, \
-             patch("github.local_auth._exchange_code", return_value="new-tok"):
+        with (
+            patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy),
+            patch("github.local_auth.webbrowser"),
+            patch("github.local_auth.secrets") as mock_secrets,
+            patch("github.local_auth._exchange_code", return_value="new-tok"),
+        ):
             mock_secrets.token_urlsafe.return_value = "test-state"
             result = _do_browser_auth("cid", "secret")
 
@@ -110,11 +123,15 @@ class TestDoBrowserAuth:
         from github.local_auth import _do_browser_auth
 
         mock_proxy = MagicMock()
-        mock_proxy.get_redirect_uri.return_value = "http://localhost:8000/connections/github/callback"
+        mock_proxy.get_redirect_uri.return_value = (
+            "http://localhost:8000/connections/github/callback"
+        )
         mock_proxy.wait_for_callback.side_effect = TimeoutError("timed out")
 
-        with patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy), \
-             patch("github.local_auth.webbrowser"):
+        with (
+            patch(_PROXY_CLIENT_PATCH, return_value=mock_proxy),
+            patch("github.local_auth.webbrowser"),
+        ):
             result = _do_browser_auth("cid", "secret")
 
         assert result is None

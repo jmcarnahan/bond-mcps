@@ -88,9 +88,7 @@ class EncryptionKeyResolver:
                 self._key_file,
                 self._env_var,
             )
-            return _decode_key(
-                self._key_file.read_text().strip(), source=str(self._key_file)
-            )
+            return _decode_key(self._key_file.read_text().strip(), source=str(self._key_file))
 
         raise TokenEncryptionError(
             f"No encryption key configured. Set {self._env_var} in the "
@@ -132,7 +130,7 @@ def _aad(user_key: str, provider: str, field: str, key_version: int) -> bytes:
     # supplied) or getpass.getuser() (no `|` on any reasonable platform). If
     # we ever accept user_keys containing `|`, switch to a length-prefixed
     # encoding so AAD remains unambiguous across rows.
-    return f"{user_key}|{provider}|{field}|v{key_version}".encode("utf-8")
+    return f"{user_key}|{provider}|{field}|v{key_version}".encode()
 
 
 def encrypt(
@@ -182,9 +180,7 @@ def decrypt(
         ) from e
 
 
-def encrypt_optional(
-    plaintext: bytes | None, **kwargs
-) -> tuple[bytes | None, int | None]:
+def encrypt_optional(plaintext: bytes | None, **kwargs) -> tuple[bytes | None, int | None]:
     """Encrypt if not None; otherwise return (None, None).
 
     Useful for nullable columns like refresh_token where presence is optional.
@@ -195,16 +191,12 @@ def encrypt_optional(
     return blob, version
 
 
-def decrypt_optional(
-    blob: bytes | None, key_version: int | None, **kwargs
-) -> bytes | None:
+def decrypt_optional(blob: bytes | None, key_version: int | None, **kwargs) -> bytes | None:
     """Decrypt if not None; otherwise return None."""
     if blob is None:
         return None
     if key_version is None:
-        raise TokenEncryptionError(
-            "Ciphertext present but key_version is None — DB row is corrupt"
-        )
+        raise TokenEncryptionError("Ciphertext present but key_version is None — DB row is corrupt")
     return decrypt(blob, key_version=key_version, **kwargs)
 
 

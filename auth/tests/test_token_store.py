@@ -17,11 +17,13 @@ def store(repo):
 
 class TestSaveAndLoad:
     def test_round_trip(self, store):
-        store.save_token({
-            "access_token": "tok123",
-            "refresh_token": "ref456",
-            "expires_at": time.time() + 3600,
-        })
+        store.save_token(
+            {
+                "access_token": "tok123",
+                "refresh_token": "ref456",
+                "expires_at": time.time() + 3600,
+            }
+        )
         loaded = store.get_token()
         assert loaded["access_token"] == "tok123"
         assert loaded["refresh_token"] == "ref456"
@@ -51,25 +53,28 @@ class TestClear:
 
 class TestRefresh:
     def test_refresh_saves_new_token(self, store):
-        store.save_token({
-            "access_token": "old",
-            "refresh_token": "ref123",
-            "expires_at": time.time() - 100,
-        })
+        store.save_token(
+            {
+                "access_token": "old",
+                "refresh_token": "ref123",
+                "expires_at": time.time() - 100,
+            }
+        )
 
         def fake_urlopen(req, timeout=None):
             resp = MagicMock()
-            resp.read.return_value = json.dumps({
-                "access_token": "new_tok",
-                "refresh_token": "ref456",
-                "expires_in": 3600,
-            }).encode()
+            resp.read.return_value = json.dumps(
+                {
+                    "access_token": "new_tok",
+                    "refresh_token": "ref456",
+                    "expires_in": 3600,
+                }
+            ).encode()
             resp.__enter__ = MagicMock(return_value=resp)
             resp.__exit__ = MagicMock(return_value=False)
             return resp
 
-        with patch("auth.token_store.urllib.request.urlopen",
-                   side_effect=fake_urlopen):
+        with patch("auth.token_store.urllib.request.urlopen", side_effect=fake_urlopen):
             token = store.refresh_if_needed("cid", "secret", "https://token.url")
 
         assert token == "new_tok"
@@ -91,11 +96,13 @@ class TestRefresh:
 
     def test_refresh_uses_form_encoded_body(self, store):
         """Per RFC 6749 §4.1.3 the token endpoint request must be form-encoded."""
-        store.save_token({
-            "access_token": "old",
-            "refresh_token": "ref123",
-            "expires_at": time.time() - 100,
-        })
+        store.save_token(
+            {
+                "access_token": "old",
+                "refresh_token": "ref123",
+                "expires_at": time.time() - 100,
+            }
+        )
 
         captured = {}
 
@@ -104,16 +111,17 @@ class TestRefresh:
             captured["content_type"] = req.headers.get("Content-type")
             captured["accept"] = req.headers.get("Accept")
             resp = MagicMock()
-            resp.read.return_value = json.dumps({
-                "access_token": "new_tok",
-                "expires_in": 3600,
-            }).encode()
+            resp.read.return_value = json.dumps(
+                {
+                    "access_token": "new_tok",
+                    "expires_in": 3600,
+                }
+            ).encode()
             resp.__enter__ = MagicMock(return_value=resp)
             resp.__exit__ = MagicMock(return_value=False)
             return resp
 
-        with patch("auth.token_store.urllib.request.urlopen",
-                   side_effect=fake_urlopen):
+        with patch("auth.token_store.urllib.request.urlopen", side_effect=fake_urlopen):
             store.refresh_if_needed("cid", "secret", "https://token.url")
 
         assert captured["content_type"] == "application/x-www-form-urlencoded"
@@ -125,25 +133,28 @@ class TestRefresh:
 
     def test_refresh_preserves_extra_metadata(self, store):
         """cloud_id and similar extras survive a refresh round-trip."""
-        store.save_token({
-            "access_token": "old",
-            "refresh_token": "ref123",
-            "expires_at": time.time() - 100,
-            "cloud_id": "atlassian-cloud-uuid",
-        })
+        store.save_token(
+            {
+                "access_token": "old",
+                "refresh_token": "ref123",
+                "expires_at": time.time() - 100,
+                "cloud_id": "atlassian-cloud-uuid",
+            }
+        )
 
         def fake_urlopen(req, timeout=None):
             resp = MagicMock()
-            resp.read.return_value = json.dumps({
-                "access_token": "new_tok",
-                "expires_in": 3600,
-            }).encode()
+            resp.read.return_value = json.dumps(
+                {
+                    "access_token": "new_tok",
+                    "expires_in": 3600,
+                }
+            ).encode()
             resp.__enter__ = MagicMock(return_value=resp)
             resp.__exit__ = MagicMock(return_value=False)
             return resp
 
-        with patch("auth.token_store.urllib.request.urlopen",
-                   side_effect=fake_urlopen):
+        with patch("auth.token_store.urllib.request.urlopen", side_effect=fake_urlopen):
             store.refresh_if_needed("cid", "secret", "https://token.url")
 
         saved = store.get_token()

@@ -4,9 +4,9 @@ Confluence operations — sync and async pairs.
 Uses Confluence REST API v2 via the Atlassian cloud gateway.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .atlassian_client import AtlassianClient, AsyncAtlassianClient
+from .atlassian_client import AsyncAtlassianClient, AtlassianClient
 
 
 def _cap(value: int, maximum: int = 25) -> int:
@@ -18,10 +18,11 @@ def _cap(value: int, maximum: int = 25) -> int:
 # List Spaces
 # ---------------------------------------------------------------------------
 
+
 def list_spaces(
     client: AtlassianClient,
     max_results: int = 25,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List accessible Confluence spaces."""
     data = client.get(
         f"{client.confluence_base}/spaces",
@@ -33,7 +34,7 @@ def list_spaces(
 async def alist_spaces(
     client: AsyncAtlassianClient,
     max_results: int = 25,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List accessible Confluence spaces (async)."""
     data = await client.get(
         f"{client.confluence_base}/spaces",
@@ -46,11 +47,12 @@ async def alist_spaces(
 # Search Content
 # ---------------------------------------------------------------------------
 
+
 def search_content(
     client: AtlassianClient,
     query: str,
     max_results: int = 25,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search Confluence pages and blogs using CQL.
 
     Uses v1 content/search (still active) because v2 /search requires an
@@ -67,7 +69,7 @@ async def asearch_content(
     client: AsyncAtlassianClient,
     query: str,
     max_results: int = 25,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search Confluence pages and blogs using CQL (async)."""
     data = await client.get(
         f"{client.confluence_v1_base}/content/search",
@@ -80,10 +82,11 @@ async def asearch_content(
 # Get Page
 # ---------------------------------------------------------------------------
 
+
 def get_page(
     client: AtlassianClient,
     page_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get a Confluence page with body content."""
     return client.get(
         f"{client.confluence_base}/pages/{page_id}",
@@ -94,7 +97,7 @@ def get_page(
 async def aget_page(
     client: AsyncAtlassianClient,
     page_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get a Confluence page with body content (async)."""
     return await client.get(
         f"{client.confluence_base}/pages/{page_id}",
@@ -106,15 +109,16 @@ async def aget_page(
 # Create Page
 # ---------------------------------------------------------------------------
 
+
 def create_page(
     client: AtlassianClient,
     space_id: str,
     title: str,
     body: str,
-    parent_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    parent_id: str | None = None,
+) -> dict[str, Any]:
     """Create a new Confluence page."""
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "spaceId": space_id,
         "status": "current",
         "title": title,
@@ -134,10 +138,10 @@ async def acreate_page(
     space_id: str,
     title: str,
     body: str,
-    parent_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    parent_id: str | None = None,
+) -> dict[str, Any]:
     """Create a new Confluence page (async)."""
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "spaceId": space_id,
         "status": "current",
         "title": title,
@@ -156,13 +160,14 @@ async def acreate_page(
 # Update Page
 # ---------------------------------------------------------------------------
 
+
 def update_page(
     client: AtlassianClient,
     page_id: str,
     title: str,
     body: str,
     version_number: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Update an existing Confluence page."""
     payload = {
         "id": page_id,
@@ -185,7 +190,7 @@ async def aupdate_page(
     title: str,
     body: str,
     version_number: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Update an existing Confluence page (async)."""
     payload = {
         "id": page_id,

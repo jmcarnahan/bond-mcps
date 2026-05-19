@@ -1,18 +1,17 @@
 """Tests for Confluence operations."""
 
 import httpx
-import pytest
 import respx
-
 from atlassian.atlassian_client import AsyncAtlassianClient
+
 from .conftest import (
     CLOUD_ID,
     CONFLUENCE_V1_BASE,
     CONFLUENCE_V2_BASE,
-    SAMPLE_SPACES_RESPONSE,
     SAMPLE_CONFLUENCE_SEARCH_RESPONSE,
-    SAMPLE_PAGE,
     SAMPLE_CREATED_PAGE,
+    SAMPLE_PAGE,
+    SAMPLE_SPACES_RESPONSE,
     SAMPLE_UPDATED_PAGE,
 )
 
@@ -26,6 +25,7 @@ class TestListSpaces:
             return_value=httpx.Response(200, json=SAMPLE_SPACES_RESPONSE)
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             spaces = await confluence.alist_spaces(client)
         assert len(spaces) == 2
@@ -37,6 +37,7 @@ class TestListSpaces:
             return_value=httpx.Response(200, json={"results": []})
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             spaces = await confluence.alist_spaces(client)
         assert spaces == []
@@ -49,8 +50,9 @@ class TestSearchContent:
             return_value=httpx.Response(200, json=SAMPLE_CONFLUENCE_SEARCH_RESPONSE)
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
-            results = await confluence.asearch_content(client, query='type = page')
+            results = await confluence.asearch_content(client, query="type = page")
         assert len(results) == 2
         assert results[0]["title"] == "Architecture Overview"
 
@@ -60,6 +62,7 @@ class TestSearchContent:
             return_value=httpx.Response(200, json={"results": []})
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             results = await confluence.asearch_content(client, query="nonexistent")
         assert results == []
@@ -72,6 +75,7 @@ class TestGetPage:
             return_value=httpx.Response(200, json=SAMPLE_PAGE)
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             page = await confluence.aget_page(client, "12345")
         assert page["title"] == "Architecture Overview"
@@ -85,6 +89,7 @@ class TestCreatePage:
             return_value=httpx.Response(200, json=SAMPLE_CREATED_PAGE)
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await confluence.acreate_page(
                 client, space_id="65536", title="New Page", body="<p>Hello</p>"
@@ -98,6 +103,7 @@ class TestCreatePage:
             return_value=httpx.Response(200, json=SAMPLE_CREATED_PAGE)
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await confluence.acreate_page(
                 client,
@@ -118,6 +124,7 @@ class TestUpdatePage:
             return_value=httpx.Response(200, json=SAMPLE_UPDATED_PAGE)
         )
         from atlassian import confluence
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await confluence.aupdate_page(
                 client,

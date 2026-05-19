@@ -1,7 +1,7 @@
 """Tests for proxy_client.py -- OAuthProxyClient."""
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,18 +11,23 @@ from auth.proxy_client import AuthStateExpiredError, OAuthProxyClient
 class TestGetRedirectUri:
     def test_microsoft(self):
         client = OAuthProxyClient(port=8000)
-        assert client.get_redirect_uri("microsoft") == \
-            "http://localhost:8000/connections/microsoft/callback"
+        assert (
+            client.get_redirect_uri("microsoft")
+            == "http://localhost:8000/connections/microsoft/callback"
+        )
 
     def test_atlassian(self):
         client = OAuthProxyClient(port=8000)
-        assert client.get_redirect_uri("atlassian_v2") == \
-            "http://localhost:8000/connections/atlassian_v2/callback"
+        assert (
+            client.get_redirect_uri("atlassian_v2")
+            == "http://localhost:8000/connections/atlassian_v2/callback"
+        )
 
     def test_custom_port(self):
         client = OAuthProxyClient(port=9999)
-        assert client.get_redirect_uri("github") == \
-            "http://localhost:9999/connections/github/callback"
+        assert (
+            client.get_redirect_uri("github") == "http://localhost:9999/connections/github/callback"
+        )
 
     def test_port_from_env(self):
         with patch.dict(os.environ, {"BOND_AUTH_PROXY_PORT": "7777"}):
@@ -35,8 +40,10 @@ class TestGetRedirectUri:
             {"BOND_AUTH_PROXY_PUBLIC_URL": "https://auth.mcps.example.com"},
         ):
             client = OAuthProxyClient(port=8000)
-            assert client.get_redirect_uri("github") == \
-                "https://auth.mcps.example.com/connections/github/callback"
+            assert (
+                client.get_redirect_uri("github")
+                == "https://auth.mcps.example.com/connections/github/callback"
+            )
 
     def test_public_url_strips_trailing_slash(self):
         with patch.dict(
@@ -44,14 +51,18 @@ class TestGetRedirectUri:
             {"BOND_AUTH_PROXY_PUBLIC_URL": "https://auth.mcps.example.com/"},
         ):
             client = OAuthProxyClient(port=8000)
-            assert client.get_redirect_uri("github") == \
-                "https://auth.mcps.example.com/connections/github/callback"
+            assert (
+                client.get_redirect_uri("github")
+                == "https://auth.mcps.example.com/connections/github/callback"
+            )
 
     def test_empty_public_url_falls_back_to_localhost(self):
         with patch.dict(os.environ, {"BOND_AUTH_PROXY_PUBLIC_URL": ""}):
             client = OAuthProxyClient(port=8000)
-            assert client.get_redirect_uri("github") == \
-                "http://localhost:8000/connections/github/callback"
+            assert (
+                client.get_redirect_uri("github")
+                == "http://localhost:8000/connections/github/callback"
+            )
 
     def test_public_url_ignores_client_port(self):
         """Public URL is authoritative — the client's internal port matters
@@ -62,8 +73,10 @@ class TestGetRedirectUri:
             {"BOND_AUTH_PROXY_PUBLIC_URL": "https://auth.mcps.example.com"},
         ):
             client = OAuthProxyClient(port=9999)
-            assert client.get_redirect_uri("github") == \
-                "https://auth.mcps.example.com/connections/github/callback"
+            assert (
+                client.get_redirect_uri("github")
+                == "https://auth.mcps.example.com/connections/github/callback"
+            )
 
 
 class TestHealthCheck:
@@ -92,8 +105,7 @@ class TestHealthCheck:
 
     def test_unhealthy(self):
         client = OAuthProxyClient()
-        with patch("auth.proxy_client.urllib.request.urlopen",
-                   side_effect=OSError("refused")):
+        with patch("auth.proxy_client.urllib.request.urlopen", side_effect=OSError("refused")):
             assert client._health_check() is False
 
 
@@ -141,9 +153,10 @@ class TestWaitForCallback:
             call_count["n"] += 1
             return resp
 
-        with patch("auth.proxy_client.urllib.request.urlopen",
-                   side_effect=fake_urlopen), \
-             patch("auth.proxy_client.time.sleep"):
+        with (
+            patch("auth.proxy_client.urllib.request.urlopen", side_effect=fake_urlopen),
+            patch("auth.proxy_client.time.sleep"),
+        ):
             result = client.wait_for_callback("s1", timeout=10)
 
         assert result["code"] == "abc"
@@ -160,11 +173,11 @@ class TestWaitForCallback:
             resp.__exit__ = MagicMock(return_value=False)
             return resp
 
-        with patch("auth.proxy_client.urllib.request.urlopen",
-                   side_effect=fake_urlopen), \
-             patch("auth.proxy_client.time.sleep"), \
-             patch("auth.proxy_client.time.time",
-                   side_effect=[0, 0, 1, 1, 200, 200]):
+        with (
+            patch("auth.proxy_client.urllib.request.urlopen", side_effect=fake_urlopen),
+            patch("auth.proxy_client.time.sleep"),
+            patch("auth.proxy_client.time.time", side_effect=[0, 0, 1, 1, 200, 200]),
+        ):
             with pytest.raises(TimeoutError, match="Timed out"):
                 client.wait_for_callback("s1", timeout=5)
 
@@ -175,13 +188,19 @@ class TestWaitForCallback:
 
         def fake_urlopen(req, timeout=None):
             import urllib.error
+
             raise urllib.error.HTTPError(
-                req.full_url, 404, "Not Found", {}, None,
+                req.full_url,
+                404,
+                "Not Found",
+                {},
+                None,
             )
 
-        with patch("auth.proxy_client.urllib.request.urlopen",
-                   side_effect=fake_urlopen), \
-             patch("auth.proxy_client.time.sleep"):
+        with (
+            patch("auth.proxy_client.urllib.request.urlopen", side_effect=fake_urlopen),
+            patch("auth.proxy_client.time.sleep"),
+        ):
             with pytest.raises(AuthStateExpiredError):
                 client.wait_for_callback("s1", timeout=5)
 

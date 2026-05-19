@@ -6,32 +6,28 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import respx
-
+from ms_graph import power_bi as pbi
 from ms_graph.graph_client import GraphError
 from ms_graph.power_bi import (
     POWERBI_BASE_URL,
-    PowerBIClient,
     AsyncPowerBIClient,
+    PowerBIClient,
     _format_dax_results,
     _workspace_base,
 )
-from ms_graph import power_bi as pbi
+
 from .conftest import (
-    SAMPLE_PBI_WORKSPACE,
-    SAMPLE_PBI_WORKSPACE_2,
-    SAMPLE_PBI_WORKSPACES_RESPONSE,
-    SAMPLE_PBI_DATASET,
-    SAMPLE_PBI_DATASETS_RESPONSE,
-    SAMPLE_PBI_REPORT,
-    SAMPLE_PBI_REPORTS_RESPONSE,
-    SAMPLE_PBI_DASHBOARD,
     SAMPLE_PBI_DASHBOARDS_RESPONSE,
-    SAMPLE_PBI_DAX_RESULT,
+    SAMPLE_PBI_DATASETS_RESPONSE,
     SAMPLE_PBI_DAX_EMPTY,
-    SAMPLE_PBI_REFRESH_HISTORY,
+    SAMPLE_PBI_DAX_RESULT,
+    SAMPLE_PBI_EXPORT_FAILED,
     SAMPLE_PBI_EXPORT_IN_PROGRESS,
     SAMPLE_PBI_EXPORT_SUCCEEDED,
-    SAMPLE_PBI_EXPORT_FAILED,
+    SAMPLE_PBI_REFRESH_HISTORY,
+    SAMPLE_PBI_REPORTS_RESPONSE,
+    SAMPLE_PBI_WORKSPACE,
+    SAMPLE_PBI_WORKSPACES_RESPONSE,
 )
 
 WORKSPACE_ID = "ws-id-001"
@@ -51,6 +47,7 @@ def no_pbi_sleep(monkeypatch):
 # _format_dax_results helper
 # ---------------------------------------------------------------------------
 
+
 class TestWorkspaceBase:
     def test_empty_string_is_my_workspace(self):
         assert _workspace_base("") == ""
@@ -65,7 +62,10 @@ class TestWorkspaceBase:
         assert _workspace_base("ws-id-001") == "/groups/ws-id-001"
 
     def test_uuid_workspace(self):
-        assert _workspace_base("1f7cdf01-efac-4705-9343-1037c7dd4d05") == "/groups/1f7cdf01-efac-4705-9343-1037c7dd4d05"
+        assert (
+            _workspace_base("1f7cdf01-efac-4705-9343-1037c7dd4d05")
+            == "/groups/1f7cdf01-efac-4705-9343-1037c7dd4d05"
+        )
 
 
 class TestFormatDaxResults:
@@ -99,36 +99,53 @@ class TestFormatDaxResults:
     def test_sparse_rows_inconsistent_keys(self):
         """Power BI omits null columns from rows — DictWriter must handle missing keys."""
         sparse = {
-            "results": [{"tables": [{"rows": [
-                {"[Region]": "West", "[Sales]": 1000},       # [Units] absent (null)
-                {"[Region]": "East", "[Sales]": 500, "[Units]": 200},
-            ]}]}]
+            "results": [
+                {
+                    "tables": [
+                        {
+                            "rows": [
+                                {"[Region]": "West", "[Sales]": 1000},  # [Units] absent (null)
+                                {"[Region]": "East", "[Sales]": 500, "[Units]": 200},
+                            ]
+                        }
+                    ]
+                }
+            ]
         }
         result = _format_dax_results(sparse)
         lines = result.strip().splitlines()
         assert "[Region]" in lines[0]
         assert "[Sales]" in lines[0]
-        assert "[Units]" in lines[0]   # column present even though first row lacks it
+        assert "[Units]" in lines[0]  # column present even though first row lacks it
         assert "West" in result
         assert "200" in result
 
     def test_null_values_render_as_empty(self):
         """None values in rows render as empty CSV cells."""
         data = {
-            "results": [{"tables": [{"rows": [
-                {"[A]": "x", "[B]": None},
-                {"[A]": None, "[B]": "y"},
-            ]}]}]
+            "results": [
+                {
+                    "tables": [
+                        {
+                            "rows": [
+                                {"[A]": "x", "[B]": None},
+                                {"[A]": None, "[B]": "y"},
+                            ]
+                        }
+                    ]
+                }
+            ]
         }
         result = _format_dax_results(data)
         lines = result.strip().splitlines()
-        assert lines[1] == "x,"    # B is None → empty
-        assert lines[2] == ",y"    # A is None → empty
+        assert lines[1] == "x,"  # B is None → empty
+        assert lines[2] == ",y"  # A is None → empty
 
 
 # ---------------------------------------------------------------------------
 # Synchronous tests
 # ---------------------------------------------------------------------------
+
 
 class TestPowerBISync:
     """Synchronous Power BI operation tests."""
@@ -242,8 +259,7 @@ class TestPowerBISync:
         ).mock(return_value=httpx.Response(200, json=SAMPLE_PBI_DAX_RESULT))
         with PowerBIClient("tok") as client:
             result = pbi.execute_dax_query(
-                client, WORKSPACE_ID, DATASET_ID,
-                "EVALUATE TOPN(3, 'Sales', 'Sales'[Amount], DESC)"
+                client, WORKSPACE_ID, DATASET_ID, "EVALUATE TOPN(3, 'Sales', 'Sales'[Amount], DESC)"
             )
 
         assert route.called
@@ -256,9 +272,14 @@ class TestPowerBISync:
     def test_execute_dax_query_400_syntax_error(self):
         respx.post(
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/datasets/{DATASET_ID}/executeQueries"
-        ).mock(return_value=httpx.Response(400, json={
-            "error": {"code": "BadRequest", "message": "DAX syntax error near 'EVALUATEE'"}
-        }))
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": {"code": "BadRequest", "message": "DAX syntax error near 'EVALUATEE'"}
+                },
+            )
+        )
         with pytest.raises(GraphError, match="BadRequest"):
             with PowerBIClient("tok") as client:
                 pbi.execute_dax_query(client, WORKSPACE_ID, DATASET_ID, "EVALUATEE")
@@ -286,7 +307,9 @@ class TestPowerBISync:
 
     @respx.mock
     def test_start_export(self):
-        export_location = f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
+        export_location = (
+            f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
+        )
         route = respx.post(
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/ExportTo"
         ).mock(return_value=httpx.Response(202, headers={"Location": export_location}))
@@ -299,7 +322,9 @@ class TestPowerBISync:
 
     @respx.mock
     def test_start_export_with_pages(self):
-        export_location = f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
+        export_location = (
+            f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
+        )
         route = respx.post(
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/ExportTo"
         ).mock(return_value=httpx.Response(202, headers={"Location": export_location}))
@@ -334,9 +359,12 @@ class TestPowerBISync:
     @respx.mock
     def test_error_propagates_as_graph_error(self):
         respx.get(f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports").mock(
-            return_value=httpx.Response(404, json={
-                "error": {"code": "PowerBIEntityNotFound", "message": "Workspace not found."}
-            })
+            return_value=httpx.Response(
+                404,
+                json={
+                    "error": {"code": "PowerBIEntityNotFound", "message": "Workspace not found."}
+                },
+            )
         )
         with pytest.raises(GraphError) as exc_info:
             with PowerBIClient("tok") as client:
@@ -349,9 +377,17 @@ class TestPowerBISync:
     def test_403_premium_capacity_error(self):
         respx.post(
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/datasets/{DATASET_ID}/executeQueries"
-        ).mock(return_value=httpx.Response(403, json={
-            "error": {"code": "Forbidden", "message": "DAX query requires Premium or PPU capacity."}
-        }))
+        ).mock(
+            return_value=httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": "Forbidden",
+                        "message": "DAX query requires Premium or PPU capacity.",
+                    }
+                },
+            )
+        )
         with pytest.raises(GraphError) as exc_info:
             with PowerBIClient("tok") as client:
                 pbi.execute_dax_query(client, WORKSPACE_ID, DATASET_ID, "EVALUATE 'Sales'")
@@ -381,10 +417,12 @@ class TestPollExportSync:
     def test_wait_polls_through_running_to_succeeded(self):
         respx.get(
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
-        ).mock(side_effect=[
-            httpx.Response(200, json=SAMPLE_PBI_EXPORT_IN_PROGRESS),
-            httpx.Response(200, json=SAMPLE_PBI_EXPORT_SUCCEEDED),
-        ])
+        ).mock(
+            side_effect=[
+                httpx.Response(200, json=SAMPLE_PBI_EXPORT_IN_PROGRESS),
+                httpx.Response(200, json=SAMPLE_PBI_EXPORT_SUCCEEDED),
+            ]
+        )
         with PowerBIClient("tok") as client:
             status = pbi.poll_export(client, WORKSPACE_ID, REPORT_ID, EXPORT_ID)
 
@@ -405,6 +443,7 @@ class TestPollExportSync:
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
         ).mock(return_value=httpx.Response(200, json=SAMPLE_PBI_EXPORT_IN_PROGRESS))
         import ms_graph.power_bi as pbi_mod
+
         with patch.object(pbi_mod, "_EXPORT_POLL_TIMEOUT", 0):
             with pytest.raises(GraphError, match="ExportTimeout"):
                 with PowerBIClient("tok") as client:
@@ -414,6 +453,7 @@ class TestPollExportSync:
 # ---------------------------------------------------------------------------
 # Asynchronous tests
 # ---------------------------------------------------------------------------
+
 
 class TestPowerBIAsync:
     """Asynchronous Power BI operation tests."""
@@ -483,9 +523,9 @@ class TestPowerBIAsync:
 
     @respx.mock
     async def test_aget_refresh_history(self):
-        respx.get(
-            f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/datasets/{DATASET_ID}/refreshes"
-        ).mock(return_value=httpx.Response(200, json=SAMPLE_PBI_REFRESH_HISTORY))
+        respx.get(f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/datasets/{DATASET_ID}/refreshes").mock(
+            return_value=httpx.Response(200, json=SAMPLE_PBI_REFRESH_HISTORY)
+        )
         async with AsyncPowerBIClient("tok") as client:
             history = await pbi.aget_refresh_history(client, WORKSPACE_ID, DATASET_ID)
 
@@ -493,10 +533,12 @@ class TestPowerBIAsync:
 
     @respx.mock
     async def test_astart_export(self):
-        export_location = f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
-        respx.post(
-            f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/ExportTo"
-        ).mock(return_value=httpx.Response(202, headers={"Location": export_location}))
+        export_location = (
+            f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
+        )
+        respx.post(f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/ExportTo").mock(
+            return_value=httpx.Response(202, headers={"Location": export_location})
+        )
         async with AsyncPowerBIClient("tok") as client:
             export_id = await pbi.astart_export(client, WORKSPACE_ID, REPORT_ID, "PPTX")
 
@@ -516,9 +558,9 @@ class TestPowerBIAsync:
     @respx.mock
     async def test_async_error_propagates(self):
         respx.get(f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/datasets").mock(
-            return_value=httpx.Response(401, json={
-                "error": {"code": "Unauthorized", "message": "Token expired."}
-            })
+            return_value=httpx.Response(
+                401, json={"error": {"code": "Unauthorized", "message": "Token expired."}}
+            )
         )
         with pytest.raises(GraphError) as exc_info:
             async with AsyncPowerBIClient("tok") as client:
@@ -548,10 +590,12 @@ class TestApollExportAsync:
     async def test_await_polls_through_running(self):
         respx.get(
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
-        ).mock(side_effect=[
-            httpx.Response(200, json=SAMPLE_PBI_EXPORT_IN_PROGRESS),
-            httpx.Response(200, json=SAMPLE_PBI_EXPORT_SUCCEEDED),
-        ])
+        ).mock(
+            side_effect=[
+                httpx.Response(200, json=SAMPLE_PBI_EXPORT_IN_PROGRESS),
+                httpx.Response(200, json=SAMPLE_PBI_EXPORT_SUCCEEDED),
+            ]
+        )
         async with AsyncPowerBIClient("tok") as client:
             status = await pbi.apoll_export(client, WORKSPACE_ID, REPORT_ID, EXPORT_ID)
 
@@ -572,6 +616,7 @@ class TestApollExportAsync:
             f"{POWERBI_BASE_URL}/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/exports/{EXPORT_ID}"
         ).mock(return_value=httpx.Response(200, json=SAMPLE_PBI_EXPORT_IN_PROGRESS))
         import ms_graph.power_bi as pbi_mod
+
         with patch.object(pbi_mod, "_EXPORT_POLL_TIMEOUT", 0):
             with pytest.raises(GraphError, match="ExportTimeout"):
                 async with AsyncPowerBIClient("tok") as client:

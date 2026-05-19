@@ -13,7 +13,6 @@ from unittest.mock import MagicMock, patch
 
 from auth.token_store import TokenStore
 
-
 TOKEN_PATTERNS = [
     "gho_supersecretaccesstoken",
     "ghp_supersecretaccesstoken",
@@ -36,21 +35,25 @@ def test_no_token_substrings_in_logs(repo, caplog):
 
     def fake_urlopen(req, timeout=None):
         resp = MagicMock()
-        resp.read.return_value = json.dumps({
-            "access_token": "gho_supersecretaccesstoken",
-            "refresh_token": "rtk_supersecretrefreshtoken",
-            "expires_in": 3600,
-        }).encode()
+        resp.read.return_value = json.dumps(
+            {
+                "access_token": "gho_supersecretaccesstoken",
+                "refresh_token": "rtk_supersecretrefreshtoken",
+                "expires_in": 3600,
+            }
+        ).encode()
         resp.__enter__ = MagicMock(return_value=resp)
         resp.__exit__ = MagicMock(return_value=False)
         return resp
 
     with caplog.at_level(logging.DEBUG):
-        store.save_token({
-            "access_token": "gho_supersecretaccesstoken",
-            "refresh_token": "rtk_supersecretrefreshtoken",
-            "expires_at": time.time() - 100,
-        })
+        store.save_token(
+            {
+                "access_token": "gho_supersecretaccesstoken",
+                "refresh_token": "rtk_supersecretrefreshtoken",
+                "expires_at": time.time() - 100,
+            }
+        )
         store.get_token()
         with patch("auth.token_store.urllib.request.urlopen", side_effect=fake_urlopen):
             store.refresh_if_needed("cid", "secret", "https://token.url")
@@ -58,7 +61,8 @@ def test_no_token_substrings_in_logs(repo, caplog):
         store.clear()
 
     leaked = [
-        (rec.name, rec.getMessage()) for rec in caplog.records
+        (rec.name, rec.getMessage())
+        for rec in caplog.records
         if _record_contains_any(rec, TOKEN_PATTERNS)
     ]
     assert leaked == [], f"Token leaked into logs: {leaked}"
@@ -105,9 +109,9 @@ def test_per_mcp_cli_modules_apply_log_discipline():
             f"{path.name} does not import log_discipline — OAuth token "
             "exchanges could leak via httpx/authlib/msal debug logs"
         )
-        assert "log_discipline.apply()" in text, (
-            f"{path.name} imports log_discipline but never calls apply()"
-        )
+        assert (
+            "log_discipline.apply()" in text
+        ), f"{path.name} imports log_discipline but never calls apply()"
 
 
 def test_per_mcp_mcp_servers_apply_log_discipline():
@@ -122,9 +126,7 @@ def test_per_mcp_mcp_servers_apply_log_discipline():
     ]
     for path in targets:
         text = path.read_text()
-        assert "log_discipline.apply()" in text, (
-            f"{path.name} does not call log_discipline.apply()"
-        )
+        assert "log_discipline.apply()" in text, f"{path.name} does not call log_discipline.apply()"
 
 
 def test_proxy_server_applies_log_discipline():
@@ -135,9 +137,7 @@ def test_proxy_server_applies_log_discipline():
 
     proxy = Path(__file__).resolve().parents[1] / "auth" / "proxy_server.py"
     text = proxy.read_text()
-    assert "log_discipline.apply()" in text, (
-        "proxy_server.py does not call log_discipline.apply()"
-    )
+    assert "log_discipline.apply()" in text, "proxy_server.py does not call log_discipline.apply()"
 
 
 def test_model_repr_masks_encrypted_columns(repo):
@@ -145,8 +145,8 @@ def test_model_repr_masks_encrypted_columns(repo):
     store = TokenStore("github", user_key="alice")
     store.save_token({"access_token": "gho_supersecretaccesstoken"})
 
-    from auth.db.session import get_session_factory
     from auth.db.models import ProviderToken
+    from auth.db.session import get_session_factory
 
     factory = get_session_factory()
     with factory() as s:

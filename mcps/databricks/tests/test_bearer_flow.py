@@ -23,7 +23,6 @@ The invariants:
 
 from unittest.mock import MagicMock, patch
 
-
 WORKSPACE_HOST = "https://dbc-test.cloud.databricks.com"
 HTTP_PATH = "/sql/1.0/warehouses/abc"
 
@@ -51,8 +50,8 @@ async def test_bearer_header_reaches_sql_connect(monkeypatch):
     # we'd see the PAT come through instead of the Bearer.
     monkeypatch.setenv("DATABRICKS_ACCESS_TOKEN", "FALLBACK-pat-leak-canary")
 
-    from fastmcp import Client
     from databricks_mcp import mcp
+    from fastmcp import Client
 
     captured = {}
 
@@ -63,25 +62,33 @@ async def test_bearer_header_reaches_sql_connect(monkeypatch):
     # The in-process Client does not produce a real HTTP request, so
     # get_http_headers() returns nothing. We patch it to simulate the Bond AI
     # backend forwarding a Bearer token.
-    with patch("fastmcp.server.dependencies.get_http_headers",
-               return_value={"authorization": "Bearer USER-A-bearer-token"}), \
-         patch("dbx.client.sql.connect", side_effect=fake_connect):
+    with (
+        patch(
+            "fastmcp.server.dependencies.get_http_headers",
+            return_value={"authorization": "Bearer USER-A-bearer-token"},
+        ),
+        patch("dbx.client.sql.connect", side_effect=fake_connect),
+    ):
         async with Client(mcp) as client:
             await client.call_tool("run_query", {"query": "SELECT 1"})
 
-    assert captured.get("access_token") == "USER-A-bearer-token", \
-        "Bearer header was NOT passed through — the PAT fallback was used " \
+    assert captured.get("access_token") == "USER-A-bearer-token", (
+        "Bearer header was NOT passed through — the PAT fallback was used "
         "instead, indicating contextvar capture regressed."
-    assert "credentials_provider" not in captured, \
-        "credentials_provider callback present — could fire from worker " \
+    )
+    assert "credentials_provider" not in captured, (
+        "credentials_provider callback present — could fire from worker "
         "thread with stale context."
+    )
     # BOTH telemetry flags required: force_enable_telemetry=True overrides
     # enable_telemetry=False (telemetry_client.py:is_telemetry_enabled).
-    assert captured.get("enable_telemetry") is False, \
-        "Telemetry enabled — background thread could leak auth identity."
-    assert captured.get("force_enable_telemetry") is False, \
-        "force_enable_telemetry not set False — a config layer that flips " \
+    assert (
+        captured.get("enable_telemetry") is False
+    ), "Telemetry enabled — background thread could leak auth identity."
+    assert captured.get("force_enable_telemetry") is False, (
+        "force_enable_telemetry not set False — a config layer that flips "
         "it on would silently re-enable the leaking daemon thread."
+    )
 
 
 async def test_pat_used_when_no_bearer_header(monkeypatch):
@@ -90,8 +97,8 @@ async def test_pat_used_when_no_bearer_header(monkeypatch):
     monkeypatch.setenv("DATABRICKS_HTTP_PATH", HTTP_PATH)
     monkeypatch.setenv("DATABRICKS_ACCESS_TOKEN", "the-pat")
 
-    from fastmcp import Client
     from databricks_mcp import mcp
+    from fastmcp import Client
 
     captured = {}
 
@@ -99,9 +106,12 @@ async def test_pat_used_when_no_bearer_header(monkeypatch):
         captured.update(kwargs)
         return _mock_conn()
 
-    with patch("fastmcp.server.dependencies.get_http_headers",
-               side_effect=Exception("no http context")), \
-         patch("dbx.client.sql.connect", side_effect=fake_connect):
+    with (
+        patch(
+            "fastmcp.server.dependencies.get_http_headers", side_effect=Exception("no http context")
+        ),
+        patch("dbx.client.sql.connect", side_effect=fake_connect),
+    ):
         async with Client(mcp) as client:
             await client.call_tool("run_query", {"query": "SELECT 1"})
 
@@ -116,8 +126,8 @@ async def test_oauth_wins_over_pat(monkeypatch):
     monkeypatch.setenv("DATABRICKS_CLIENT_ID", "oauth-id")
     monkeypatch.setenv("DATABRICKS_ACCESS_TOKEN", "pat-should-be-ignored")
 
-    from fastmcp import Client
     from databricks_mcp import mcp
+    from fastmcp import Client
 
     captured = {}
 
@@ -125,10 +135,13 @@ async def test_oauth_wins_over_pat(monkeypatch):
         captured.update(kwargs)
         return _mock_conn()
 
-    with patch("fastmcp.server.dependencies.get_http_headers",
-               side_effect=Exception("no http context")), \
-         patch("dbx.local_auth.get_local_token", return_value="oauth-tok"), \
-         patch("dbx.client.sql.connect", side_effect=fake_connect):
+    with (
+        patch(
+            "fastmcp.server.dependencies.get_http_headers", side_effect=Exception("no http context")
+        ),
+        patch("dbx.local_auth.get_local_token", return_value="oauth-tok"),
+        patch("dbx.client.sql.connect", side_effect=fake_connect),
+    ):
         async with Client(mcp) as client:
             await client.call_tool("run_query", {"query": "SELECT 1"})
 

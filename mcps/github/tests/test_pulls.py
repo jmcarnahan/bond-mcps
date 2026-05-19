@@ -1,16 +1,15 @@
 """Tests for pull request operations."""
 
 import httpx
-import pytest
 import respx
-
 from github.github_client import GITHUB_API_BASE_URL, AsyncGitHubClient, GitHubClient
+
 from .conftest import (
-    SAMPLE_PR,
-    SAMPLE_PRS_RESPONSE,
+    SAMPLE_CREATED_COMMENT,
     SAMPLE_CREATED_PR,
     SAMPLE_MERGE_RESULT,
-    SAMPLE_CREATED_COMMENT,
+    SAMPLE_PR,
+    SAMPLE_PRS_RESPONSE,
 )
 
 
@@ -45,8 +44,9 @@ class TestPullsSync:
 
     @respx.mock
     def test_create_pull(self):
-        from github.pulls import create_pull
         import json
+
+        from github.pulls import create_pull
 
         route = respx.post(f"{GITHUB_API_BASE_URL}/repos/o/r/pulls").mock(
             return_value=httpx.Response(201, json=SAMPLE_CREATED_PR)

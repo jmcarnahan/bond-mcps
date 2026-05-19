@@ -10,8 +10,6 @@ fail because Microsoft invalidates refresh tokens on use.
 import threading
 import time
 
-from auth.db.repository import TokenRepository
-
 
 def test_locked_msal_cache_serializes_writers(repo):
     """Two threads each do a R-M-W under locked_msal_cache.
@@ -30,6 +28,7 @@ def test_locked_msal_cache_serializes_writers(repo):
     def worker():
         barrier.wait()
         import json
+
         with repo.locked_msal_cache("alice") as handle:
             enter_times.append(time.monotonic())
             data = json.loads(handle.blob or '{"counter": 0}')
@@ -46,10 +45,9 @@ def test_locked_msal_cache_serializes_writers(repo):
 
     # Both increments must be preserved → final counter is 2.
     import json
+
     final = json.loads(repo.get_msal_cache("alice"))
-    assert final["counter"] == 2, (
-        f"Lost update: counter={final['counter']}, expected 2"
-    )
+    assert final["counter"] == 2, f"Lost update: counter={final['counter']}, expected 2"
 
     # The two enter timestamps must not overlap with the prior exit —
     # i.e., second enter happens after first exit. This is the
@@ -58,8 +56,7 @@ def test_locked_msal_cache_serializes_writers(repo):
     first_exit = min(exit_times)
     later_enter = max(enter_times)
     assert later_enter >= first_exit, (
-        f"Locks did not serialize: later_enter={later_enter}, "
-        f"first_exit={first_exit}"
+        f"Locks did not serialize: later_enter={later_enter}, " f"first_exit={first_exit}"
     )
 
 

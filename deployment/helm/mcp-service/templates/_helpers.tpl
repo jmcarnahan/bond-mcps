@@ -97,7 +97,13 @@ the same environment.
 - secretRef:
     name: {{ include "mcp-service.fullname" . }}-oauth
 {{- end }}
-{{- if .Values.jwt.enabled }}
+{{/*
+Only reference the -jwt Secret when we're in legacy static-PEM mode
+(`jwt.enabled` AND `jwt.publicKey.secretsManagerName` set). In JWKS-URI mode
+the chart doesn't create a -jwt ExternalSecret, so referencing the missing
+Secret here would block the pod from starting (CreateContainerConfigError).
+*/}}
+{{- if and .Values.jwt.enabled .Values.jwt.publicKey.secretsManagerName }}
 - secretRef:
     name: {{ include "mcp-service.fullname" . }}-jwt
 {{- end }}

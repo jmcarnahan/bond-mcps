@@ -3,7 +3,6 @@
 import httpx
 import pytest
 import respx
-
 from github.github_client import (
     GITHUB_API_BASE_URL,
     AsyncGitHubClient,

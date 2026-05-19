@@ -4,9 +4,9 @@ Issue operations using the GitHub REST API.
 All functions accept a GitHubClient or AsyncGitHubClient and return parsed dicts.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .github_client import GitHubClient, AsyncGitHubClient
+from .github_client import AsyncGitHubClient, GitHubClient
 
 # GitHub API caps per_page at 100
 _MAX_PER_PAGE = 100
@@ -20,6 +20,7 @@ def _cap(per_page: int) -> int:
 # Synchronous
 # ---------------------------------------------------------------------------
 
+
 def list_issues(
     client: GitHubClient,
     owner: str,
@@ -27,9 +28,9 @@ def list_issues(
     state: str = "open",
     labels: str = "",
     per_page: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List issues in a repository."""
-    params: Dict[str, Any] = {"state": state, "per_page": _cap(per_page)}
+    params: dict[str, Any] = {"state": state, "per_page": _cap(per_page)}
     if labels:
         params["labels"] = labels
     data = client.get(f"/repos/{owner}/{repo}/issues", params=params)
@@ -41,7 +42,7 @@ def get_issue(
     owner: str,
     repo: str,
     issue_number: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get a single issue by number."""
     return client.get(f"/repos/{owner}/{repo}/issues/{issue_number}")
 
@@ -52,7 +53,7 @@ def get_issue_comments(
     repo: str,
     issue_number: int,
     per_page: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get comments on an issue."""
     data = client.get(
         f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -67,11 +68,11 @@ def create_issue(
     repo: str,
     title: str,
     body: str = "",
-    labels: Optional[List[str]] = None,
-    assignees: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    labels: list[str] | None = None,
+    assignees: list[str] | None = None,
+) -> dict[str, Any]:
     """Create a new issue."""
-    payload: Dict[str, Any] = {"title": title}
+    payload: dict[str, Any] = {"title": title}
     if body:
         payload["body"] = body
     if labels:
@@ -86,13 +87,13 @@ def update_issue(
     owner: str,
     repo: str,
     issue_number: int,
-    title: Optional[str] = None,
-    body: Optional[str] = None,
-    state: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    title: str | None = None,
+    body: str | None = None,
+    state: str | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
     """Update an existing issue."""
-    payload: Dict[str, Any] = {}
+    payload: dict[str, Any] = {}
     if title is not None:
         payload["title"] = title
     if body is not None:
@@ -110,7 +111,7 @@ def add_issue_comment(
     repo: str,
     issue_number: int,
     body: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Add a comment to an issue."""
     return client.post(
         f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -122,6 +123,7 @@ def add_issue_comment(
 # Asynchronous
 # ---------------------------------------------------------------------------
 
+
 async def alist_issues(
     client: AsyncGitHubClient,
     owner: str,
@@ -129,9 +131,9 @@ async def alist_issues(
     state: str = "open",
     labels: str = "",
     per_page: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List issues in a repository (async)."""
-    params: Dict[str, Any] = {"state": state, "per_page": _cap(per_page)}
+    params: dict[str, Any] = {"state": state, "per_page": _cap(per_page)}
     if labels:
         params["labels"] = labels
     data = await client.get(f"/repos/{owner}/{repo}/issues", params=params)
@@ -143,7 +145,7 @@ async def aget_issue(
     owner: str,
     repo: str,
     issue_number: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get a single issue by number (async)."""
     return await client.get(f"/repos/{owner}/{repo}/issues/{issue_number}")
 
@@ -154,7 +156,7 @@ async def aget_issue_comments(
     repo: str,
     issue_number: int,
     per_page: int = 30,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get comments on an issue (async)."""
     data = await client.get(
         f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -169,11 +171,11 @@ async def acreate_issue(
     repo: str,
     title: str,
     body: str = "",
-    labels: Optional[List[str]] = None,
-    assignees: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    labels: list[str] | None = None,
+    assignees: list[str] | None = None,
+) -> dict[str, Any]:
     """Create a new issue (async)."""
-    payload: Dict[str, Any] = {"title": title}
+    payload: dict[str, Any] = {"title": title}
     if body:
         payload["body"] = body
     if labels:
@@ -188,13 +190,13 @@ async def aupdate_issue(
     owner: str,
     repo: str,
     issue_number: int,
-    title: Optional[str] = None,
-    body: Optional[str] = None,
-    state: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    title: str | None = None,
+    body: str | None = None,
+    state: str | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
     """Update an existing issue (async)."""
-    payload: Dict[str, Any] = {}
+    payload: dict[str, Any] = {}
     if title is not None:
         payload["title"] = title
     if body is not None:
@@ -212,7 +214,7 @@ async def aadd_issue_comment(
     repo: str,
     issue_number: int,
     body: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Add a comment to an issue (async)."""
     return await client.post(
         f"/repos/{owner}/{repo}/issues/{issue_number}/comments",

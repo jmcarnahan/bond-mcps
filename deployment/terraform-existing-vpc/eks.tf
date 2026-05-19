@@ -31,9 +31,16 @@ module "eks" {
   enabled_log_types = ["api", "audit", "authenticator"]
 
   addons = {
-    coredns                = {}
-    kube-proxy             = {}
-    vpc-cni                = {}
+    coredns = {}
+    # vpc-cni and kube-proxy must install BEFORE the managed node group is
+    # created: without aws-node/kube-proxy DaemonSets in place, the first
+    # nodes come up with no CNI plugin, get stuck NotReady, and EKS times
+    # out the node group with `NodeCreationFailure: Unhealthy nodes`. The
+    # `before_compute = true` flag tells the module to roll these add-ons
+    # in the same step as the cluster, so the manifests exist when nodes
+    # register.
+    kube-proxy             = { before_compute = true }
+    vpc-cni                = { before_compute = true }
     eks-pod-identity-agent = {}
   }
 

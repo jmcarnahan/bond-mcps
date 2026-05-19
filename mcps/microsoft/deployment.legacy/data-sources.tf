@@ -46,7 +46,7 @@ locals {
     var.mcp_microsoft_enabled
     ? (var.mcp_microsoft_is_private
       ? aws_apprunner_vpc_ingress_connection.mcp_microsoft[0].domain_name
-      : aws_apprunner_service.mcp_microsoft[0].service_url)
+    : aws_apprunner_service.mcp_microsoft[0].service_url)
     : ""
   )
 }

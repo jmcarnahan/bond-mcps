@@ -94,20 +94,41 @@ secrets:
     #   {"GITHUB_CLIENT_ID":"…","GITHUB_CLIENT_SECRET":"…"}
 
 # === Multi-tenant identity via JWT verification ===
-# Opt-in. When enabled, every HTTP request that reaches a Path-2 token-DB
-# operation MUST carry `X-Bond-Auth: Bearer <jwt>`. The JWT's signature is
-# verified against the operator-supplied public key (pulled from SM) and the
-# configured claim (default `sub`) becomes the user_key for that request.
+# Opt-in. When enabled, the MCP becomes an OAuth 2.1 Resource Server:
+# FastMCP's RemoteAuthProvider mounts /.well-known/oauth-protected-resource
+# (RFC 9728), returns `401 + WWW-Authenticate: Bearer ... resource_metadata=...`
+# on missing/invalid tokens, and validates the standard `Authorization:
+# Bearer <jwt>` header against the bond-mcps Authorization Server's JWKS.
+# The JWT's `sub` claim (or `subClaim` below) becomes the per-request
+# user_key.
 #
 # When disabled (default), the chart's `userKey` value is used for every
-# caller (single-tenant). See README "Known limitations" for the tradeoff.
+# caller (single-tenant).
+#
+# Set `jwksUri` to the bond-mcps AS's JWKS endpoint (preferred — supports
+# rotation). For tests / static deploys, set `publicKey.secretsManagerName`
+# instead — the SM secret should contain {"BOND_MCPS_JWT_PUBLIC_KEY": "<PEM
+# or HS256 shared secret>"}. Exactly one of jwksUri or publicKey must be
+# configured when `enabled: true`.
 jwt:
   enabled: false
-  secretsManagerName: ""       # SM secret with {"BOND_MCPS_JWT_PUBLIC_KEY": "<PEM>"}
-  issuer: ""                   # optional iss-claim check
-  audience: ""                 # optional aud-claim check
+  jwksUri: ""                  # e.g. https://auth.mcps.example.com/.well-known/jwks.json
+  publicKey:
+    secretsManagerName: ""     # SM secret with {"BOND_MCPS_JWT_PUBLIC_KEY": "<PEM>"}
+  issuer: ""                   # e.g. https://auth.mcps.example.com  (matches AS base URL)
+  # OPTIONAL. The verifier auto-accepts `<publicUrl>/mcp` (the canonical
+  # PRM resource URI Claude Code sends per RFC 8707). Set this only if
+  # another caller emits a non-URI friendly audience — the auto-default
+  # is merged in, so both will work.
+  audience: ""
   algorithm: "RS256"
   subClaim: "sub"
+  # Surfaced in protected-resource-metadata so MCP clients can discover the AS.
+  asBaseUrl: ""                # e.g. https://auth.mcps.example.com
+  # Public URL of *this* MCP. Used as the resource server URL in the
+  # metadata document, the canonical aud claim, and the /connect/<provider>
+  # callback base.
+  publicUrl: ""                # e.g. https://github-mcp.mcps.example.com
 
 # Reference to the ClusterSecretStore created by external-secrets.tf.
 externalSecrets:
@@ -123,7 +144,7 @@ serviceAccount:
 
 ingress:
   enabled: true
-  host: ""                     # e.g. auth.mcps.ai.example.com
+  host: ""                     # e.g. auth.mcps.example.com
   className: alb
   certificateArn: ""           # ACM cert ARN; Terraform passes it
   groupName: bond-mcps         # alb.ingress.kubernetes.io/group.name — shared ALB

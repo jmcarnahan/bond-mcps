@@ -12,7 +12,7 @@ import asyncio
 import csv
 import io
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -20,13 +20,14 @@ from .graph_client import GraphError, _raise_for_graph_error
 
 POWERBI_BASE_URL = "https://api.powerbi.com/v1.0/myorg"
 
-_EXPORT_POLL_INTERVAL = 3   # seconds between export status polls
+_EXPORT_POLL_INTERVAL = 3  # seconds between export status polls
 _EXPORT_POLL_TIMEOUT = 120  # seconds before giving up on an export
 
 
 # ---------------------------------------------------------------------------
 # Clients
 # ---------------------------------------------------------------------------
+
 
 class PowerBIClient:
     """Synchronous Power BI REST API client."""
@@ -38,29 +39,33 @@ class PowerBIClient:
             timeout=30.0,
         )
 
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self._client.get(path, params=params)
         _raise_for_graph_error(response)
         return response.json()
 
-    def post(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def post(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any] | None:
         response = self._client.post(path, json=json_data)
         _raise_for_graph_error(response)
         if response.status_code == 202 or not response.content:
             return None
         return response.json()
 
-    def post_with_location(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> str:
+    def post_with_location(self, path: str, json_data: dict[str, Any] | None = None) -> str:
         """POST that expects 202 + Location header (async PBI operations like export)."""
         response = self._client.post(path, json=json_data)
         _raise_for_graph_error(response)
         if response.status_code != 202:
-            raise GraphError(response.status_code, "UnexpectedStatus",
-                             f"Expected 202 Accepted, got {response.status_code}")
+            raise GraphError(
+                response.status_code,
+                "UnexpectedStatus",
+                f"Expected 202 Accepted, got {response.status_code}",
+            )
         location = response.headers.get("Location", "")
         if not location:
-            raise GraphError(response.status_code, "NoLocation",
-                             "Expected Location header in 202 response")
+            raise GraphError(
+                response.status_code, "NoLocation", "Expected Location header in 202 response"
+            )
         return location
 
     def get_bytes(self, path: str) -> bytes:
@@ -89,29 +94,35 @@ class AsyncPowerBIClient:
             timeout=30.0,
         )
 
-    async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = await self._client.get(path, params=params)
         _raise_for_graph_error(response)
         return response.json()
 
-    async def post(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    async def post(
+        self, path: str, json_data: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         response = await self._client.post(path, json=json_data)
         _raise_for_graph_error(response)
         if response.status_code == 202 or not response.content:
             return None
         return response.json()
 
-    async def post_with_location(self, path: str, json_data: Optional[Dict[str, Any]] = None) -> str:
+    async def post_with_location(self, path: str, json_data: dict[str, Any] | None = None) -> str:
         """POST that expects 202 + Location header (async PBI operations like export)."""
         response = await self._client.post(path, json=json_data)
         _raise_for_graph_error(response)
         if response.status_code != 202:
-            raise GraphError(response.status_code, "UnexpectedStatus",
-                             f"Expected 202 Accepted, got {response.status_code}")
+            raise GraphError(
+                response.status_code,
+                "UnexpectedStatus",
+                f"Expected 202 Accepted, got {response.status_code}",
+            )
         location = response.headers.get("Location", "")
         if not location:
-            raise GraphError(response.status_code, "NoLocation",
-                             "Expected Location header in 202 response")
+            raise GraphError(
+                response.status_code, "NoLocation", "Expected Location header in 202 response"
+            )
         return location
 
     async def get_bytes(self, path: str) -> bytes:
@@ -134,6 +145,7 @@ class AsyncPowerBIClient:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _workspace_base(workspace_id: str) -> str:
     """Return the API base path for a workspace.
 
@@ -145,7 +157,7 @@ def _workspace_base(workspace_id: str) -> str:
     return f"/groups/{workspace_id}"
 
 
-def _format_dax_results(data: Dict[str, Any]) -> str:
+def _format_dax_results(data: dict[str, Any]) -> str:
     """Flatten Power BI DAX query results to a CSV string.
 
     Input shape: {"results": [{"tables": [{"rows": [{col: val, ...}]}]}]}
@@ -175,27 +187,28 @@ def _format_dax_results(data: Dict[str, Any]) -> str:
 # Synchronous operations
 # ---------------------------------------------------------------------------
 
-def list_workspaces(client: PowerBIClient) -> List[Dict[str, Any]]:
+
+def list_workspaces(client: PowerBIClient) -> list[dict[str, Any]]:
     """List all workspaces (groups) the authenticated user has access to."""
     data = client.get("/groups")
     return data.get("value", [])
 
 
-def list_datasets(client: PowerBIClient, workspace_id: str) -> List[Dict[str, Any]]:
+def list_datasets(client: PowerBIClient, workspace_id: str) -> list[dict[str, Any]]:
     """List all datasets in a workspace. Pass workspace_id="" for My workspace."""
     base = _workspace_base(workspace_id)
     data = client.get(f"{base}/datasets")
     return data.get("value", [])
 
 
-def list_reports(client: PowerBIClient, workspace_id: str) -> List[Dict[str, Any]]:
+def list_reports(client: PowerBIClient, workspace_id: str) -> list[dict[str, Any]]:
     """List all reports in a workspace. Pass workspace_id="" for My workspace."""
     base = _workspace_base(workspace_id)
     data = client.get(f"{base}/reports")
     return data.get("value", [])
 
 
-def list_dashboards(client: PowerBIClient, workspace_id: str) -> List[Dict[str, Any]]:
+def list_dashboards(client: PowerBIClient, workspace_id: str) -> list[dict[str, Any]]:
     """List all dashboards in a workspace. Pass workspace_id="" for My workspace."""
     base = _workspace_base(workspace_id)
     data = client.get(f"{base}/dashboards")
@@ -207,15 +220,14 @@ def execute_dax_query(
     workspace_id: str,
     dataset_id: str,
     dax_query: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Execute a DAX query against a dataset. Returns the raw API response."""
     payload = {
         "queries": [{"query": dax_query}],
         "serializerSettings": {"includeNulls": True},
     }
     base = _workspace_base(workspace_id)
-    result = client.post(f"{base}/datasets/{dataset_id}/executeQueries",
-                         json_data=payload)
+    result = client.post(f"{base}/datasets/{dataset_id}/executeQueries", json_data=payload)
     return result or {}
 
 
@@ -234,11 +246,10 @@ def get_refresh_history(
     workspace_id: str,
     dataset_id: str,
     top: int = 5,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get recent refresh history for a dataset."""
     base = _workspace_base(workspace_id)
-    data = client.get(f"{base}/datasets/{dataset_id}/refreshes",
-                      params={"$top": top})
+    data = client.get(f"{base}/datasets/{dataset_id}/refreshes", params={"$top": top})
     return data.get("value", [])
 
 
@@ -247,14 +258,12 @@ def start_export(
     workspace_id: str,
     report_id: str,
     export_format: str = "PDF",
-    pages: Optional[List[str]] = None,
+    pages: list[str] | None = None,
 ) -> str:
     """Start an async report export. Returns the export ID (parsed from Location header)."""
-    payload: Dict[str, Any] = {"format": export_format}
+    payload: dict[str, Any] = {"format": export_format}
     if pages:
-        payload["powerBIReportConfiguration"] = {
-            "pages": [{"pageName": p} for p in pages]
-        }
+        payload["powerBIReportConfiguration"] = {"pages": [{"pageName": p} for p in pages]}
     base = _workspace_base(workspace_id)
     location = client.post_with_location(
         f"{base}/reports/{report_id}/ExportTo",
@@ -273,7 +282,7 @@ def get_export_status(
     workspace_id: str,
     report_id: str,
     export_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Poll the status of an async report export."""
     base = _workspace_base(workspace_id)
     return client.get(f"{base}/reports/{report_id}/exports/{export_id}")
@@ -287,9 +296,7 @@ def download_export(
 ) -> bytes:
     """Download the completed export file as raw bytes."""
     base = _workspace_base(workspace_id)
-    return client.get_bytes(
-        f"{base}/reports/{report_id}/exports/{export_id}/file"
-    )
+    return client.get_bytes(f"{base}/reports/{report_id}/exports/{export_id}/file")
 
 
 def poll_export(
@@ -297,7 +304,7 @@ def poll_export(
     workspace_id: str,
     report_id: str,
     export_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Poll export status until complete or timeout. Returns the final status dict."""
     deadline = time.monotonic() + _EXPORT_POLL_TIMEOUT
     while time.monotonic() < deadline:
@@ -308,37 +315,40 @@ def poll_export(
             return status
         if state == "Failed":
             err = status.get("error", {})
-            raise GraphError(500, err.get("code", "ExportFailed"),
-                             err.get("message", "Export failed"))
-    raise GraphError(504, "ExportTimeout",
-                     f"Export did not complete within {_EXPORT_POLL_TIMEOUT}s")
+            raise GraphError(
+                500, err.get("code", "ExportFailed"), err.get("message", "Export failed")
+            )
+    raise GraphError(
+        504, "ExportTimeout", f"Export did not complete within {_EXPORT_POLL_TIMEOUT}s"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Asynchronous operations
 # ---------------------------------------------------------------------------
 
-async def alist_workspaces(client: AsyncPowerBIClient) -> List[Dict[str, Any]]:
+
+async def alist_workspaces(client: AsyncPowerBIClient) -> list[dict[str, Any]]:
     """List all workspaces the authenticated user has access to (async)."""
     data = await client.get("/groups")
     return data.get("value", [])
 
 
-async def alist_datasets(client: AsyncPowerBIClient, workspace_id: str) -> List[Dict[str, Any]]:
+async def alist_datasets(client: AsyncPowerBIClient, workspace_id: str) -> list[dict[str, Any]]:
     """List all datasets in a workspace (async). Pass workspace_id="" for My workspace."""
     base = _workspace_base(workspace_id)
     data = await client.get(f"{base}/datasets")
     return data.get("value", [])
 
 
-async def alist_reports(client: AsyncPowerBIClient, workspace_id: str) -> List[Dict[str, Any]]:
+async def alist_reports(client: AsyncPowerBIClient, workspace_id: str) -> list[dict[str, Any]]:
     """List all reports in a workspace (async). Pass workspace_id="" for My workspace."""
     base = _workspace_base(workspace_id)
     data = await client.get(f"{base}/reports")
     return data.get("value", [])
 
 
-async def alist_dashboards(client: AsyncPowerBIClient, workspace_id: str) -> List[Dict[str, Any]]:
+async def alist_dashboards(client: AsyncPowerBIClient, workspace_id: str) -> list[dict[str, Any]]:
     """List all dashboards in a workspace (async). Pass workspace_id="" for My workspace."""
     base = _workspace_base(workspace_id)
     data = await client.get(f"{base}/dashboards")
@@ -350,7 +360,7 @@ async def aexecute_dax_query(
     workspace_id: str,
     dataset_id: str,
     dax_query: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Execute a DAX query against a dataset (async). Returns the raw API response."""
     payload = {
         "queries": [{"query": dax_query}],
@@ -379,11 +389,10 @@ async def aget_refresh_history(
     workspace_id: str,
     dataset_id: str,
     top: int = 5,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get recent refresh history for a dataset (async)."""
     base = _workspace_base(workspace_id)
-    data = await client.get(f"{base}/datasets/{dataset_id}/refreshes",
-                            params={"$top": top})
+    data = await client.get(f"{base}/datasets/{dataset_id}/refreshes", params={"$top": top})
     return data.get("value", [])
 
 
@@ -392,14 +401,12 @@ async def astart_export(
     workspace_id: str,
     report_id: str,
     export_format: str = "PDF",
-    pages: Optional[List[str]] = None,
+    pages: list[str] | None = None,
 ) -> str:
     """Start an async report export (async). Returns the export ID."""
-    payload: Dict[str, Any] = {"format": export_format}
+    payload: dict[str, Any] = {"format": export_format}
     if pages:
-        payload["powerBIReportConfiguration"] = {
-            "pages": [{"pageName": p} for p in pages]
-        }
+        payload["powerBIReportConfiguration"] = {"pages": [{"pageName": p} for p in pages]}
     base = _workspace_base(workspace_id)
     location = await client.post_with_location(
         f"{base}/reports/{report_id}/ExportTo",
@@ -414,12 +421,10 @@ async def aget_export_status(
     workspace_id: str,
     report_id: str,
     export_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Poll the status of an async report export (async)."""
     base = _workspace_base(workspace_id)
-    return await client.get(
-        f"{base}/reports/{report_id}/exports/{export_id}"
-    )
+    return await client.get(f"{base}/reports/{report_id}/exports/{export_id}")
 
 
 async def adownload_export(
@@ -430,9 +435,7 @@ async def adownload_export(
 ) -> bytes:
     """Download the completed export file as raw bytes (async)."""
     base = _workspace_base(workspace_id)
-    return await client.get_bytes(
-        f"{base}/reports/{report_id}/exports/{export_id}/file"
-    )
+    return await client.get_bytes(f"{base}/reports/{report_id}/exports/{export_id}/file")
 
 
 async def apoll_export(
@@ -440,7 +443,7 @@ async def apoll_export(
     workspace_id: str,
     report_id: str,
     export_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Poll export status until complete or timeout (async)."""
     deadline = time.monotonic() + _EXPORT_POLL_TIMEOUT
     while time.monotonic() < deadline:
@@ -451,7 +454,9 @@ async def apoll_export(
             return status
         if state == "Failed":
             err = status.get("error", {})
-            raise GraphError(500, err.get("code", "ExportFailed"),
-                             err.get("message", "Export failed"))
-    raise GraphError(504, "ExportTimeout",
-                     f"Export did not complete within {_EXPORT_POLL_TIMEOUT}s")
+            raise GraphError(
+                500, err.get("code", "ExportFailed"), err.get("message", "Export failed")
+            )
+    raise GraphError(
+        504, "ExportTimeout", f"Export did not complete within {_EXPORT_POLL_TIMEOUT}s"
+    )

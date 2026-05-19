@@ -15,7 +15,6 @@ Skip with:
     poetry run pytest tests/ --ignore=tests/test_integration_cli.py
 """
 
-import json
 import os
 from pathlib import Path
 
@@ -32,6 +31,7 @@ def _has_credentials() -> bool:
         return False
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
     except ImportError:
         pass
@@ -52,9 +52,11 @@ def check_credentials():
 def client():
     """Get an authenticated AtlassianClient."""
     from dotenv import load_dotenv
+
     load_dotenv()
-    from atlassian.local_auth import get_local_token_and_cloud_id
     from atlassian.atlassian_client import AtlassianClient
+    from atlassian.local_auth import get_local_token_and_cloud_id
+
     token, cloud_id = get_local_token_and_cloud_id()
     with AtlassianClient(token, cloud_id) as c:
         yield c
@@ -64,9 +66,11 @@ def client():
 # User
 # ---------------------------------------------------------------------------
 
+
 class TestUserIntegration:
     def test_get_myself(self, client):
         from atlassian import user as user_ops
+
         result = user_ops.get_myself(client)
         assert result.get("accountId"), "Expected accountId"
         assert result.get("displayName"), "Expected displayName"
@@ -77,9 +81,11 @@ class TestUserIntegration:
 # Jira: Projects
 # ---------------------------------------------------------------------------
 
+
 class TestJiraProjectsIntegration:
     def test_list_projects(self, client):
         from atlassian import jira
+
         projects = jira.list_projects(client, max_results=5)
         assert isinstance(projects, list)
         assert len(projects) > 0
@@ -87,6 +93,7 @@ class TestJiraProjectsIntegration:
 
     def test_get_project_versions(self, client):
         from atlassian import jira
+
         projects = jira.list_projects(client, max_results=1)
         key = projects[0]["key"]
         versions = jira.get_project_versions(client, key)
@@ -98,16 +105,21 @@ class TestJiraProjectsIntegration:
 # Jira: Issues
 # ---------------------------------------------------------------------------
 
+
 class TestJiraIssuesIntegration:
     def _get_project_key(self, client):
         from atlassian import jira
+
         projects = jira.list_projects(client, max_results=1)
         return projects[0]["key"]
 
     def test_search_issues(self, client):
         from atlassian import jira
+
         key = self._get_project_key(client)
-        issues = jira.search_all_issues(client, jql=f"project = {key} ORDER BY created DESC", max_total=3)
+        issues = jira.search_all_issues(
+            client, jql=f"project = {key} ORDER BY created DESC", max_total=3
+        )
         assert isinstance(issues, list)
         assert len(issues) > 0
         for i in issues:
@@ -115,6 +127,7 @@ class TestJiraIssuesIntegration:
 
     def test_count_issues(self, client):
         from atlassian import jira
+
         key = self._get_project_key(client)
         count = jira.count_issues(client, jql=f"project = {key}")
         assert count > 0
@@ -122,8 +135,11 @@ class TestJiraIssuesIntegration:
 
     def test_get_issue(self, client):
         from atlassian import jira
+
         key = self._get_project_key(client)
-        issues = jira.search_all_issues(client, jql=f"project = {key} ORDER BY created DESC", max_total=1)
+        issues = jira.search_all_issues(
+            client, jql=f"project = {key} ORDER BY created DESC", max_total=1
+        )
         issue_key = issues[0]["key"]
         issue = jira.get_issue(client, issue_key)
         assert issue["key"] == issue_key
@@ -132,8 +148,11 @@ class TestJiraIssuesIntegration:
 
     def test_get_issue_comments(self, client):
         from atlassian import jira
+
         key = self._get_project_key(client)
-        issues = jira.search_all_issues(client, jql=f"project = {key} ORDER BY created DESC", max_total=1)
+        issues = jira.search_all_issues(
+            client, jql=f"project = {key} ORDER BY created DESC", max_total=1
+        )
         issue_key = issues[0]["key"]
         comments = jira.get_issue_comments(client, issue_key)
         assert isinstance(comments, list)
@@ -144,12 +163,16 @@ class TestJiraIssuesIntegration:
 # Jira: Transitions
 # ---------------------------------------------------------------------------
 
+
 class TestJiraTransitionsIntegration:
     def test_get_transitions(self, client):
         from atlassian import jira
+
         projects = jira.list_projects(client, max_results=1)
         proj_key = projects[0]["key"]
-        issues = jira.search_all_issues(client, jql=f"project = {proj_key} ORDER BY created DESC", max_total=1)
+        issues = jira.search_all_issues(
+            client, jql=f"project = {proj_key} ORDER BY created DESC", max_total=1
+        )
         key = issues[0]["key"]
         transitions = jira.get_transitions(client, key)
         assert isinstance(transitions, list)
@@ -162,10 +185,13 @@ class TestJiraTransitionsIntegration:
 # Jira: Versions
 # ---------------------------------------------------------------------------
 
+
 class TestJiraVersionsIntegration:
     def test_create_and_list_versions(self, client):
         import time
+
         from atlassian import jira
+
         projects = jira.list_projects(client, max_results=1)
         key = projects[0]["key"]
 
@@ -181,6 +207,7 @@ class TestJiraVersionsIntegration:
 
     def test_get_versions_with_status_filter(self, client):
         from atlassian import jira
+
         projects = jira.list_projects(client, max_results=1)
         key = projects[0]["key"]
         unreleased = jira.get_project_versions(client, key, status="unreleased")
@@ -192,9 +219,11 @@ class TestJiraVersionsIntegration:
 # Jira: User search
 # ---------------------------------------------------------------------------
 
+
 class TestJiraUserSearchIntegration:
     def test_search_users(self, client):
         from atlassian import jira
+
         users = jira.search_users(client, "john")
         assert isinstance(users, list)
         assert len(users) > 0
@@ -206,19 +235,24 @@ class TestJiraUserSearchIntegration:
 # Jira: Comments with mentions
 # ---------------------------------------------------------------------------
 
+
 class TestJiraCommentIntegration:
     def test_add_comment_with_mention(self, client):
         from atlassian import jira
+
         projects = jira.list_projects(client, max_results=1)
         proj_key = projects[0]["key"]
-        issues = jira.search_all_issues(client, jql=f"project = {proj_key} ORDER BY created DESC", max_total=1)
+        issues = jira.search_all_issues(
+            client, jql=f"project = {proj_key} ORDER BY created DESC", max_total=1
+        )
         key = issues[0]["key"]
 
         users = jira.search_users(client, "john")
         account_id = users[0]["accountId"]
 
         result = jira.add_issue_comment(
-            client, key,
+            client,
+            key,
             f"Integration test: mentioning @{{{account_id}}}",
             author_label="Integration Test",
         )
@@ -230,9 +264,11 @@ class TestJiraCommentIntegration:
 # Confluence: Spaces
 # ---------------------------------------------------------------------------
 
+
 class TestConfluenceIntegration:
     def test_list_spaces(self, client):
         from atlassian import confluence
+
         spaces = confluence.list_spaces(client)
         assert isinstance(spaces, list)
         assert len(spaces) > 0
@@ -241,6 +277,7 @@ class TestConfluenceIntegration:
 
     def test_search_content(self, client):
         from atlassian import confluence
+
         results = confluence.search_content(client, query="type = page")
         assert isinstance(results, list)
         assert len(results) > 0
@@ -249,6 +286,7 @@ class TestConfluenceIntegration:
 
     def test_get_page(self, client):
         from atlassian import confluence
+
         results = confluence.search_content(client, query="type = page", max_results=1)
         page_id = results[0]["id"]
         page = confluence.get_page(client, page_id)
@@ -257,8 +295,10 @@ class TestConfluenceIntegration:
         print(f"  Page: {page['title']} (version {page['version']['number']})")
 
     def test_full_text_search(self, client):
-        from atlassian import confluence
         import re
+
+        from atlassian import confluence
+
         pages = confluence.search_content(client, query="type = page", max_results=1)
         page = confluence.get_page(client, pages[0]["id"])
         body = page.get("body", {}).get("storage", {}).get("value", "")

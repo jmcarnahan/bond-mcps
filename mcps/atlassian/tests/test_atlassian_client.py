@@ -3,11 +3,10 @@
 import httpx
 import pytest
 import respx
-
 from atlassian.atlassian_client import (
     ATLASSIAN_API_BASE,
-    AtlassianClient,
     AsyncAtlassianClient,
+    AtlassianClient,
     AtlassianError,
     _raise_for_atlassian_error,
 )
@@ -161,7 +160,9 @@ class TestAsyncClient:
     @respx.mock
     async def test_error_raises(self):
         url = f"{ATLASSIAN_API_BASE}/test"
-        respx.get(url).mock(return_value=httpx.Response(404, json={"errorMessages": ["Not found"], "errors": {}}))
+        respx.get(url).mock(
+            return_value=httpx.Response(404, json={"errorMessages": ["Not found"], "errors": {}})
+        )
 
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             with pytest.raises(AtlassianError) as exc_info:
@@ -184,6 +185,7 @@ class TestAsyncClient:
 # ---------------------------------------------------------------------------
 # Sync client tests (M9 from review)
 # ---------------------------------------------------------------------------
+
 
 class TestSyncClient:
     """Test the synchronous HTTP client."""
@@ -218,9 +220,9 @@ class TestSyncClient:
     @respx.mock
     def test_error_raises(self):
         url = f"{ATLASSIAN_API_BASE}/test"
-        respx.get(url).mock(return_value=httpx.Response(
-            401, json={"errorMessages": ["Unauthorized"], "errors": {}}
-        ))
+        respx.get(url).mock(
+            return_value=httpx.Response(401, json={"errorMessages": ["Unauthorized"], "errors": {}})
+        )
 
         with AtlassianClient(TOKEN, CLOUD_ID) as client:
             with pytest.raises(AtlassianError) as exc_info:

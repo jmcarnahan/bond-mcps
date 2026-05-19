@@ -10,11 +10,11 @@ Covers:
 """
 
 import base64
+from unittest.mock import patch
+
 import httpx
 import pytest
 import respx
-from unittest.mock import patch
-
 from github.github_client import (
     GITHUB_API_BASE_URL,
     AsyncGitHubClient,
@@ -22,10 +22,10 @@ from github.github_client import (
     GitHubError,
 )
 
-
 # ---------------------------------------------------------------------------
 # per_page capping
 # ---------------------------------------------------------------------------
+
 
 class TestPerPageCapping:
     """Verify all domain modules cap per_page to 100."""
@@ -119,6 +119,7 @@ class TestPerPageCapping:
 # Binary file handling in code.py
 # ---------------------------------------------------------------------------
 
+
 class TestBinaryFileHandling:
     """Test that binary files are handled safely without corruption."""
 
@@ -131,14 +132,17 @@ class TestBinaryFileHandling:
         b64 = base64.b64encode(binary_data).decode("ascii")
 
         respx.get(f"{GITHUB_API_BASE_URL}/repos/o/r/contents/image.png").mock(
-            return_value=httpx.Response(200, json={
-                "name": "image.png",
-                "path": "image.png",
-                "sha": "abc",
-                "size": len(binary_data),
-                "encoding": "base64",
-                "content": b64,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": "image.png",
+                    "path": "image.png",
+                    "sha": "abc",
+                    "size": len(binary_data),
+                    "encoding": "base64",
+                    "content": b64,
+                },
+            )
         )
         with GitHubClient("tok") as client:
             result = get_file_content(client, "o", "r", "image.png")
@@ -154,14 +158,17 @@ class TestBinaryFileHandling:
         b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
 
         respx.get(f"{GITHUB_API_BASE_URL}/repos/o/r/contents/hello.txt").mock(
-            return_value=httpx.Response(200, json={
-                "name": "hello.txt",
-                "path": "hello.txt",
-                "sha": "abc",
-                "size": len(text),
-                "encoding": "base64",
-                "content": b64,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": "hello.txt",
+                    "path": "hello.txt",
+                    "sha": "abc",
+                    "size": len(text),
+                    "encoding": "base64",
+                    "content": b64,
+                },
+            )
         )
         with GitHubClient("tok") as client:
             result = get_file_content(client, "o", "r", "hello.txt")
@@ -170,19 +177,22 @@ class TestBinaryFileHandling:
 
     @respx.mock
     def test_large_file_skips_decode(self):
-        from github.code import get_file_content, MAX_TEXT_DECODE_BYTES
+        from github.code import MAX_TEXT_DECODE_BYTES, get_file_content
 
         b64 = base64.b64encode(b"x").decode("ascii")
 
         respx.get(f"{GITHUB_API_BASE_URL}/repos/o/r/contents/huge.bin").mock(
-            return_value=httpx.Response(200, json={
-                "name": "huge.bin",
-                "path": "huge.bin",
-                "sha": "abc",
-                "size": MAX_TEXT_DECODE_BYTES + 1,
-                "encoding": "base64",
-                "content": b64,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": "huge.bin",
+                    "path": "huge.bin",
+                    "sha": "abc",
+                    "size": MAX_TEXT_DECODE_BYTES + 1,
+                    "encoding": "base64",
+                    "content": b64,
+                },
+            )
         )
         with GitHubClient("tok") as client:
             result = get_file_content(client, "o", "r", "huge.bin")
@@ -195,13 +205,16 @@ class TestBinaryFileHandling:
         from github.code import get_file_content
 
         respx.get(f"{GITHUB_API_BASE_URL}/repos/o/r/contents/submodule").mock(
-            return_value=httpx.Response(200, json={
-                "name": "submodule",
-                "path": "submodule",
-                "sha": "abc",
-                "size": 0,
-                "type": "submodule",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": "submodule",
+                    "path": "submodule",
+                    "sha": "abc",
+                    "size": 0,
+                    "type": "submodule",
+                },
+            )
         )
         with GitHubClient("tok") as client:
             result = get_file_content(client, "o", "r", "submodule")
@@ -217,14 +230,17 @@ class TestBinaryFileHandling:
         b64 = base64.b64encode(binary_data).decode("ascii")
 
         respx.get(f"{GITHUB_API_BASE_URL}/repos/o/r/contents/icon.ico").mock(
-            return_value=httpx.Response(200, json={
-                "name": "icon.ico",
-                "path": "icon.ico",
-                "sha": "abc",
-                "size": len(binary_data),
-                "encoding": "base64",
-                "content": b64,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": "icon.ico",
+                    "path": "icon.ico",
+                    "sha": "abc",
+                    "size": len(binary_data),
+                    "encoding": "base64",
+                    "content": b64,
+                },
+            )
         )
         async with AsyncGitHubClient("tok") as client:
             result = await aget_file_content(client, "o", "r", "icon.ico")
@@ -235,6 +251,7 @@ class TestBinaryFileHandling:
 # ---------------------------------------------------------------------------
 # GitHubError classification
 # ---------------------------------------------------------------------------
+
 
 class TestGitHubErrorClassification:
     """Test that GitHubError includes proper error_code classification."""
@@ -264,10 +281,13 @@ class TestGitHubErrorClassification:
     @respx.mock
     def test_422_classified_as_validation_failed(self):
         respx.post(f"{GITHUB_API_BASE_URL}/repos/o/r/issues").mock(
-            return_value=httpx.Response(422, json={
-                "message": "Validation Failed",
-                "errors": [{"message": "title is required"}],
-            })
+            return_value=httpx.Response(
+                422,
+                json={
+                    "message": "Validation Failed",
+                    "errors": [{"message": "title is required"}],
+                },
+            )
         )
         with GitHubClient("tok") as client:
             with pytest.raises(GitHubError) as exc_info:
@@ -310,12 +330,12 @@ class TestGitHubErrorClassification:
 # Sparse API responses
 # ---------------------------------------------------------------------------
 
+
 class TestSparseResponses:
     """Test that tools handle responses with missing optional fields."""
 
     @respx.mock
     async def test_repo_with_no_description_or_language(self):
-        from .conftest import SAMPLE_REPO
         sparse_repo = {
             "full_name": "user/minimal",
             "private": False,
@@ -324,10 +344,13 @@ class TestSparseResponses:
             return_value=httpx.Response(200, json=sparse_repo)
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
-                result = await client.call_tool("get_repository", {"owner": "user", "repo": "minimal"})
+                result = await client.call_tool(
+                    "get_repository", {"owner": "user", "repo": "minimal"}
+                )
 
         text = result.content[0].text
         assert "user/minimal" in text
@@ -353,10 +376,13 @@ class TestSparseResponses:
             return_value=httpx.Response(200, json=[])
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
-                result = await client.call_tool("get_issue", {"owner": "o", "repo": "r", "issue_number": 1})
+                result = await client.call_tool(
+                    "get_issue", {"owner": "o", "repo": "r", "issue_number": 1}
+                )
 
         text = result.content[0].text
         assert "Minimal issue" in text
@@ -385,10 +411,13 @@ class TestSparseResponses:
             return_value=httpx.Response(200, json=sparse_pr)
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
-                result = await client.call_tool("get_pull_request", {"owner": "o", "repo": "r", "pull_number": 1})
+                result = await client.call_tool(
+                    "get_pull_request", {"owner": "o", "repo": "r", "pull_number": 1}
+                )
 
         text = result.content[0].text
         assert "Unknown" in text  # mergeable = None -> "Unknown"
@@ -407,8 +436,9 @@ class TestSparseResponses:
             return_value=httpx.Response(200, json=sparse_user)
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
                 result = await client.call_tool("get_authenticated_user", {})
 
@@ -423,19 +453,23 @@ class TestSparseResponses:
         b64 = base64.b64encode(binary_data).decode("ascii")
 
         respx.get(f"{GITHUB_API_BASE_URL}/repos/o/r/contents/photo.jpg").mock(
-            return_value=httpx.Response(200, json={
-                "name": "photo.jpg",
-                "path": "photo.jpg",
-                "sha": "abc",
-                "size": len(binary_data),
-                "encoding": "base64",
-                "content": b64,
-                "download_url": "https://raw.githubusercontent.com/o/r/main/photo.jpg",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": "photo.jpg",
+                    "path": "photo.jpg",
+                    "sha": "abc",
+                    "size": len(binary_data),
+                    "encoding": "base64",
+                    "content": b64,
+                    "download_url": "https://raw.githubusercontent.com/o/r/main/photo.jpg",
+                },
+            )
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
                 result = await client.call_tool(
                     "get_file_content",
@@ -450,6 +484,7 @@ class TestSparseResponses:
 # ---------------------------------------------------------------------------
 # Domain module error propagation
 # ---------------------------------------------------------------------------
+
 
 class TestDomainModuleErrors:
     """Test that domain modules properly propagate GitHubError."""
@@ -499,10 +534,13 @@ class TestDomainModuleErrors:
         from github.issues import create_issue
 
         respx.post(f"{GITHUB_API_BASE_URL}/repos/o/r/issues").mock(
-            return_value=httpx.Response(422, json={
-                "message": "Validation Failed",
-                "errors": [{"message": "title is missing"}],
-            })
+            return_value=httpx.Response(
+                422,
+                json={
+                    "message": "Validation Failed",
+                    "errors": [{"message": "title is missing"}],
+                },
+            )
         )
         with GitHubClient("tok") as client:
             with pytest.raises(GitHubError) as exc_info:
@@ -516,9 +554,12 @@ class TestDomainModuleErrors:
         from github.pulls import merge_pull
 
         respx.put(f"{GITHUB_API_BASE_URL}/repos/o/r/pulls/1/merge").mock(
-            return_value=httpx.Response(409, json={
-                "message": "Pull Request is not mergeable",
-            })
+            return_value=httpx.Response(
+                409,
+                json={
+                    "message": "Pull Request is not mergeable",
+                },
+            )
         )
         with GitHubClient("tok") as client:
             with pytest.raises(GitHubError) as exc_info:
@@ -544,6 +585,7 @@ class TestDomainModuleErrors:
 # MCP tool-level error messages across multiple tools
 # ---------------------------------------------------------------------------
 
+
 class TestMCPToolErrors:
     """Test that various MCP tools return user-friendly error messages."""
 
@@ -553,8 +595,9 @@ class TestMCPToolErrors:
             return_value=httpx.Response(404, json={"message": "Not Found"})
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
                 result = await client.call_tool(
                     "get_issue",
@@ -570,8 +613,9 @@ class TestMCPToolErrors:
             return_value=httpx.Response(409, json={"message": "Not mergeable"})
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
                 result = await client.call_tool(
                     "merge_pull_request",
@@ -587,8 +631,9 @@ class TestMCPToolErrors:
             return_value=httpx.Response(401, json={"message": "Bad credentials"})
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
                 result = await client.call_tool("search_code", {"query": "test"})
 
@@ -598,14 +643,18 @@ class TestMCPToolErrors:
     @respx.mock
     async def test_create_pr_422_friendly(self):
         respx.post(f"{GITHUB_API_BASE_URL}/repos/o/r/pulls").mock(
-            return_value=httpx.Response(422, json={
-                "message": "Validation Failed",
-                "errors": [{"message": "No commits between main and main"}],
-            })
+            return_value=httpx.Response(
+                422,
+                json={
+                    "message": "Validation Failed",
+                    "errors": [{"message": "No commits between main and main"}],
+                },
+            )
         )
         with patch("github_mcp.get_github_token", return_value="tok"):
-            from github_mcp import mcp
             from fastmcp import Client
+            from github_mcp import mcp
+
             async with Client(mcp) as client:
                 result = await client.call_tool(
                     "create_pull_request",

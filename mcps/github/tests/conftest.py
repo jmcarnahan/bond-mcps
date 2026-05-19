@@ -2,8 +2,6 @@
 
 import os
 
-import pytest
-
 # Skip the MCP startup config check during tests; the FastMCP test client
 # triggers the lifespan and we don't stand up a DB+key in unit tests.
 # NEVER set this env var in production.
@@ -313,6 +311,13 @@ GITHUB_ERROR_404 = {
 
 GITHUB_ERROR_422 = {
     "message": "Validation Failed",
-    "errors": [{"resource": "Issue", "code": "missing_field", "field": "title", "message": "title is missing"}],
+    "errors": [
+        {
+            "resource": "Issue",
+            "code": "missing_field",
+            "field": "title",
+            "message": "title is missing",
+        }
+    ],
     "documentation_url": "https://docs.github.com/rest",
 }

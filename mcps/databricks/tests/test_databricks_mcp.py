@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import WORKSPACE_HOST, HTTP_PATH, SAMPLE_SELECT_RESULT
+from tests.conftest import HTTP_PATH, SAMPLE_SELECT_RESULT, WORKSPACE_HOST
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +20,7 @@ def _env(monkeypatch):
 @pytest.fixture
 def mcp_server():
     from databricks_mcp import mcp
+
     return mcp
 
 
@@ -29,6 +30,7 @@ def _text(result) -> str:
 
 async def _call(mcp_server, name: str, args: dict | None = None) -> str:
     from fastmcp import Client
+
     async with Client(mcp_server) as client:
         result = await client.call_tool(name, args or {})
     return _text(result)
@@ -51,15 +53,13 @@ class TestRunQuery:
 
     async def test_empty_result_message(self, mcp_server):
         with patch("databricks_mcp.db.run_query", return_value=_result_with([], ["x"])):
-            out = await _call(mcp_server, "run_query",
-                              {"query": "SELECT x FROM t WHERE 1=0"})
+            out = await _call(mcp_server, "run_query", {"query": "SELECT x FROM t WHERE 1=0"})
         assert "No rows" in out
         assert "x" in out
 
     async def test_no_columns_returned(self, mcp_server):
         with patch("databricks_mcp.db.run_query", return_value=_result_with([], [])):
-            out = await _call(mcp_server, "run_query",
-                              {"query": "CREATE TABLE foo (a INT)"})
+            out = await _call(mcp_server, "run_query", {"query": "CREATE TABLE foo (a INT)"})
         assert "no result set" in out
 
     async def test_preview_truncation_for_large_result(self, mcp_server):
@@ -76,11 +76,12 @@ class TestRunQuery:
         """truncated=True must surface BOTH the '+' count marker and the
         'Fetch was capped' note."""
         result = _result_with(
-            [[i] for i in range(50)], columns=["i"], truncated=True,
+            [[i] for i in range(50)],
+            columns=["i"],
+            truncated=True,
         )
         with patch("databricks_mcp.db.run_query", return_value=result):
-            out = await _call(mcp_server, "run_query",
-                              {"query": "SELECT i FROM massive_table"})
+            out = await _call(mcp_server, "run_query", {"query": "SELECT i FROM massive_table"})
         assert "50+ row(s)" in out
         assert "Fetch was capped" in out
 
@@ -103,24 +104,32 @@ class TestRunQuery:
         assert "required" in out
 
     async def test_friendly_error_unauthorized_oauth(self, mcp_server, monkeypatch):
-        from dbx.client import DatabricksError
         from dbx.auth import AuthSource
+        from dbx.client import DatabricksError
+
         monkeypatch.delenv("DATABRICKS_ACCESS_TOKEN", raising=False)
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", "id")
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("tok", AuthSource.OAUTH)), \
-             patch("databricks_mcp.db.run_query",
-                   side_effect=DatabricksError("401", error_code="Unauthorized")):
+        with (
+            patch("databricks_mcp.db.resolve_token_now", return_value=("tok", AuthSource.OAUTH)),
+            patch(
+                "databricks_mcp.db.run_query",
+                side_effect=DatabricksError("401", error_code="Unauthorized"),
+            ),
+        ):
             out = await _call(mcp_server, "run_query", {"query": "SELECT 1"})
         assert "make login-databricks" in out
 
     async def test_friendly_error_unauthorized_pat(self, mcp_server):
-        from dbx.client import DatabricksError
         from dbx.auth import AuthSource
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("tok", AuthSource.PAT)), \
-             patch("databricks_mcp.db.run_query",
-                   side_effect=DatabricksError("401", error_code="Unauthorized")):
+        from dbx.client import DatabricksError
+
+        with (
+            patch("databricks_mcp.db.resolve_token_now", return_value=("tok", AuthSource.PAT)),
+            patch(
+                "databricks_mcp.db.run_query",
+                side_effect=DatabricksError("401", error_code="Unauthorized"),
+            ),
+        ):
             out = await _call(mcp_server, "run_query", {"query": "SELECT 1"})
         assert "DATABRICKS_ACCESS_TOKEN" in out
         # Round-2 review surfaced this: tell users that missing `sql` scope
@@ -129,25 +138,33 @@ class TestRunQuery:
 
     async def test_friendly_error_forbidden(self, mcp_server):
         from dbx.client import DatabricksError
-        with patch("databricks_mcp.db.run_query",
-                   side_effect=DatabricksError("403", error_code="Forbidden")):
+
+        with patch(
+            "databricks_mcp.db.run_query",
+            side_effect=DatabricksError("403", error_code="Forbidden"),
+        ):
             out = await _call(mcp_server, "run_query", {"query": "SELECT 1"})
         assert "permission denied" in out.lower()
 
     async def test_friendly_error_sql(self, mcp_server):
         from dbx.client import DatabricksError
+
         sql_msg = "TABLE_OR_VIEW_NOT_FOUND: missing.thing"
-        with patch("databricks_mcp.db.run_query",
-                   side_effect=DatabricksError(sql_msg, error_code="SQLError")):
-            out = await _call(mcp_server, "run_query",
-                              {"query": "SELECT * FROM missing.thing"})
+        with patch(
+            "databricks_mcp.db.run_query",
+            side_effect=DatabricksError(sql_msg, error_code="SQLError"),
+        ):
+            out = await _call(mcp_server, "run_query", {"query": "SELECT * FROM missing.thing"})
         assert "SQL error" in out
         assert sql_msg in out
 
     async def test_friendly_error_missing_config(self, mcp_server):
         from dbx.client import DatabricksError
-        with patch("databricks_mcp.db.run_query",
-                   side_effect=DatabricksError("missing X", error_code="MissingConfig")):
+
+        with patch(
+            "databricks_mcp.db.run_query",
+            side_effect=DatabricksError("missing X", error_code="MissingConfig"),
+        ):
             out = await _call(mcp_server, "run_query", {"query": "SELECT 1"})
         assert "not configured" in out.lower()
 
@@ -159,6 +176,7 @@ class TestQueryTimeout:
 
     async def test_long_query_returns_timeout_message(self, mcp_server, monkeypatch):
         from dbx.auth import AuthSource
+
         # Slash the timeout down to something quick so the test runs fast.
         monkeypatch.setattr("databricks_mcp._QUERY_TIMEOUT_S", 0.2)
 
@@ -166,9 +184,10 @@ class TestQueryTimeout:
             time.sleep(5)  # well past the 0.2s cap
             return {"columns": ["x"], "rows": [[1]], "truncated": False}
 
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("t", AuthSource.PAT)), \
-             patch("databricks_mcp.db.run_query", side_effect=hangs):
+        with (
+            patch("databricks_mcp.db.resolve_token_now", return_value=("t", AuthSource.PAT)),
+            patch("databricks_mcp.db.run_query", side_effect=hangs),
+        ):
             out = await _call(mcp_server, "run_query", {"query": "SELECT 1"})
 
         assert "exceeded" in out.lower()
@@ -194,10 +213,12 @@ class TestEventLoopUnblocked:
             barrier.wait()
             return {"columns": ["x"], "rows": [[1]], "truncated": False}
 
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("t", AuthSource.PAT)), \
-             patch("databricks_mcp.db.run_query", side_effect=gated):
+        with (
+            patch("databricks_mcp.db.resolve_token_now", return_value=("t", AuthSource.PAT)),
+            patch("databricks_mcp.db.run_query", side_effect=gated),
+        ):
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 await asyncio.gather(
                     client.call_tool("run_query", {"query": "q1"}),
@@ -208,29 +229,31 @@ class TestEventLoopUnblocked:
         """Verify the offload actually happens — db.run_query must not run
         on the asyncio event-loop thread."""
         from dbx.auth import AuthSource
+
         seen_threads = []
 
         def record(query, *, token=None):
             seen_threads.append(threading.current_thread().ident)
             return {"columns": ["x"], "rows": [[1]], "truncated": False}
 
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("t", AuthSource.PAT)), \
-             patch("databricks_mcp.db.run_query", side_effect=record):
+        with (
+            patch("databricks_mcp.db.resolve_token_now", return_value=("t", AuthSource.PAT)),
+            patch("databricks_mcp.db.run_query", side_effect=record),
+        ):
             await _call(mcp_server, "run_query", {"query": "q"})
 
         main_tid = threading.main_thread().ident
         assert seen_threads, "db.run_query was never invoked"
         assert seen_threads[0] != main_tid, (
-            "db.run_query ran on the main thread — asyncio.to_thread offload "
-            "is not in effect."
+            "db.run_query ran on the main thread — asyncio.to_thread offload " "is not in effect."
         )
 
 
 class TestListCatalogs:
     async def test_returns_list(self, mcp_server):
-        with patch("databricks_mcp.db.list_catalogs",
-                   return_value=["main", "samples", "hive_metastore"]):
+        with patch(
+            "databricks_mcp.db.list_catalogs", return_value=["main", "samples", "hive_metastore"]
+        ):
             out = await _call(mcp_server, "list_catalogs")
         assert "3 catalog(s)" in out
         assert "samples" in out
@@ -247,8 +270,7 @@ class TestListSchemas:
         assert "required" in out
 
     async def test_returns_list(self, mcp_server):
-        with patch("databricks_mcp.db.list_schemas",
-                   return_value=["default", "bronze", "silver"]):
+        with patch("databricks_mcp.db.list_schemas", return_value=["default", "bronze", "silver"]):
             out = await _call(mcp_server, "list_schemas", {"catalog": "main"})
         assert "3 schema(s) in `main`" in out
         assert "bronze" in out
@@ -256,17 +278,18 @@ class TestListSchemas:
 
 class TestListTables:
     async def test_requires_both(self, mcp_server):
-        out = await _call(mcp_server, "list_tables",
-                          {"catalog": "main", "schema": ""})
+        out = await _call(mcp_server, "list_tables", {"catalog": "main", "schema": ""})
         assert "both required" in out
 
     async def test_returns_table(self, mcp_server):
-        with patch("databricks_mcp.db.list_tables", return_value=[
-            {"database": "default", "table": "events", "is_temporary": False},
-            {"database": "default", "table": "tmp_join", "is_temporary": True},
-        ]):
-            out = await _call(mcp_server, "list_tables",
-                              {"catalog": "main", "schema": "default"})
+        with patch(
+            "databricks_mcp.db.list_tables",
+            return_value=[
+                {"database": "default", "table": "events", "is_temporary": False},
+                {"database": "default", "table": "tmp_join", "is_temporary": True},
+            ],
+        ):
+            out = await _call(mcp_server, "list_tables", {"catalog": "main", "schema": "default"})
         assert "2 table(s) in `main`.`default`" in out
         assert "events" in out
         assert "tmp_join" in out
@@ -276,6 +299,7 @@ class TestListTables:
 class TestTokenThreading:
     async def test_resolved_token_is_passed_to_client(self, mcp_server, monkeypatch):
         from dbx.auth import AuthSource
+
         captured = {}
 
         def fake_run_query(query, *, token=None):
@@ -283,30 +307,36 @@ class TestTokenThreading:
             captured["token"] = token
             return {"columns": ["x"], "rows": [[1]], "truncated": False}
 
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("captured-bearer", AuthSource.BEARER)), \
-             patch("databricks_mcp.db.run_query", side_effect=fake_run_query):
+        with (
+            patch(
+                "databricks_mcp.db.resolve_token_now",
+                return_value=("captured-bearer", AuthSource.BEARER),
+            ),
+            patch("databricks_mcp.db.run_query", side_effect=fake_run_query),
+        ):
             await _call(mcp_server, "run_query", {"query": "SELECT x"})
 
         assert captured["token"] == "captured-bearer"
 
     async def test_token_threaded_to_list_helpers(self, mcp_server):
         from dbx.auth import AuthSource
+
         seen_tokens = []
 
         def grab_token(*args, **kwargs):
             seen_tokens.append(kwargs.get("token"))
             return []
 
-        with patch("databricks_mcp.db.resolve_token_now",
-                   return_value=("the-tok", AuthSource.OAUTH)), \
-             patch("databricks_mcp.db.list_catalogs", side_effect=grab_token), \
-             patch("databricks_mcp.db.list_schemas", side_effect=grab_token), \
-             patch("databricks_mcp.db.list_tables", side_effect=grab_token):
+        with (
+            patch(
+                "databricks_mcp.db.resolve_token_now", return_value=("the-tok", AuthSource.OAUTH)
+            ),
+            patch("databricks_mcp.db.list_catalogs", side_effect=grab_token),
+            patch("databricks_mcp.db.list_schemas", side_effect=grab_token),
+            patch("databricks_mcp.db.list_tables", side_effect=grab_token),
+        ):
             await _call(mcp_server, "list_catalogs")
             await _call(mcp_server, "list_schemas", {"catalog": "main"})
             await _call(mcp_server, "list_tables", {"catalog": "main", "schema": "default"})
 
         assert seen_tokens == ["the-tok", "the-tok", "the-tok"]
-
-

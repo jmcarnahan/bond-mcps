@@ -1,0 +1,42 @@
+# Run the local pre-commit harness in CI. Catches PRs that bypassed local
+# hooks (--no-verify, fresh clone without `make hooks-install`).
+#
+# This is the improvement over running tools individually: one source of
+# truth (.pre-commit-config.yaml) governs both local and CI behavior.
+
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks needs commit history
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: false
+
+      - run: pip install pre-commit
+
+      - name: pre-commit run --all-files
+        run: pre-commit run --all-files --show-diff-on-failure
