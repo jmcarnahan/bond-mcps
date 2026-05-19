@@ -17,6 +17,9 @@ data:
   BOND_MCPS_USER_ID: {{ .Values.userKey | quote }}
   {{- end }}
   {{- if .Values.jwt.enabled }}
+  {{- if .Values.jwt.jwksUri }}
+  BOND_MCPS_JWT_JWKS_URI: {{ .Values.jwt.jwksUri | quote }}
+  {{- end }}
   {{- if .Values.jwt.issuer }}
   BOND_MCPS_JWT_ISSUER: {{ .Values.jwt.issuer | quote }}
   {{- end }}
@@ -26,6 +29,12 @@ data:
   BOND_MCPS_JWT_ALGORITHM: {{ .Values.jwt.algorithm | quote }}
   {{- if ne .Values.jwt.subClaim "sub" }}
   BOND_MCPS_JWT_SUB_CLAIM: {{ .Values.jwt.subClaim | quote }}
+  {{- end }}
+  {{- if .Values.jwt.asBaseUrl }}
+  BOND_MCPS_AS_BASE_URL: {{ .Values.jwt.asBaseUrl | quote }}
+  {{- end }}
+  {{- if .Values.jwt.publicUrl }}
+  BOND_MCPS_PUBLIC_URL: {{ .Values.jwt.publicUrl | quote }}
   {{- end }}
   {{- end }}
   {{- range $k, $v := .Values.env }}

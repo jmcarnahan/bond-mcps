@@ -1,9 +1,5 @@
 """Tests for the bond-mcps CLI subcommands."""
 
-import io
-import logging
-from contextlib import redirect_stderr, redirect_stdout
-
 import pytest
 
 from auth.cli import build_parser, main
@@ -16,6 +12,7 @@ def test_generate_key_prints_decodable_key(capsys):
     # The key is on the LAST stdout line (so `bond-mcps generate-key | pbcopy` works).
     key = out[-1]
     import base64
+
     raw = base64.urlsafe_b64decode(key.encode("ascii"))
     assert len(raw) == 32
 
@@ -69,6 +66,7 @@ def test_clear_microsoft_routes_to_msal_cache(repo, capsys):
 def test_migrate_db_subcommand_runs_to_head(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{tmp_path / 'tokens.db'}")
     from auth.db import reset_for_tests
+
     reset_for_tests()
     try:
         rc = main(["migrate-db"])
@@ -82,12 +80,15 @@ def test_migrate_db_subcommand_runs_to_head(tmp_path, monkeypatch, capsys):
 def test_doctor_passes_on_fresh_setup(repo, capsys, monkeypatch):
     """Doctor should report all-green when DB is at head and key is set."""
     # repo fixture sets up the DB and key; we just need alembic_version present.
-    from auth.alembic_config import upgrade_head
-    from auth.db import reset_for_tests
+    import os as _os
 
     # Switch the DB to a fresh tmp file to avoid colliding with repo fixture
     # state (which uses ORM create_all, not alembic).
-    import tempfile, os as _os
+    import tempfile
+
+    from auth.alembic_config import upgrade_head
+    from auth.db import reset_for_tests
+
     db_path = tempfile.mktemp()
     monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{db_path}")
     reset_for_tests()
@@ -108,6 +109,7 @@ def test_doctor_fails_on_missing_schema(tmp_path, monkeypatch, capsys):
     """Doctor reports schema-out-of-date for an un-migrated DB."""
     monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{tmp_path / 'tokens.db'}")
     from auth.db import reset_for_tests
+
     reset_for_tests()
     try:
         rc = main(["doctor"])

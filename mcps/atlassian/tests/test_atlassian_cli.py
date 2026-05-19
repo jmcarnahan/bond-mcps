@@ -10,12 +10,11 @@ token store migration).
 import sys
 from unittest.mock import patch
 
-import pytest
-
 
 def _run_cli(argv, capsys):
     """Invoke atlassian_cli.main() with the given argv. Returns captured I/O."""
     from atlassian_cli import main
+
     old_argv = sys.argv[:]
     sys.argv = ["atlassian-cli", *argv]
     try:
@@ -54,8 +53,10 @@ class TestLogout:
         """Regression guard: TokenStore.cache_file was removed in PR #4. If
         anyone re-introduces `.cache_file.exists()` (e.g. by copying from a
         pre-migration branch), this test fails immediately with a clear hint."""
-        import atlassian_cli
         import inspect
+
+        import atlassian_cli
+
         src = inspect.getsource(atlassian_cli.cmd_logout)
         # Look for the actual usage pattern, not the bare word — my own fix
         # comment legitimately mentions `cache_file` to explain the migration.

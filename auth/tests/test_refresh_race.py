@@ -17,11 +17,13 @@ from auth.token_store import TokenStore
 
 def test_only_one_refresh_call_under_concurrency(repo):
     store = TokenStore("github", user_key="alice")
-    store.save_token({
-        "access_token": "old",
-        "refresh_token": "rtk-1",
-        "expires_at": time.time() - 100,  # expired
-    })
+    store.save_token(
+        {
+            "access_token": "old",
+            "refresh_token": "rtk-1",
+            "expires_at": time.time() - 100,  # expired
+        }
+    )
 
     call_count = 0
     call_lock = threading.Lock()
@@ -36,11 +38,13 @@ def test_only_one_refresh_call_under_concurrency(repo):
         # open briefly so thread 2 has time to enter refresh_if_needed.
         time.sleep(0.1)
         resp = MagicMock()
-        resp.read.return_value = json.dumps({
-            "access_token": f"new_tok_{seq}",
-            "refresh_token": f"rtk_{seq + 1}",
-            "expires_in": 3600,
-        }).encode()
+        resp.read.return_value = json.dumps(
+            {
+                "access_token": f"new_tok_{seq}",
+                "refresh_token": f"rtk_{seq + 1}",
+                "expires_in": 3600,
+            }
+        ).encode()
         resp.__enter__ = MagicMock(return_value=resp)
         resp.__exit__ = MagicMock(return_value=False)
         return resp

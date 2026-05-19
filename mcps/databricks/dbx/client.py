@@ -38,13 +38,20 @@ from typing import Any
 from databricks import sql
 from databricks.sql import exc as dbexc
 
-from dbx.auth import AuthSource, get_databricks_token, resolve_token_now
+from dbx.auth import get_databricks_token, resolve_token_now
 from dbx.local_auth import host_without_scheme
 
 # Re-export so `from dbx import client as db; db.resolve_token_now()` still
 # works (single source of truth lives in dbx.auth — see its module docstring).
-__all__ = ["DatabricksError", "MAX_FETCH_ROWS", "resolve_token_now",
-           "run_query", "list_catalogs", "list_schemas", "list_tables"]
+__all__ = [
+    "DatabricksError",
+    "MAX_FETCH_ROWS",
+    "resolve_token_now",
+    "run_query",
+    "list_catalogs",
+    "list_schemas",
+    "list_tables",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -138,12 +145,15 @@ def _classify_error(exc: Exception) -> DatabricksError:
     # NOT automatically "unreachable" — the connector also surfaces transient
     # backend errors (e.g. deadlocks) as RequestError.
     network_markers = (
-        "could not resolve", "name or service not known", "connection refused",
-        "connection reset", "name resolution", "no route to host",
+        "could not resolve",
+        "name or service not known",
+        "connection refused",
+        "connection reset",
+        "name resolution",
+        "no route to host",
         "network is unreachable",
     )
-    if isinstance(exc, (ConnectionError, OSError)) \
-            or any(m in lower for m in network_markers):
+    if isinstance(exc, (ConnectionError, OSError)) or any(m in lower for m in network_markers):
         return DatabricksError(msg, error_code="Unreachable")
 
     # 4. Anything from the connector hierarchy that didn't match above is a
@@ -195,21 +205,19 @@ def list_schemas(catalog: str, *, token: str | None = None) -> list[str]:
     return [row[0] for row in result["rows"]]
 
 
-def list_tables(
-    catalog: str, schema: str, *, token: str | None = None
-) -> list[dict[str, str]]:
+def list_tables(catalog: str, schema: str, *, token: str | None = None) -> list[dict[str, str]]:
     catalog_quoted = _quote_identifier(catalog)
     schema_quoted = _quote_identifier(schema)
-    result = run_query(
-        f"SHOW TABLES IN {catalog_quoted}.{schema_quoted}", token=token
-    )
+    result = run_query(f"SHOW TABLES IN {catalog_quoted}.{schema_quoted}", token=token)
     out = []
     for row in result["rows"]:
-        out.append({
-            "database": row[0] if len(row) > 0 else "",
-            "table": row[1] if len(row) > 1 else "",
-            "is_temporary": bool(row[2]) if len(row) > 2 else False,
-        })
+        out.append(
+            {
+                "database": row[0] if len(row) > 0 else "",
+                "table": row[1] if len(row) > 1 else "",
+                "is_temporary": bool(row[2]) if len(row) > 2 else False,
+            }
+        )
     return out
 
 

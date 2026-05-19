@@ -2,9 +2,9 @@
 
 import base64
 import os
+from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch
 
 FAKE_BASIC_AUTH = base64.b64encode(b"user:pass").decode()
 
@@ -38,24 +38,27 @@ class TestGetGraphToken:
     def test_raises_on_missing_header(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {}, clear=True):
+        with patch(_HEADERS_PATCH, return_value={}), patch.dict(os.environ, {}, clear=True):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_graph_token()
 
     def test_raises_on_empty_authorization(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, return_value={"authorization": ""}), \
-             patch.dict(os.environ, {}, clear=True):
+        with (
+            patch(_HEADERS_PATCH, return_value={"authorization": ""}),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_graph_token()
 
     def test_raises_on_non_bearer_scheme(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, return_value={"authorization": f"Basic {FAKE_BASIC_AUTH}"}), \
-             patch.dict(os.environ, {}, clear=True):
+        with (
+            patch(_HEADERS_PATCH, return_value={"authorization": f"Basic {FAKE_BASIC_AUTH}"}),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_graph_token()
 
@@ -75,26 +78,28 @@ class TestGetGraphTokenFallback:
     def test_falls_back_to_local_auth_when_no_header_and_client_id_set(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}), \
-             patch("ms_graph.local_auth.get_local_token", return_value="local-tok"):
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}),
+            patch("ms_graph.local_auth.get_local_token", return_value="local-tok"),
+        ):
             token = get_graph_token()
         assert token == "local-tok"
 
     def test_raises_when_no_header_and_no_client_id(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {}, clear=True):
+        with patch(_HEADERS_PATCH, return_value={}), patch.dict(os.environ, {}, clear=True):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_graph_token()
 
     def test_bearer_header_takes_priority_over_local_auth(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH,
-                   return_value={"authorization": "Bearer header-tok"}), \
-             patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}):
+        with (
+            patch(_HEADERS_PATCH, return_value={"authorization": "Bearer header-tok"}),
+            patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}),
+        ):
             token = get_graph_token()
         assert token == "header-tok"
 
@@ -102,8 +107,10 @@ class TestGetGraphTokenFallback:
         """When get_http_headers raises (e.g., not in HTTP context), fall back."""
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, side_effect=RuntimeError("no context")), \
-             patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}), \
-             patch("ms_graph.local_auth.get_local_token", return_value="local-tok"):
+        with (
+            patch(_HEADERS_PATCH, side_effect=RuntimeError("no context")),
+            patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}),
+            patch("ms_graph.local_auth.get_local_token", return_value="local-tok"),
+        ):
             token = get_graph_token()
         assert token == "local-tok"

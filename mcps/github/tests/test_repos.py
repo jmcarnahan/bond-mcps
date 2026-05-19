@@ -1,10 +1,9 @@
 """Tests for repository operations."""
 
 import httpx
-import pytest
 import respx
-
 from github.github_client import GITHUB_API_BASE_URL, AsyncGitHubClient, GitHubClient
+
 from .conftest import (
     SAMPLE_REPO,
     SAMPLE_REPOS_RESPONSE,

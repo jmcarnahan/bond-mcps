@@ -3,14 +3,14 @@
 import httpx
 import pytest
 import respx
-
-from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
 from ms_graph import teams
+from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
 from ms_graph.teams import (
     TeamsNotAvailableError,
     extract_message_sender,
     extract_message_text,
 )
+
 from .conftest import (
     GRAPH_ERROR_403,
     SAMPLE_CHANNEL_MESSAGE,
@@ -24,19 +24,21 @@ from .conftest import (
     SAMPLE_TEAMS_RESPONSE,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helper function tests
 # ---------------------------------------------------------------------------
 
-class TestExtractMessageText:
 
+class TestExtractMessageText:
     def test_plain_text(self):
         msg = {"body": {"contentType": "text", "content": "Hello world"}, "attachments": []}
         assert extract_message_text(msg) == "Hello world"
 
     def test_html_strips_tags(self):
-        msg = {"body": {"contentType": "html", "content": "<p>Hello <b>world</b></p>"}, "attachments": []}
+        msg = {
+            "body": {"contentType": "html", "content": "<p>Hello <b>world</b></p>"},
+            "attachments": [],
+        }
         assert extract_message_text(msg) == "Hello world"
 
     def test_adaptive_card(self):
@@ -66,16 +68,17 @@ class TestExtractMessageText:
     def test_malformed_adaptive_card(self):
         msg = {
             "body": {"contentType": "html", "content": ""},
-            "attachments": [{
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": "not valid json",
-            }],
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": "not valid json",
+                }
+            ],
         }
         assert extract_message_text(msg) == ""
 
 
 class TestExtractMessageSender:
-
     def test_user_sender(self):
         assert extract_message_sender(SAMPLE_CHANNEL_MESSAGE_USER) == "Alice Smith"
 
@@ -98,6 +101,7 @@ class TestExtractMessageSender:
 # ---------------------------------------------------------------------------
 # Synchronous operation tests
 # ---------------------------------------------------------------------------
+
 
 class TestTeamsSync:
     """Synchronous Teams operation tests."""
@@ -130,9 +134,7 @@ class TestTeamsSync:
             return_value=httpx.Response(201, json=SAMPLE_CHANNEL_MESSAGE)
         )
         with GraphClient("tok") as client:
-            result = teams.send_channel_message(
-                client, "team-id-001", "channel-id-001", "Hello!"
-            )
+            result = teams.send_channel_message(client, "team-id-001", "channel-id-001", "Hello!")
 
         assert result["id"] == "msg-001"
 
@@ -166,7 +168,9 @@ class TestTeamsSync:
         with GraphClient("tok") as client:
             teams.list_chats(client, chat_type="group")
 
-        assert "chatType" in str(route.calls[0].request.url) and "group" in str(route.calls[0].request.url)
+        assert "chatType" in str(route.calls[0].request.url) and "group" in str(
+            route.calls[0].request.url
+        )
 
     @respx.mock
     def test_list_chat_messages(self):
@@ -256,6 +260,7 @@ class TestTeamsSync:
 # Async operation tests
 # ---------------------------------------------------------------------------
 
+
 class TestTeamsAsync:
     """Async Teams operation tests."""
 
@@ -317,7 +322,9 @@ class TestTeamsAsync:
         async with AsyncGraphClient("tok") as client:
             await teams.alist_chats(client, chat_type="meeting")
 
-        assert "chatType" in str(route.calls[0].request.url) and "meeting" in str(route.calls[0].request.url)
+        assert "chatType" in str(route.calls[0].request.url) and "meeting" in str(
+            route.calls[0].request.url
+        )
 
     @respx.mock
     async def test_alist_chat_messages(self):
@@ -419,8 +426,8 @@ class TestTeamsAsync:
 # Activity aggregator tests
 # ---------------------------------------------------------------------------
 
-class TestTeamsActivity:
 
+class TestTeamsActivity:
     @respx.mock
     async def test_aget_teams_activity(self):
         """Activity aggregator fetches teams, channels, messages, and chats."""
@@ -432,48 +439,72 @@ class TestTeamsActivity:
 
         # Mock: 1 team, 2 channels, 1 recent channel message, 1 old
         respx.get(f"{GRAPH_BASE_URL}/me/joinedTeams").mock(
-            return_value=httpx.Response(200, json={"value": [
-                {"id": "t1", "displayName": "TestTeam"}
-            ]})
+            return_value=httpx.Response(
+                200, json={"value": [{"id": "t1", "displayName": "TestTeam"}]}
+            )
         )
         respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
-            return_value=httpx.Response(200, json={"value": [
-                {
-                    "id": "chat-1", "chatType": "oneOnOne", "topic": None,
-                    "members": [{"displayName": "Alice"}],
-                    "lastMessagePreview": {
-                        "createdDateTime": recent_ts,
-                        "body": {"content": "Hey!"},
-                        "from": {"user": {"displayName": "Alice"}},
-                    },
-                }
-            ]})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": "chat-1",
+                            "chatType": "oneOnOne",
+                            "topic": None,
+                            "members": [{"displayName": "Alice"}],
+                            "lastMessagePreview": {
+                                "createdDateTime": recent_ts,
+                                "body": {"content": "Hey!"},
+                                "from": {"user": {"displayName": "Alice"}},
+                            },
+                        }
+                    ]
+                },
+            )
         )
         respx.get(f"{GRAPH_BASE_URL}/teams/t1/channels").mock(
-            return_value=httpx.Response(200, json={"value": [
-                {"id": "c1", "displayName": "General"},
-                {"id": "c2", "displayName": "Random"},
-            ]})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {"id": "c1", "displayName": "General"},
+                        {"id": "c2", "displayName": "Random"},
+                    ]
+                },
+            )
         )
         respx.get(f"{GRAPH_BASE_URL}/teams/t1/channels/c1/messages").mock(
-            return_value=httpx.Response(200, json={"value": [
-                {
-                    "id": "m1", "createdDateTime": recent_ts,
-                    "from": {"user": {"displayName": "Bob"}, "application": None},
-                    "body": {"contentType": "text", "content": "New update"},
-                    "attachments": [],
-                }
-            ]})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": "m1",
+                            "createdDateTime": recent_ts,
+                            "from": {"user": {"displayName": "Bob"}, "application": None},
+                            "body": {"contentType": "text", "content": "New update"},
+                            "attachments": [],
+                        }
+                    ]
+                },
+            )
         )
         respx.get(f"{GRAPH_BASE_URL}/teams/t1/channels/c2/messages").mock(
-            return_value=httpx.Response(200, json={"value": [
-                {
-                    "id": "m2", "createdDateTime": old_ts,
-                    "from": {"user": {"displayName": "Charlie"}, "application": None},
-                    "body": {"contentType": "text", "content": "Old message"},
-                    "attachments": [],
-                }
-            ]})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "id": "m2",
+                            "createdDateTime": old_ts,
+                            "from": {"user": {"displayName": "Charlie"}, "application": None},
+                            "body": {"contentType": "text", "content": "Old message"},
+                            "attachments": [],
+                        }
+                    ]
+                },
+            )
         )
 
         async with AsyncGraphClient("tok") as client:

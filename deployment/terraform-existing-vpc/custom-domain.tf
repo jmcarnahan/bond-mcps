@@ -6,7 +6,7 @@ resource "aws_acm_certificate" "wildcard" {
   domain_name       = "*.${var.base_domain}"
   validation_method = "DNS"
 
-  tags = { Name = "*.${var.base_domain}" }
+  tags = { Name = "wildcard.${var.base_domain}" }
 
   lifecycle {
     create_before_destroy = true

@@ -24,27 +24,43 @@ from starlette.responses import JSONResponse
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from github.auth import get_github_token
-from github.github_client import AsyncGitHubClient, GitHubError
-from github import repos as repos_ops
+from github import code as code_ops
 from github import issues as issues_ops
 from github import pulls as pulls_ops
-from github import code as code_ops
+from github import repos as repos_ops
+from github.auth import get_github_token
+from github.github_client import AsyncGitHubClient, GitHubError
+
+from auth.connect_routes import ProviderConnectConfig, register_connect_routes
+from auth.jwt_identity import build_remote_auth_provider
 
 logging.basicConfig(level=logging.INFO)
 from auth import log_discipline  # noqa: E402
+
 log_discipline.apply()
 logger = logging.getLogger(__name__)
+
+
+GITHUB_CONNECT_CONFIG = ProviderConnectConfig(
+    name="github",
+    authorize_url="https://github.com/login/oauth/authorize",
+    token_url="https://github.com/login/oauth/access_token",
+    scopes="repo user read:org",
+    client_id_env="GITHUB_CLIENT_ID",
+    client_secret_env="GITHUB_CLIENT_SECRET",
+)
 
 
 @asynccontextmanager
 async def _lifespan(app):
     """Fail fast on misconfig and warn if the auth proxy isn't reachable."""
     from auth import startup
+
     startup.verify_runtime_config()
 
     if os.environ.get("GITHUB_CLIENT_ID"):
         from auth import OAuthProxyClient
+
         proxy = OAuthProxyClient()
         try:
             proxy.check_proxy()
@@ -54,7 +70,10 @@ async def _lifespan(app):
     yield
 
 
-mcp = FastMCP("GitHub MCP Server", lifespan=_lifespan)
+# RemoteAuthProvider when JWT mode is configured; None for the laptop /
+# single-tenant flow, in which case FastMCP runs without auth middleware
+# and existing Bearer-or-local resolution in github.auth still applies.
+mcp = FastMCP("GitHub MCP Server", lifespan=_lifespan, auth=build_remote_auth_provider("github"))
 
 
 # Liveness/readiness probe. Returns 200 immediately if the ASGI app is up.
@@ -63,6 +82,14 @@ mcp = FastMCP("GitHub MCP Server", lifespan=_lifespan)
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request):
     return JSONResponse({"status": "ok"})
+
+
+# /connect/github/* routes — only mounted in JWT mode (multi-tenant deploys).
+# They drive the per-user GitHub OAuth bootstrap after a tool call raises
+# MissingProviderConnection; the resulting access_token lands in tokens.db
+# keyed by the JWT-derived user_key. The ticket flow keeps the URL safe to
+# follow from an out-of-band browser session.
+register_connect_routes(mcp, GITHUB_CONNECT_CONFIG)
 
 
 def _friendly_error(err: GitHubError) -> str:
@@ -88,6 +115,7 @@ def _friendly_error(err: GitHubError) -> str:
 # ---------------------------------------------------------------------------
 # Repository tools
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 async def list_repositories(type: str = "all", sort: str = "updated", per_page: int = 30) -> str:
@@ -116,8 +144,7 @@ async def list_repositories(type: str = "all", sort: str = "updated", per_page: 
         stars = r.get("stargazers_count", 0)
         desc = r.get("description") or ""
         lines.append(
-            f"- **{r.get('full_name', '?')}** ({visibility}, {lang}, {stars} stars)\n"
-            f"  {desc}"
+            f"- **{r.get('full_name', '?')}** ({visibility}, {lang}, {stars} stars)\n" f"  {desc}"
         )
     return "\n\n".join(lines)
 
@@ -166,7 +193,9 @@ async def search_repositories(query: str, sort: str = "best-match", per_page: in
     token = get_github_token()
     try:
         async with AsyncGitHubClient(token) as client:
-            results = await repos_ops.asearch_repos(client, query=query, sort=sort, per_page=per_page)
+            results = await repos_ops.asearch_repos(
+                client, query=query, sort=sort, per_page=per_page
+            )
     except GitHubError as e:
         return _friendly_error(e)
 
@@ -190,8 +219,11 @@ async def search_repositories(query: str, sort: str = "best-match", per_page: in
 # Issue tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
-async def list_issues(owner: str, repo: str, state: str = "open", labels: str = "", per_page: int = 30) -> str:
+async def list_issues(
+    owner: str, repo: str, state: str = "open", labels: str = "", per_page: int = 30
+) -> str:
     """
     List issues in a GitHub repository.
 
@@ -279,7 +311,9 @@ async def get_issue(owner: str, repo: str, issue_number: int) -> str:
 
 
 @mcp.tool()
-async def create_issue(owner: str, repo: str, title: str, body: str = "", labels: str = "", assignees: str = "") -> str:
+async def create_issue(
+    owner: str, repo: str, title: str, body: str = "", labels: str = "", assignees: str = ""
+) -> str:
     """
     Create a new issue in a GitHub repository.
 
@@ -298,8 +332,13 @@ async def create_issue(owner: str, repo: str, title: str, body: str = "", labels
     try:
         async with AsyncGitHubClient(token) as client:
             issue = await issues_ops.acreate_issue(
-                client, owner, repo, title=title, body=body,
-                labels=label_list, assignees=assignee_list,
+                client,
+                owner,
+                repo,
+                title=title,
+                body=body,
+                labels=label_list,
+                assignees=assignee_list,
             )
     except GitHubError as e:
         return _friendly_error(e)
@@ -312,8 +351,13 @@ async def create_issue(owner: str, repo: str, title: str, body: str = "", labels
 
 @mcp.tool()
 async def update_issue(
-    owner: str, repo: str, issue_number: int,
-    title: str = "", body: str = "", state: str = "", labels: str = "",
+    owner: str,
+    repo: str,
+    issue_number: int,
+    title: str = "",
+    body: str = "",
+    state: str = "",
+    labels: str = "",
 ) -> str:
     """
     Update an existing issue.
@@ -333,9 +377,14 @@ async def update_issue(
     try:
         async with AsyncGitHubClient(token) as client:
             issue = await issues_ops.aupdate_issue(
-                client, owner, repo, issue_number,
-                title=title or None, body=body or None,
-                state=state or None, labels=label_list,
+                client,
+                owner,
+                repo,
+                issue_number,
+                title=title or None,
+                body=body or None,
+                state=state or None,
+                labels=label_list,
             )
     except GitHubError as e:
         return _friendly_error(e)
@@ -365,18 +414,18 @@ async def add_issue_comment(owner: str, repo: str, issue_number: int, body: str)
     except GitHubError as e:
         return _friendly_error(e)
 
-    return (
-        f"Comment added to issue #{issue_number}.\n"
-        f"URL: {comment.get('html_url', '?')}"
-    )
+    return f"Comment added to issue #{issue_number}.\n" f"URL: {comment.get('html_url', '?')}"
 
 
 # ---------------------------------------------------------------------------
 # Pull request tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
-async def list_pull_requests(owner: str, repo: str, state: str = "open", sort: str = "created", per_page: int = 30) -> str:
+async def list_pull_requests(
+    owner: str, repo: str, state: str = "open", sort: str = "created", per_page: int = 30
+) -> str:
     """
     List pull requests in a GitHub repository.
 
@@ -453,8 +502,13 @@ async def get_pull_request(owner: str, repo: str, pull_number: int) -> str:
 
 @mcp.tool()
 async def create_pull_request(
-    owner: str, repo: str, title: str, head: str, base: str,
-    body: str = "", draft: str = "false",
+    owner: str,
+    repo: str,
+    title: str,
+    head: str,
+    base: str,
+    body: str = "",
+    draft: str = "false",
 ) -> str:
     """
     Create a new pull request.
@@ -474,8 +528,14 @@ async def create_pull_request(
     try:
         async with AsyncGitHubClient(token) as client:
             pr = await pulls_ops.acreate_pull(
-                client, owner, repo, title=title, head=head, base=base,
-                body=body, draft=is_draft,
+                client,
+                owner,
+                repo,
+                title=title,
+                head=head,
+                base=base,
+                body=body,
+                draft=is_draft,
             )
     except GitHubError as e:
         return _friendly_error(e)
@@ -505,16 +565,17 @@ async def add_pr_comment(owner: str, repo: str, pull_number: int, body: str) -> 
     except GitHubError as e:
         return _friendly_error(e)
 
-    return (
-        f"Comment added to PR #{pull_number}.\n"
-        f"URL: {comment.get('html_url', '?')}"
-    )
+    return f"Comment added to PR #{pull_number}.\n" f"URL: {comment.get('html_url', '?')}"
 
 
 @mcp.tool()
 async def merge_pull_request(
-    owner: str, repo: str, pull_number: int,
-    merge_method: str = "merge", commit_title: str = "", commit_message: str = "",
+    owner: str,
+    repo: str,
+    pull_number: int,
+    merge_method: str = "merge",
+    commit_title: str = "",
+    commit_message: str = "",
 ) -> str:
     """
     Merge a pull request.
@@ -531,9 +592,13 @@ async def merge_pull_request(
     try:
         async with AsyncGitHubClient(token) as client:
             result = await pulls_ops.amerge_pull(
-                client, owner, repo, pull_number,
+                client,
+                owner,
+                repo,
+                pull_number,
                 merge_method=merge_method,
-                commit_title=commit_title, commit_message=commit_message,
+                commit_title=commit_title,
+                commit_message=commit_message,
             )
     except GitHubError as e:
         return _friendly_error(e)
@@ -548,6 +613,7 @@ async def merge_pull_request(
 # ---------------------------------------------------------------------------
 # Code & content tools
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 async def get_file_content(owner: str, repo: str, path: str, ref: str = "") -> str:
@@ -572,7 +638,9 @@ async def get_file_content(owner: str, repo: str, path: str, ref: str = "") -> s
         lines = [f"Directory `{path}` contains {len(data)} item(s):\n"]
         for item in data:
             item_type = item.get("type", "?")
-            lines.append(f"- [{item_type}] **{item.get('name', '?')}** ({item.get('size', 0)} bytes)")
+            lines.append(
+                f"- [{item_type}] **{item.get('name', '?')}** ({item.get('size', 0)} bytes)"
+            )
         return "\n".join(lines)
 
     name = data.get("name", "?")
@@ -587,16 +655,18 @@ async def get_file_content(owner: str, repo: str, path: str, ref: str = "") -> s
         )
 
     ref_str = f" (ref: {ref})" if ref else ""
-    return (
-        f"**{name}**{ref_str} ({size} bytes)\n\n"
-        f"```\n{content}\n```"
-    )
+    return f"**{name}**{ref_str} ({size} bytes)\n\n" f"```\n{content}\n```"
 
 
 @mcp.tool()
 async def create_or_update_file(
-    owner: str, repo: str, path: str, content: str, message: str,
-    sha: str = "", branch: str = "",
+    owner: str,
+    repo: str,
+    path: str,
+    content: str,
+    message: str,
+    sha: str = "",
+    branch: str = "",
 ) -> str:
     """
     Create or update a file in a GitHub repository.
@@ -614,8 +684,14 @@ async def create_or_update_file(
     try:
         async with AsyncGitHubClient(token) as client:
             result = await code_ops.acreate_or_update_file(
-                client, owner, repo, path, content=content, message=message,
-                sha=sha, branch=branch,
+                client,
+                owner,
+                repo,
+                path,
+                content=content,
+                message=message,
+                sha=sha,
+                branch=branch,
             )
     except GitHubError as e:
         return _friendly_error(e)
@@ -663,6 +739,7 @@ async def search_code(query: str, per_page: int = 10) -> str:
 # User tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 async def get_authenticated_user() -> str:
     """Get information about the authenticated GitHub user."""
@@ -682,11 +759,13 @@ async def get_authenticated_user() -> str:
         lines.append(f"**Company:** {user['company']}")
     if user.get("location"):
         lines.append(f"**Location:** {user['location']}")
-    lines.extend([
-        f"**Public Repos:** {user.get('public_repos', 0)}",
-        f"**Followers:** {user.get('followers', 0)} | **Following:** {user.get('following', 0)}",
-        f"**URL:** {user.get('html_url', '?')}",
-    ])
+    lines.extend(
+        [
+            f"**Public Repos:** {user.get('public_repos', 0)}",
+            f"**Followers:** {user.get('followers', 0)} | **Following:** {user.get('following', 0)}",
+            f"**URL:** {user.get('html_url', '?')}",
+        ]
+    )
     return "\n".join(lines)
 
 

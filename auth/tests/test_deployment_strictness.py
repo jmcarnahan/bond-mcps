@@ -16,8 +16,8 @@ from auth.db.session import (
     validate_db_url,
 )
 
-
 # ---------- F1 ----------
+
 
 def test_current_user_key_refuses_postgres_without_env_var(monkeypatch):
     """Containerized Postgres deployment without BOND_MCPS_USER_ID must fail."""
@@ -53,6 +53,7 @@ def test_current_user_key_allows_sqlite_fallback(monkeypatch):
 
 # ---------- F4 ----------
 
+
 def test_validate_rejects_mysql_at_engine_creation():
     with pytest.raises(ValueError, match="Unsupported DB dialect"):
         validate_db_url("mysql://u:p@h:3306/d")
@@ -72,13 +73,12 @@ def test_validate_accepts_sqlite_and_postgres():
 
 # ---------- F5 ----------
 
+
 def test_is_missing_table_error_recognizes_sqlite_message():
     """SQLite OperationalError contains 'no such table: <name>'."""
     from sqlalchemy.exc import OperationalError
 
-    exc = OperationalError(
-        "SELECT 1", {}, Exception("no such table: alembic_version")
-    )
+    exc = OperationalError("SELECT 1", {}, Exception("no such table: alembic_version"))
     assert _is_missing_table_error(exc) is True
 
 
@@ -87,7 +87,8 @@ def test_is_missing_table_error_recognizes_postgres_message():
     from sqlalchemy.exc import ProgrammingError
 
     exc = ProgrammingError(
-        "SELECT 1", {},
+        "SELECT 1",
+        {},
         Exception('relation "alembic_version" does not exist'),
     )
     assert _is_missing_table_error(exc) is True
@@ -116,11 +117,12 @@ def test_is_missing_table_error_recognizes_pgcode():
 def test_ensure_schema_current_propagates_permission_error(tmp_path, monkeypatch):
     """A permission error from the DB must NOT be masked as 'schema empty'."""
     from unittest.mock import patch
+
     from sqlalchemy.exc import ProgrammingError
 
+    from auth.alembic_config import upgrade_head
     from auth.db import reset_for_tests
     from auth.db.session import ensure_schema_current
-    from auth.alembic_config import upgrade_head
 
     monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{tmp_path / 'tokens.db'}")
     reset_for_tests()
@@ -139,6 +141,7 @@ def test_ensure_schema_current_propagates_permission_error(tmp_path, monkeypatch
 
 
 # ---------- F6 ----------
+
 
 def test_doctor_warns_on_verify_full_without_sslrootcert(monkeypatch, capsys):
     """sslmode=verify-full without sslrootcert → WARN (psycopg uses system trust)."""
@@ -213,6 +216,7 @@ def test_doctor_passes_when_sslrootcert_file_exists(monkeypatch, tmp_path, capsy
 
 
 # ---------- F3 doctor + user_key for Postgres ----------
+
 
 def test_doctor_fails_when_user_key_unresolvable_on_postgres(monkeypatch, capsys):
     from auth.cli import main

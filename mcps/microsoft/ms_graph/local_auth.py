@@ -139,13 +139,10 @@ def _try_silent_under_lock(client_id: str, scopes: list[str]) -> str | None:
         return None
 
 
-def _create_msal_app(
-    client_id: str, cache: msal.SerializableTokenCache
-) -> msal.ClientApplication:
+def _create_msal_app(client_id: str, cache: msal.SerializableTokenCache) -> msal.ClientApplication:
     """Create an MSAL app — Confidential if MS_CLIENT_SECRET is set, else Public."""
     authority = (
-        f"https://login.microsoftonline.com/"
-        f"{os.environ.get('MS_TENANT_ID', 'consumers')}"
+        f"https://login.microsoftonline.com/" f"{os.environ.get('MS_TENANT_ID', 'consumers')}"
     )
     client_secret = os.environ.get("MS_CLIENT_SECRET")
     if client_secret:
@@ -156,13 +153,13 @@ def _create_msal_app(
             token_cache=cache,
         )
     return msal.PublicClientApplication(
-        client_id, authority=authority, token_cache=cache,
+        client_id,
+        authority=authority,
+        token_cache=cache,
     )
 
 
-def _acquire_token_browser(
-    app: msal.ClientApplication, scopes: list[str]
-) -> dict | None:
+def _acquire_token_browser(app: msal.ClientApplication, scopes: list[str]) -> dict | None:
     """
     Authorization code flow with PKCE using the shared OAuth callback proxy.
 
@@ -171,6 +168,7 @@ def _acquire_token_browser(
     """
     try:
         from auth import OAuthProxyClient
+
         proxy = OAuthProxyClient()
         proxy.check_proxy()
     except (RuntimeError, ImportError) as e:
@@ -227,8 +225,7 @@ def _acquire_token_via_proxy(
         # Subclass of TimeoutError — must come first
         logger.warning("Browser auth state expired or already consumed")
         print(
-            "Browser login session expired or was already used. "
-            "Trying device code...",
+            "Browser login session expired or was already used. " "Trying device code...",
             flush=True,
         )
         return None
@@ -240,8 +237,7 @@ def _acquire_token_via_proxy(
     if "code" not in callback_result:
         error = callback_result.get("error", "unknown")
         logger.warning("Browser auth failed: %s", error)
-        print(f"Browser login not completed ({error}). Trying device code...",
-              flush=True)
+        print(f"Browser login not completed ({error}). Trying device code...", flush=True)
         return None
 
     result = app.acquire_token_by_auth_code_flow(flow, callback_result)
@@ -253,9 +249,7 @@ def _acquire_token_via_proxy(
     return result if "access_token" in result else None
 
 
-def _acquire_token_device_code(
-    app: msal.ClientApplication, scopes: list[str]
-) -> dict | None:
+def _acquire_token_device_code(app: msal.ClientApplication, scopes: list[str]) -> dict | None:
     """Device code flow fallback -- prints a code for the user to enter."""
     flow = app.initiate_device_flow(scopes=scopes)
     if "user_code" not in flow:

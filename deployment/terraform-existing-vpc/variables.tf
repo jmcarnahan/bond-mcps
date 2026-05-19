@@ -38,6 +38,19 @@ variable "private_subnet_ids" {
   EOT
 }
 
+variable "public_subnet_ids" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Public subnets the shared ALB lives in. Stamped on every Ingress as
+    alb.ingress.kubernetes.io/subnets so the AWS Load Balancer Controller
+    doesn't need the kubernetes.io/role/elb auto-discovery tag (which
+    requires modifying tags on the shared VPC's subnets). At least 2, in
+    different AZs, are required for the ALB. When empty, the controller
+    falls back to tag-based discovery.
+  EOT
+}
+
 # =========================================================================
 # DNS + TLS
 # =========================================================================
@@ -47,7 +60,7 @@ variable "base_domain" {
   description = <<-EOT
     Subdomain under which every service is exposed.
     Each service hostname becomes "<hostname_prefix>.<base_domain>".
-    Example: "mcps.ai.example.com" → "auth.mcps.ai.example.com".
+    Example: "mcps.example.com" → "auth.mcps.example.com".
   EOT
 }
 
@@ -75,10 +88,15 @@ variable "services" {
     hostname_prefix    = string
     replicas           = optional(number, 1)
     is_auth_proxy      = optional(bool, false)
+    is_auth_server     = optional(bool, false)
     runs_migrations    = optional(bool, false)
     needs_scaling_work = optional(bool, false)
     oauth_secret_name  = optional(string)
-    extra_env          = optional(map(string), {})
+    # Override the container entrypoint. Used for the Authorization Server
+    # which shares the auth image but runs ``python -m auth.auth_server``.
+    # Empty list means use the image's default CMD.
+    command   = optional(list(string), [])
+    extra_env = optional(map(string), {})
     health = optional(object({
       type = string
       path = optional(string, "/health")
@@ -90,8 +108,12 @@ variable "services" {
   }))
 
   validation {
-    condition     = length([for k, v in var.services : k if v.is_auth_proxy]) == 1
-    error_message = "Exactly one service must have is_auth_proxy = true."
+    condition     = length([for k, v in var.services : k if v.is_auth_proxy]) <= 1
+    error_message = "At most one service may have is_auth_proxy = true."
+  }
+  validation {
+    condition     = length([for k, v in var.services : k if v.is_auth_server]) <= 1
+    error_message = "At most one service may have is_auth_server = true."
   }
 }
 
@@ -169,21 +191,62 @@ variable "aurora_engine_version" {
 variable "jwt_verification" {
   description = <<-EOT
     Multi-tenant identity via JWT verification. Off by default — every caller
-    shares the chart's userKey value (single-tenant). When enabled, every
-    HTTP request that reaches a Path-2 token-DB operation must carry
-    X-Bond-Auth: Bearer <jwt>; the JWT is verified against the operator-
-    supplied public key (seeded into the SM secret created by this module)
-    and the sub claim becomes the request's user_key. See plan section H/C2.
+    shares the chart's userKey value (single-tenant). When enabled, each MCP
+    becomes an OAuth 2.1 Resource Server: FastMCP's RemoteAuthProvider
+    mounts /.well-known/oauth-protected-resource and returns
+    `401 + WWW-Authenticate: Bearer ... resource_metadata=...` for missing
+    tokens. The standard `Authorization: Bearer <jwt>` is validated against
+    `jwks_uri` (the bond-mcps AS's JWKS endpoint). The JWT's `sub` claim
+    becomes the per-request user_key.
+
+    When enabled, you must ALSO declare a service with is_auth_server = true
+    in var.services AND populate the upstream_* fields below so the AS can
+    sign in users against Cognito or Okta.
+
+    See docs/deployment/oauth-resource-server.md.
   EOT
   type = object({
-    enabled   = bool
-    issuer    = optional(string, "")
+    enabled = bool
+    # Required when enabled. JWKS URI for the bond-mcps AS — typically
+    # "https://<auth-hostname>/.well-known/jwks.json".
+    jwks_uri = optional(string, "")
+    # Required when enabled. Issuer claim in JWTs and AS base URL.
+    issuer = optional(string, "")
+    # Optional friendly audience name in addition to the canonical PRM URI
+    # (which the verifier auto-derives from BOND_MCPS_PUBLIC_URL/mcp). Leave
+    # empty unless you have a non-Claude-Code caller that needs it.
     audience  = optional(string, "")
     algorithm = optional(string, "RS256")
     sub_claim = optional(string, "sub")
+    # Same as issuer in the common case; surfaced separately so an
+    # AS hosted at a different URL than the JWKS works.
+    as_base_url = optional(string, "")
+    # ---- Upstream OIDC IdP (consumed by the AS) ------------------------
+    upstream_idp             = optional(string, "") # "cognito" or "okta"
+    upstream_issuer          = optional(string, "") # OIDC issuer URL
+    upstream_client_id       = optional(string, "") # AS's client ID at the IdP
+    upstream_redirect_uri    = optional(string, "") # "<as_base_url>/oauth/upstream/callback"
+    upstream_scopes          = optional(string, "openid email profile")
+    upstream_allowed_domains = optional(string, "") # CSV; optional gate
+    # CSV of hosts allowed as DCR redirect_uri (in addition to loopback).
+    # Required for any Claude Code instance that uses an https loopback;
+    # typical value is an org's workstation domain. Leave empty for loopback-only.
+    as_allowed_redirect_hosts = optional(string, "")
+    # Lengthen the AS-issued JWT TTL beyond the 24h default (in seconds).
+    access_token_ttl_seconds = optional(number, 86400)
   })
   default = {
     enabled = false
+  }
+
+  validation {
+    condition = !var.jwt_verification.enabled || (
+      var.jwt_verification.upstream_idp != "" &&
+      var.jwt_verification.upstream_issuer != "" &&
+      var.jwt_verification.upstream_client_id != "" &&
+      var.jwt_verification.upstream_redirect_uri != ""
+    )
+    error_message = "When jwt_verification.enabled=true, all of upstream_idp, upstream_issuer, upstream_client_id, and upstream_redirect_uri must be set. (jwks_uri and issuer are auto-derived from the is_auth_server service hostname when omitted.)"
   }
 }
 

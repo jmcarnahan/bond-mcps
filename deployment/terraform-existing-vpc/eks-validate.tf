@@ -124,18 +124,19 @@ resource "terraform_data" "encryption_key_seeded" {
 }
 
 # -----------------------------------------------------------------------------
-# JWT public key (only when multi-tenant identity is enabled)
+# Legacy JWT public-key seeding check (only when jwt_verification.enabled AND
+# jwks_uri is empty — meaning operator chose static-PEM mode).
 # -----------------------------------------------------------------------------
 
 data "external" "jwt_public_key_check" {
-  count = var.jwt_verification.enabled ? 1 : 0
+  count = local.enable_legacy_jwt_pk_secret ? 1 : 0
 
   program = ["bash", "-c", <<-EOT
     set -euo pipefail
 
     aws_rc=0
     val=$(aws secretsmanager get-secret-value \
-      --secret-id ${aws_secretsmanager_secret.jwt_public_key.name} \
+      --secret-id ${aws_secretsmanager_secret.jwt_public_key[0].name} \
       --region ${var.aws_region} \
       --query SecretString --output text 2>&1) || aws_rc=$?
 
@@ -160,14 +161,15 @@ data "external" "jwt_public_key_check" {
 }
 
 resource "terraform_data" "jwt_public_key_seeded" {
-  count = var.jwt_verification.enabled ? 1 : 0
+  count = local.enable_legacy_jwt_pk_secret ? 1 : 0
 
   lifecycle {
     precondition {
       condition     = data.external.jwt_public_key_check[0].result.status == "seeded"
       error_message = <<-EOM
-        ${aws_secretsmanager_secret.jwt_public_key.name} is not yet seeded
-        (status: missing or placeholder) but var.jwt_verification.enabled = true.
+        ${local.sm_jwt_public_key} is not yet seeded
+        (status: missing or placeholder) but legacy static-PEM JWT mode is
+        active (jwt_verification.enabled = true AND jwks_uri is empty).
 
         Seed the PEM-encoded public key (Unix line endings; strip CR if
         seeded from Windows: `tr -d '\r' < cert.pem > cert.lf.pem`):
@@ -176,14 +178,14 @@ resource "terraform_data" "jwt_public_key_seeded" {
              '{BOND_MCPS_JWT_PUBLIC_KEY: $pem}' > /tmp/jwt-payload.json
 
           aws secretsmanager put-secret-value \
-            --secret-id ${aws_secretsmanager_secret.jwt_public_key.name} \
+            --secret-id ${local.sm_jwt_public_key} \
             --region ${var.aws_region} \
             --secret-string file:///tmp/jwt-payload.json
 
           rm /tmp/jwt-payload.json
 
-        Re-run `terraform apply` once seeded. Or flip
-        var.jwt_verification.enabled = false to revert to single-tenant mode.
+        Re-run `terraform apply` once seeded. Or set
+        jwt_verification.jwks_uri to switch to the (preferred) JWKS path.
       EOM
     }
   }

@@ -13,7 +13,7 @@ plus no friendly mapping at all. Lifting them here means:
 
 import csv
 import io
-from typing import Sequence
+from collections.abc import Sequence
 
 from dbx.auth import AuthSource
 from dbx.client import DatabricksError
@@ -65,10 +65,7 @@ def friendly_error(err: DatabricksError, source: AuthSource | None) -> str:
         )
 
     if code == "Unreachable":
-        return (
-            f"Cannot reach Databricks at DATABRICKS_HOST. Check the workspace "
-            f"URL.\n({err})"
-        )
+        return f"Cannot reach Databricks at DATABRICKS_HOST. Check the workspace " f"URL.\n({err})"
 
     if code == "SQLError":
         return f"Databricks SQL error:\n```\n{err}\n```"

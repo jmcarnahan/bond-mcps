@@ -1,15 +1,14 @@
 """Tests for code and content operations."""
 
 import httpx
-import pytest
 import respx
-
 from github.github_client import GITHUB_API_BASE_URL, AsyncGitHubClient, GitHubClient
+
 from .conftest import (
-    SAMPLE_FILE_CONTENT,
-    SAMPLE_DIRECTORY_LISTING,
-    SAMPLE_FILE_CREATE_RESULT,
     SAMPLE_CODE_SEARCH_RESPONSE,
+    SAMPLE_DIRECTORY_LISTING,
+    SAMPLE_FILE_CONTENT,
+    SAMPLE_FILE_CREATE_RESULT,
     SAMPLE_USER,
 )
 
@@ -66,8 +65,12 @@ class TestCodeSync:
         )
         with GitHubClient("tok") as client:
             result = create_or_update_file(
-                client, "o", "r", "new-file.txt",
-                content="Hello World", message="Create new-file.txt",
+                client,
+                "o",
+                "r",
+                "new-file.txt",
+                content="Hello World",
+                message="Create new-file.txt",
             )
 
         assert result["commit"]["sha"] == "commit456"
@@ -75,16 +78,22 @@ class TestCodeSync:
 
     @respx.mock
     def test_create_or_update_file_with_sha(self):
-        from github.code import create_or_update_file
         import json
+
+        from github.code import create_or_update_file
 
         route = respx.put(f"{GITHUB_API_BASE_URL}/repos/o/r/contents/existing.txt").mock(
             return_value=httpx.Response(200, json=SAMPLE_FILE_CREATE_RESULT)
         )
         with GitHubClient("tok") as client:
             create_or_update_file(
-                client, "o", "r", "existing.txt",
-                content="Updated", message="Update file", sha="old123",
+                client,
+                "o",
+                "r",
+                "existing.txt",
+                content="Updated",
+                message="Update file",
+                sha="old123",
             )
 
         body = json.loads(route.calls[0].request.content)
@@ -142,8 +151,12 @@ class TestCodeAsync:
         )
         async with AsyncGitHubClient("tok") as client:
             result = await acreate_or_update_file(
-                client, "o", "r", "new.txt",
-                content="Hello", message="Create",
+                client,
+                "o",
+                "r",
+                "new.txt",
+                content="Hello",
+                message="Create",
             )
 
         assert result["commit"]["sha"] == "commit456"

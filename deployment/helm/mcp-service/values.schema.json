@@ -69,12 +69,20 @@
     "jwt": {
       "type": "object",
       "properties": {
-        "enabled":            { "type": "boolean" },
-        "secretsManagerName": { "type": "string" },
-        "issuer":             { "type": "string" },
-        "audience":           { "type": "string" },
-        "algorithm":          { "type": "string" },
-        "subClaim":           { "type": "string" }
+        "enabled":   { "type": "boolean" },
+        "jwksUri":   { "type": "string" },
+        "publicKey": {
+          "type": "object",
+          "properties": {
+            "secretsManagerName": { "type": "string" }
+          }
+        },
+        "issuer":    { "type": "string" },
+        "audience":  { "type": "string" },
+        "algorithm": { "type": "string" },
+        "subClaim":  { "type": "string" },
+        "asBaseUrl": { "type": "string" },
+        "publicUrl": { "type": "string" }
       }
     },
     "migrations": {

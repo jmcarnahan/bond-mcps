@@ -30,6 +30,14 @@ resource "helm_release" "external_secrets" {
   depends_on = [
     kubernetes_namespace.external_secrets,
     module.external_secrets_irsa,
+    # The AWS Load Balancer Controller registers a MutatingWebhookConfiguration
+    # that intercepts *every* Service creation cluster-wide. If ESO installs
+    # in parallel, its chart's Service objects are rejected with
+    # "no endpoints available for service aws-load-balancer-webhook-service"
+    # because the LB controller pod hasn't finished starting yet. Serialize:
+    # ALB controller helm release waits (wait=true) for the controller pod
+    # to be Ready, so by the time we get here the webhook backend exists.
+    helm_release.alb_controller,
   ]
 }
 

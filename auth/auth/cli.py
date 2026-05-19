@@ -173,6 +173,137 @@ def cmd_doctor(_args) -> int:
     return 0
 
 
+def cmd_prune_oauth(args) -> int:
+    """Delete OAuth AS rows no longer needed.
+
+    Designed to be run on a cron schedule (or once at AS startup). All
+    deletions are idempotent and safe to retry.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from auth.db.models import (
+        ConnectTicket,
+        OAuthAuthCode,
+        OAuthClient,
+        OAuthPendingAuth,
+        OAuthRefreshToken,
+    )
+    from auth.db.session import get_session
+
+    now = datetime.now(timezone.utc)
+    client_idle_cutoff = now - timedelta(days=args.client_idle_days)
+    revoked_cutoff = now - timedelta(days=args.revoked_grace_days)
+    pending_cutoff = now - timedelta(minutes=10)
+    code_cutoff = now - timedelta(minutes=10)
+    ticket_cutoff = now - timedelta(minutes=10)
+
+    counts: dict[str, int] = {}
+    with get_session() as session:
+        # 1. Expired one-shot artifacts (these have INSERT-time sweeps but
+        # may accumulate when traffic dries up).
+        counts["pending_auth"] = (
+            session.query(OAuthPendingAuth)
+            .filter(OAuthPendingAuth.expires_at < pending_cutoff)
+            .count()
+        )
+        counts["auth_codes"] = (
+            session.query(OAuthAuthCode).filter(OAuthAuthCode.expires_at < code_cutoff).count()
+        )
+        counts["connect_tickets"] = (
+            session.query(ConnectTicket).filter(ConnectTicket.expires_at < ticket_cutoff).count()
+        )
+
+        # 2. Long-revoked refresh tokens.
+        counts["revoked_refresh_tokens"] = (
+            session.query(OAuthRefreshToken)
+            .filter(
+                OAuthRefreshToken.revoked_at != None,  # noqa: E711
+                OAuthRefreshToken.revoked_at < revoked_cutoff,
+            )
+            .count()
+        )
+
+        # 3. DCR clients with no recent activity. "Recent activity" = a
+        # refresh_token issued in the last `client_idle_days`. Static
+        # clients (is_static=True) are exempt — operators registered them
+        # deliberately.
+        active_client_ids = (
+            session.execute(
+                select(OAuthRefreshToken.client_id)
+                .where(OAuthRefreshToken.created_at >= client_idle_cutoff)
+                .distinct()
+            )
+            .scalars()
+            .all()
+        )
+        idle_clients = session.query(OAuthClient).filter(
+            OAuthClient.is_static.is_(False),
+            OAuthClient.created_at < client_idle_cutoff,
+            ~OAuthClient.client_id.in_(active_client_ids),
+        )
+        counts["idle_dcr_clients"] = idle_clients.count()
+
+        if args.dry_run:
+            print("dry-run; would delete:")
+            for k, v in counts.items():
+                print(f"  {k:25s} {v}")
+            return 0
+
+        # Execute deletions in dependency-safe order (refresh tokens before
+        # clients, since RT references client_id).
+        session.query(OAuthPendingAuth).filter(OAuthPendingAuth.expires_at < pending_cutoff).delete(
+            synchronize_session=False
+        )
+        session.query(OAuthAuthCode).filter(OAuthAuthCode.expires_at < code_cutoff).delete(
+            synchronize_session=False
+        )
+        session.query(ConnectTicket).filter(ConnectTicket.expires_at < ticket_cutoff).delete(
+            synchronize_session=False
+        )
+        session.query(OAuthRefreshToken).filter(
+            OAuthRefreshToken.revoked_at != None,  # noqa: E711
+            OAuthRefreshToken.revoked_at < revoked_cutoff,
+        ).delete(synchronize_session=False)
+        idle_clients.delete(synchronize_session=False)
+        session.commit()
+
+    print("pruned:")
+    for k, v in counts.items():
+        print(f"  {k:25s} {v}")
+    return 0
+
+
+def cmd_revoke_tokens(args) -> int:
+    """Revoke every non-revoked refresh token for a given user_key.
+
+    Use case: an end user reports a workstation lost/stolen. Setting
+    ``revoked_at`` invalidates the refresh tokens; combined with short
+    access-token TTL this kicks the user out within at most one TTL.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import update
+
+    from auth.db.models import OAuthRefreshToken
+    from auth.db.session import get_session
+
+    now = datetime.now(timezone.utc)
+    with get_session() as session:
+        result = session.execute(
+            update(OAuthRefreshToken)
+            .where(
+                OAuthRefreshToken.user_key == args.user_key,
+                OAuthRefreshToken.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
+        )
+        session.commit()
+        print(f"Revoked {result.rowcount} refresh token(s) for user_key={args.user_key!r}.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bond-mcps",
@@ -202,12 +333,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delete the cached token for a provider (logout)",
     )
     p_clear.add_argument(
-        "--provider", required=True,
+        "--provider",
+        required=True,
         choices=("github", "atlassian", "microsoft"),
         help="Which provider's cached token to delete",
     )
     p_clear.add_argument("--user", help="Override BOND_MCPS_USER_ID")
     p_clear.set_defaults(func=cmd_clear)
+
+    p_prune = sub.add_parser(
+        "prune-oauth",
+        help="Delete stale OAuth AS rows (expired codes, idle DCR clients, "
+        "long-revoked refresh tokens). Safe to run on a schedule.",
+    )
+    p_prune.add_argument(
+        "--client-idle-days",
+        type=int,
+        default=30,
+        help="DCR clients with no recent activity in this many days are deleted. " "Default: 30.",
+    )
+    p_prune.add_argument(
+        "--revoked-grace-days",
+        type=int,
+        default=7,
+        help="Refresh tokens revoked more than this many days ago are deleted. " "Default: 7.",
+    )
+    p_prune.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print counts of what would be deleted, but don't delete.",
+    )
+    p_prune.set_defaults(func=cmd_prune_oauth)
+
+    p_revoke = sub.add_parser(
+        "revoke-tokens",
+        help="Revoke all refresh tokens for a given user_key (emergency invalidation).",
+    )
+    p_revoke.add_argument(
+        "--user-key",
+        required=True,
+        help="Cognito sub (or JWT sub claim) whose sessions should be invalidated.",
+    )
+    p_revoke.set_defaults(func=cmd_revoke_tokens)
 
     return parser
 

@@ -6,7 +6,6 @@ import pytest
 from sqlalchemy import select
 
 from auth.db.models import ProviderToken
-from auth.db.repository import TokenRepository
 from auth.db.session import get_session_factory
 from auth.encryption import TokenEncryptionError
 
@@ -56,12 +55,16 @@ def test_save_is_upsert(repo):
     # No duplicate rows
     factory = get_session_factory()
     with factory() as s:
-        rows = s.execute(
-            select(ProviderToken).where(
-                ProviderToken.user_key == "alice",
-                ProviderToken.provider == "github",
+        rows = (
+            s.execute(
+                select(ProviderToken).where(
+                    ProviderToken.user_key == "alice",
+                    ProviderToken.provider == "github",
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1
 
 
@@ -188,11 +191,13 @@ def test_locked_token_update(repo):
     with repo.locked_token("alice", "atlassian") as locked:
         assert locked.data["access_token"] == "old"
         assert locked.is_expired()
-        locked.update({
-            "access_token": "new",
-            "refresh_token": "rtk-2",
-            "expires_at": time.time() + 3600,
-        })
+        locked.update(
+            {
+                "access_token": "new",
+                "refresh_token": "rtk-2",
+                "expires_at": time.time() + 3600,
+            }
+        )
         assert locked.data["access_token"] == "new"
 
     got = repo.get_token("alice", "atlassian")
@@ -213,8 +218,9 @@ def test_locked_token_preserves_extra_metadata(repo):
         },
     )
     with repo.locked_token("alice", "atlassian") as locked:
-        locked.update({"access_token": "new", "refresh_token": "rtk-2",
-                       "expires_at": time.time() + 3600})
+        locked.update(
+            {"access_token": "new", "refresh_token": "rtk-2", "expires_at": time.time() + 3600}
+        )
 
     got = repo.get_token("alice", "atlassian")
     assert got["cloud_id"] == "cid-1"  # preserved across refresh

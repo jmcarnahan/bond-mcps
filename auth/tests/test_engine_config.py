@@ -32,12 +32,11 @@ def test_sqlite_foreign_keys_enabled(engine):
 def test_db_file_is_0600(db_url, engine):
     """The on-disk SQLite file is chmod'd to 0600 on creation. WAL/SHM
     sidecars inherit perms from the main file."""
-    import os
     from pathlib import Path
 
     # db_url is sqlite:///<tmp_path>/tokens.db; parse out the path.
     assert db_url.startswith("sqlite:///")
-    path = Path(db_url[len("sqlite:///"):])
+    path = Path(db_url[len("sqlite:///") :])
     # Touch the engine to ensure the file exists.
     with engine.connect():
         pass
@@ -71,9 +70,7 @@ def test_postgres_engine_kwargs_include_connect_timeout(monkeypatch):
         return _Stub()
 
     with _patch.object(session_mod, "create_engine", side_effect=fake_create_engine):
-        session_mod._make_engine(
-            "postgresql://u:p@h:5432/d?sslmode=verify-full"
-        )
+        session_mod._make_engine("postgresql://u:p@h:5432/d?sslmode=verify-full")
 
     assert "connect_args" in captured["kwargs"]
     assert captured["kwargs"]["connect_args"].get("connect_timeout") == 30
@@ -100,8 +97,12 @@ def test_postgres_engine_pool_sized_for_aurora_serverless_v2(monkeypatch):
 
         class _Stub:
             dialect = type("D", (), {"name": "postgresql"})()
-            def connect(self): raise RuntimeError("stub")
-            def dispose(self): pass
+
+            def connect(self):
+                raise RuntimeError("stub")
+
+            def dispose(self):
+                pass
 
         return _Stub()
 

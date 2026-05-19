@@ -5,6 +5,7 @@
 # call site. They are intentionally NOT in __all__ — `from auth import *`
 # isn't a supported usage pattern here.
 from auth import log_discipline, startup  # noqa: F401
+from auth.exceptions import MissingProviderConnection
 from auth.proxy_client import AuthStateExpiredError, OAuthProxyClient
 from auth.token_store import (
     TokenStore,
@@ -14,6 +15,7 @@ from auth.token_store import (
 
 __all__ = [
     "AuthStateExpiredError",
+    "MissingProviderConnection",
     "OAuthProxyClient",
     "TokenStore",
     "current_user_key",

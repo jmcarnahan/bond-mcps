@@ -8,15 +8,15 @@ or AsyncGraphClient and return parsed dicts.
 
 import asyncio
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from .graph_client import GraphClient, AsyncGraphClient, GraphError
+from .graph_client import AsyncGraphClient, GraphClient, GraphError
 
-MAX_TEXT_DOWNLOAD_BYTES = 524_288   # 512 KB
+MAX_TEXT_DOWNLOAD_BYTES = 524_288  # 512 KB
 MAX_SIMPLE_UPLOAD_BYTES = 4_000_000  # 4 MB (Graph simple upload limit)
 
 # Content-type mapping for upload (by file extension)
-_UPLOAD_CONTENT_TYPES: Dict[str, str] = {
+_UPLOAD_CONTENT_TYPES: dict[str, str] = {
     ".txt": "text/plain",
     ".md": "text/markdown",
     ".html": "text/html",
@@ -28,32 +28,75 @@ _UPLOAD_CONTENT_TYPES: Dict[str, str] = {
     ".yml": "application/yaml",
 }
 
-_COPY_POLL_INTERVAL = 2   # seconds between copy status polls
-_COPY_POLL_TIMEOUT = 30   # seconds before giving up on a copy operation
+_COPY_POLL_INTERVAL = 2  # seconds between copy status polls
+_COPY_POLL_TIMEOUT = 30  # seconds before giving up on a copy operation
 
 # MIME types considered text-readable
 _TEXT_MIME_PREFIXES = ("text/",)
-_TEXT_MIME_TYPES = frozenset({
-    "application/json",
-    "application/xml",
-    "application/javascript",
-    "application/x-yaml",
-    "application/x-sh",
-    "application/sql",
-})
+_TEXT_MIME_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/x-yaml",
+        "application/x-sh",
+        "application/sql",
+    }
+)
 
 # File extensions considered text-readable (fallback when MIME is missing)
-_TEXT_EXTENSIONS = frozenset({
-    ".txt", ".csv", ".json", ".md", ".py", ".js", ".ts", ".html", ".xml",
-    ".yaml", ".yml", ".log", ".cfg", ".ini", ".sh", ".sql", ".java", ".c",
-    ".cpp", ".css", ".svg", ".toml", ".tf", ".go", ".rs", ".rb", ".jsx",
-    ".tsx", ".vue", ".scss", ".less", ".bat", ".ps1", ".r", ".m", ".h",
-    ".hpp", ".swift", ".kt", ".gradle", ".properties", ".env", ".gitignore",
-    ".dockerfile", ".makefile",
-})
+_TEXT_EXTENSIONS = frozenset(
+    {
+        ".txt",
+        ".csv",
+        ".json",
+        ".md",
+        ".py",
+        ".js",
+        ".ts",
+        ".html",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".log",
+        ".cfg",
+        ".ini",
+        ".sh",
+        ".sql",
+        ".java",
+        ".c",
+        ".cpp",
+        ".css",
+        ".svg",
+        ".toml",
+        ".tf",
+        ".go",
+        ".rs",
+        ".rb",
+        ".jsx",
+        ".tsx",
+        ".vue",
+        ".scss",
+        ".less",
+        ".bat",
+        ".ps1",
+        ".r",
+        ".m",
+        ".h",
+        ".hpp",
+        ".swift",
+        ".kt",
+        ".gradle",
+        ".properties",
+        ".env",
+        ".gitignore",
+        ".dockerfile",
+        ".makefile",
+    }
+)
 
 
-def _drive_base(site_id: Optional[str] = None) -> str:
+def _drive_base(site_id: str | None = None) -> str:
     """Return the Graph API base path for a drive.
 
     - No site_id (or empty string): user's OneDrive -> ``/me/drive``
@@ -64,7 +107,7 @@ def _drive_base(site_id: Optional[str] = None) -> str:
     return "/me/drive"
 
 
-def _is_text_file(item: Dict[str, Any]) -> bool:
+def _is_text_file(item: dict[str, Any]) -> bool:
     """Determine if a driveItem is likely a text file based on MIME type or extension."""
     file_info = item.get("file", {})
     mime = file_info.get("mimeType", "")
@@ -90,12 +133,13 @@ def _is_text_file(item: Dict[str, Any]) -> bool:
 # Synchronous
 # ---------------------------------------------------------------------------
 
+
 def list_drive_children(
     client: GraphClient,
     folder_path: str = "",
     site_id: str = "",
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List files and folders at a given path in a drive."""
     base = _drive_base(site_id or None)
     if folder_path and folder_path != "/":
@@ -111,7 +155,7 @@ def get_drive_item(
     client: GraphClient,
     item_id: str,
     site_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get metadata for a single drive item by ID."""
     base = _drive_base(site_id or None)
     return client.get(f"{base}/items/{item_id}")
@@ -121,7 +165,7 @@ def get_drive_item_content(
     client: GraphClient,
     item_id: str,
     site_id: str = "",
-) -> Tuple[Dict[str, Any], Optional[str]]:
+) -> tuple[dict[str, Any], str | None]:
     """Get a drive item's metadata and, if it's a text file, its content.
 
     Returns ``(item_metadata, text_content_or_None)``.
@@ -149,7 +193,7 @@ def search_drive(
     query: str,
     site_id: str = "",
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search within a single drive (legacy per-drive search endpoint)."""
     base = _drive_base(site_id or None)
     escaped = query.replace("'", "''")
@@ -161,7 +205,7 @@ def search_files_unified(
     client: GraphClient,
     query: str,
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Cross-drive file search. Uses Microsoft Search API for org accounts,
     falls back to per-drive search for consumer accounts."""
     try:
@@ -188,7 +232,7 @@ def list_sites(
     client: GraphClient,
     query: str = "",
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search for SharePoint sites, or list followed sites if no query."""
     if query:
         data = client.get("/sites", params={"$search": f'"{query}"', "$top": top})
@@ -201,12 +245,13 @@ def list_sites(
 # Asynchronous
 # ---------------------------------------------------------------------------
 
+
 async def alist_drive_children(
     client: AsyncGraphClient,
     folder_path: str = "",
     site_id: str = "",
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List files and folders at a given path in a drive (async)."""
     base = _drive_base(site_id or None)
     if folder_path and folder_path != "/":
@@ -222,7 +267,7 @@ async def aget_drive_item(
     client: AsyncGraphClient,
     item_id: str,
     site_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get metadata for a single drive item by ID (async)."""
     base = _drive_base(site_id or None)
     return await client.get(f"{base}/items/{item_id}")
@@ -232,7 +277,7 @@ async def aget_drive_item_content(
     client: AsyncGraphClient,
     item_id: str,
     site_id: str = "",
-) -> Tuple[Dict[str, Any], Optional[str]]:
+) -> tuple[dict[str, Any], str | None]:
     """Get a drive item's metadata and, if it's a text file, its content (async).
 
     Returns ``(item_metadata, text_content_or_None)``.
@@ -260,7 +305,7 @@ async def asearch_drive(
     query: str,
     site_id: str = "",
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search within a single drive (async)."""
     base = _drive_base(site_id or None)
     escaped = query.replace("'", "''")
@@ -272,7 +317,7 @@ async def asearch_files_unified(
     client: AsyncGraphClient,
     query: str,
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Cross-drive file search. Uses Microsoft Search API for org accounts,
     falls back to per-drive search for consumer accounts (async)."""
     try:
@@ -298,7 +343,7 @@ async def alist_sites(
     client: AsyncGraphClient,
     query: str = "",
     top: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search for SharePoint sites, or list followed sites if no query (async)."""
     if query:
         data = await client.get("/sites", params={"$search": f'"{query}"', "$top": top})
@@ -311,13 +356,14 @@ async def alist_sites(
 # Write / mutate operations — synchronous
 # ---------------------------------------------------------------------------
 
+
 def upload_file(
     client: GraphClient,
     folder_path: str,
     filename: str,
     content: str,
     site_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create or overwrite a text file at folder_path/filename.
 
     Uses the simple upload endpoint (max 4 MB). Returns the created/updated
@@ -332,7 +378,9 @@ def upload_file(
         )
     base = _drive_base(site_id or None)
     path = folder_path.strip("/")
-    url = f"{base}/root:/{path}/{filename}:/content" if path else f"{base}/root:/{filename}:/content"
+    url = (
+        f"{base}/root:/{path}/{filename}:/content" if path else f"{base}/root:/{filename}:/content"
+    )
     ext = f".{filename.rsplit('.', 1)[-1].lower()}" if "." in filename else ""
     content_type = _UPLOAD_CONTENT_TYPES.get(ext, "application/octet-stream")
     return client.put(url, content=encoded, content_type=content_type)
@@ -345,7 +393,7 @@ def copy_drive_item(
     destination_folder_id: str = "",
     site_id: str = "",
     destination_drive_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Server-side copy of a drive item to a new name (and optionally a new folder).
 
     Works for any file type including Word, Excel, and PDF. The Graph copy API
@@ -355,7 +403,7 @@ def copy_drive_item(
     source = get_drive_item(client, item_id, site_id)
     drive_id = destination_drive_id or source.get("parentReference", {}).get("driveId", "")
 
-    parent_ref: Dict[str, Any] = {"driveId": drive_id}
+    parent_ref: dict[str, Any] = {"driveId": drive_id}
     if destination_folder_id:
         parent_ref["id"] = destination_folder_id
     else:
@@ -384,7 +432,7 @@ def rename_drive_item(
     item_id: str,
     new_name: str,
     site_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Rename a file or folder by item ID. Returns the updated driveItem."""
     base = _drive_base(site_id or None)
     return client.patch(f"{base}/items/{item_id}", json_data={"name": new_name})
@@ -394,13 +442,14 @@ def rename_drive_item(
 # Write / mutate operations — asynchronous
 # ---------------------------------------------------------------------------
 
+
 async def aupload_file(
     client: AsyncGraphClient,
     folder_path: str,
     filename: str,
     content: str,
     site_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create or overwrite a text file at folder_path/filename (async)."""
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_SIMPLE_UPLOAD_BYTES:
@@ -410,7 +459,9 @@ async def aupload_file(
         )
     base = _drive_base(site_id or None)
     path = folder_path.strip("/")
-    url = f"{base}/root:/{path}/{filename}:/content" if path else f"{base}/root:/{filename}:/content"
+    url = (
+        f"{base}/root:/{path}/{filename}:/content" if path else f"{base}/root:/{filename}:/content"
+    )
     ext = f".{filename.rsplit('.', 1)[-1].lower()}" if "." in filename else ""
     content_type = _UPLOAD_CONTENT_TYPES.get(ext, "application/octet-stream")
     return await client.put(url, content=encoded, content_type=content_type)
@@ -423,7 +474,7 @@ async def aupload_bytes(
     data: bytes,
     content_type: str = "application/octet-stream",
     site_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Upload raw bytes to folder_path/filename (async). Used for binary files such as
     exported PDFs, PNGs, or PPTX files where the content is already encoded."""
     if len(data) > MAX_SIMPLE_UPLOAD_BYTES:
@@ -433,7 +484,9 @@ async def aupload_bytes(
         )
     base = _drive_base(site_id or None)
     path = folder_path.strip("/")
-    url = f"{base}/root:/{path}/{filename}:/content" if path else f"{base}/root:/{filename}:/content"
+    url = (
+        f"{base}/root:/{path}/{filename}:/content" if path else f"{base}/root:/{filename}:/content"
+    )
     return await client.put(url, content=data, content_type=content_type)
 
 
@@ -444,12 +497,12 @@ async def acopy_drive_item(
     destination_folder_id: str = "",
     site_id: str = "",
     destination_drive_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Server-side copy of a drive item (async). Polls until completion."""
     source = await aget_drive_item(client, item_id, site_id)
     drive_id = destination_drive_id or source.get("parentReference", {}).get("driveId", "")
 
-    parent_ref: Dict[str, Any] = {"driveId": drive_id}
+    parent_ref: dict[str, Any] = {"driveId": drive_id}
     if destination_folder_id:
         parent_ref["id"] = destination_folder_id
     else:
@@ -478,7 +531,7 @@ async def arename_drive_item(
     item_id: str,
     new_name: str,
     site_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Rename a file or folder by item ID (async). Returns the updated driveItem."""
     base = _drive_base(site_id or None)
     return await client.patch(f"{base}/items/{item_id}", json_data={"name": new_name})
@@ -488,7 +541,8 @@ async def arename_drive_item(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_search_response(data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+def _parse_search_response(data: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Flatten Microsoft Search API response into a list of driveItem dicts.
 
     Response shape: ``value[] -> hitsContainers[] -> hits[] -> { resource, summary }``
@@ -496,7 +550,7 @@ def _parse_search_response(data: Optional[Dict[str, Any]]) -> List[Dict[str, Any
     """
     if not data:
         return []
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for entry in data.get("value", []):
         for container in entry.get("hitsContainers", []):
             for hit in container.get("hits", []):

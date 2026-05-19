@@ -18,6 +18,7 @@ def no_sleep(monkeypatch):
     monkeypatch.setattr("ms_graph.files.time.sleep", lambda _: None)
     monkeypatch.setattr("ms_graph.files.asyncio.sleep", AsyncMock(return_value=None))
 
+
 # ---------------------------------------------------------------------------
 # Sample Graph API response payloads
 # ---------------------------------------------------------------------------
@@ -47,9 +48,7 @@ SAMPLE_MESSAGE = {
             "address": "alice@example.com",
         }
     },
-    "toRecipients": [
-        {"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}}
-    ],
+    "toRecipients": [{"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}}],
     "body": {
         "contentType": "text",
         "content": "Here is the weekly report.\n\nBest,\nAlice",
@@ -67,9 +66,7 @@ SAMPLE_MESSAGE_2 = {
             "address": "charlie@example.com",
         }
     },
-    "toRecipients": [
-        {"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}}
-    ],
+    "toRecipients": [{"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}}],
     "body": {
         "contentType": "html",
         "content": "<p>Looks good!</p>",
@@ -136,9 +133,7 @@ SAMPLE_DRIVE_ITEM_FILE = {
     "size": 1024,
     "file": {"mimeType": "text/csv"},
     "lastModifiedDateTime": "2025-12-15T10:30:00Z",
-    "lastModifiedBy": {
-        "user": {"displayName": "Alice Smith", "id": "user-001"}
-    },
+    "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-001"}},
     "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-001",
     "parentReference": {
         "driveId": "drive-001",
@@ -151,9 +146,7 @@ SAMPLE_DRIVE_ITEM_FOLDER = {
     "name": "Documents",
     "folder": {"childCount": 5},
     "lastModifiedDateTime": "2025-12-14T08:00:00Z",
-    "lastModifiedBy": {
-        "user": {"displayName": "Bob Jones", "id": "user-002"}
-    },
+    "lastModifiedBy": {"user": {"displayName": "Bob Jones", "id": "user-002"}},
     "webUrl": "https://onedrive.live.com/redir?resid=folder-id-001",
     "parentReference": {
         "driveId": "drive-001",
@@ -165,11 +158,11 @@ SAMPLE_DRIVE_ITEM_BINARY = {
     "id": "file-id-002",
     "name": "presentation.pptx",
     "size": 2_500_000,
-    "file": {"mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
-    "lastModifiedDateTime": "2025-12-13T15:00:00Z",
-    "lastModifiedBy": {
-        "user": {"displayName": "Charlie Brown", "id": "user-003"}
+    "file": {
+        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     },
+    "lastModifiedDateTime": "2025-12-13T15:00:00Z",
+    "lastModifiedBy": {"user": {"displayName": "Charlie Brown", "id": "user-003"}},
     "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-002",
     "parentReference": {
         "driveId": "drive-001",
@@ -183,9 +176,7 @@ SAMPLE_DRIVE_ITEM_LARGE_TEXT = {
     "size": 600_000,  # Exceeds 512 KB cap
     "file": {"mimeType": "text/plain"},
     "lastModifiedDateTime": "2025-12-12T09:00:00Z",
-    "lastModifiedBy": {
-        "user": {"displayName": "Alice Smith", "id": "user-001"}
-    },
+    "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-001"}},
     "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-003",
     "parentReference": {
         "driveId": "drive-001",
@@ -225,11 +216,11 @@ SAMPLE_SEARCH_RESPONSE = {
                                 "name": "Q4-budget.xlsx",
                                 "size": 45000,
                                 "webUrl": "https://contoso.sharepoint.com/sites/finance/Q4-budget.xlsx",
-                                "file": {"mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-                                "lastModifiedDateTime": "2025-12-10T14:00:00Z",
-                                "lastModifiedBy": {
-                                    "user": {"displayName": "Finance Team"}
+                                "file": {
+                                    "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                                 },
+                                "lastModifiedDateTime": "2025-12-10T14:00:00Z",
+                                "lastModifiedBy": {"user": {"displayName": "Finance Team"}},
                             },
                             "summary": "Q4 <c0>budget</c0> projections for 2025",
                         },
@@ -241,9 +232,7 @@ SAMPLE_SEARCH_RESPONSE = {
                                 "webUrl": "https://contoso.sharepoint.com/sites/finance/budget-notes.md",
                                 "file": {"mimeType": "text/markdown"},
                                 "lastModifiedDateTime": "2025-12-09T11:00:00Z",
-                                "lastModifiedBy": {
-                                    "user": {"displayName": "Alice Smith"}
-                                },
+                                "lastModifiedBy": {"user": {"displayName": "Alice Smith"}},
                             },
                             "summary": "Notes on <c0>budget</c0> review meeting",
                         },
@@ -358,13 +347,9 @@ SAMPLE_CHAT_MEETING = {
     },
 }
 
-SAMPLE_CHATS_RESPONSE = {
-    "value": [SAMPLE_CHAT_ONEONONE, SAMPLE_CHAT_GROUP, SAMPLE_CHAT_MEETING]
-}
+SAMPLE_CHATS_RESPONSE = {"value": [SAMPLE_CHAT_ONEONONE, SAMPLE_CHAT_GROUP, SAMPLE_CHAT_MEETING]}
 
-SAMPLE_CHAT_MESSAGES_RESPONSE = {
-    "value": [SAMPLE_CHANNEL_MESSAGE_USER]
-}
+SAMPLE_CHAT_MESSAGES_RESPONSE = {"value": [SAMPLE_CHANNEL_MESSAGE_USER]}
 
 SAMPLE_CHAT_MESSAGE_SENT = {
     "id": "chat-msg-sent-001",
@@ -515,9 +500,7 @@ SAMPLE_PBI_DAX_RESULT = {
     ]
 }
 
-SAMPLE_PBI_DAX_EMPTY = {
-    "results": [{"tables": [{"rows": []}]}]
-}
+SAMPLE_PBI_DAX_EMPTY = {"results": [{"tables": [{"rows": []}]}]}
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +526,10 @@ SAMPLE_CALENDAR_EVENT = {
             "status": {"response": "accepted"},
         }
     ],
-    "body": {"contentType": "text", "content": "Let's plan the sprint.\n\nAgenda:\n1. Review backlog"},
+    "body": {
+        "contentType": "text",
+        "content": "Let's plan the sprint.\n\nAgenda:\n1. Review backlog",
+    },
     "recurrence": None,
 }
 

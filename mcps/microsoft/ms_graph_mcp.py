@@ -32,18 +32,67 @@ from starlette.responses import JSONResponse
 
 load_dotenv(Path(__file__).parent / ".env")
 
+from ms_graph import calendar as calendar_ops
+from ms_graph import files as files_ops
+from ms_graph import mail as mail_ops
+from ms_graph import power_bi as pbi_ops
+from ms_graph import teams as teams_ops
 from ms_graph.auth import get_graph_token, get_powerbi_token
 from ms_graph.graph_client import AsyncGraphClient
-from ms_graph import mail as mail_ops
-from ms_graph import calendar as calendar_ops
-from ms_graph import teams as teams_ops
-from ms_graph import files as files_ops
-from ms_graph import power_bi as pbi_ops
 from ms_graph.power_bi import AsyncPowerBIClient
-from ms_graph.teams import TeamsNotAvailableError, extract_message_text, extract_message_sender
+from ms_graph.teams import TeamsNotAvailableError, extract_message_sender, extract_message_text
+
+from auth.connect_routes import ProviderConnectConfig, register_connect_routes
+from auth.jwt_identity import build_remote_auth_provider
+
+
+def _microsoft_post_exchange(token_response: dict) -> dict:
+    """Microsoft returns access_token + refresh_token + expires_in in a
+    standard OAuth response. The default shape works for us — we just
+    normalize the fields TokenStore expects."""
+    import time
+
+    out = {"access_token": token_response.get("access_token")}
+    if rt := token_response.get("refresh_token"):
+        out["refresh_token"] = rt
+    if exp := token_response.get("expires_in"):
+        try:
+            out["expires_at"] = time.time() + int(exp)
+        except (TypeError, ValueError):
+            pass
+    if scope := token_response.get("scope"):
+        out["scope"] = scope
+    return out
+
+
+# Microsoft OAuth flow uses the v2 endpoints. Tenant is configurable via
+# MS_TENANT_ID; defaults to 'consumers' (personal MSA). The scope set
+# matches what bond-ai's MCP config uses for Graph mail/calendar/files.
+#
+# Tenant is resolved LAZILY (at request time) so the env can be set after
+# module import — important when the chart/container loads .env after the
+# main module has already imported.
+def _ms_tenant() -> str:
+    return (os.environ.get("MS_TENANT_ID") or "consumers").strip() or "consumers"
+
+
+MICROSOFT_CONNECT_CONFIG = ProviderConnectConfig(
+    name="microsoft",
+    authorize_url=lambda: f"https://login.microsoftonline.com/{_ms_tenant()}/oauth2/v2.0/authorize",
+    token_url=lambda: f"https://login.microsoftonline.com/{_ms_tenant()}/oauth2/v2.0/token",
+    scopes=(
+        "Mail.Read Mail.ReadWrite Mail.Send MailboxSettings.Read "
+        "User.Read Files.Read.All offline_access"
+    ),
+    client_id_env="MS_CLIENT_ID",
+    client_secret_env="MS_CLIENT_SECRET",
+    post_exchange=_microsoft_post_exchange,
+)
+
 
 logging.basicConfig(level=logging.INFO)
 from auth import log_discipline  # noqa: E402
+
 log_discipline.apply()
 logger = logging.getLogger(__name__)
 
@@ -58,10 +107,12 @@ async def _lifespan(app):
     request fails" pattern.
     """
     from auth import startup
+
     startup.verify_runtime_config()
 
     if os.environ.get("MS_CLIENT_ID"):
         from auth import OAuthProxyClient
+
         proxy = OAuthProxyClient()
         try:
             proxy.check_proxy()
@@ -71,7 +122,12 @@ async def _lifespan(app):
     yield
 
 
-mcp = FastMCP("Microsoft Graph MCP Server", lifespan=_lifespan)
+mcp = FastMCP(
+    "Microsoft Graph MCP Server", lifespan=_lifespan, auth=build_remote_auth_provider("ms-graph")
+)
+
+# Per-user provider OAuth bootstrap (JWT mode only).
+register_connect_routes(mcp, MICROSOFT_CONNECT_CONFIG)
 
 
 # Liveness/readiness probe. Returns 200 immediately if the ASGI app is up.
@@ -85,6 +141,7 @@ async def healthz(request):
 # ---------------------------------------------------------------------------
 # User profile
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 async def get_user_profile() -> str:
@@ -119,6 +176,7 @@ async def get_user_profile() -> str:
 # ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 async def list_emails(folder: str = "inbox", query: str = "", top: int = 10) -> str:
@@ -176,8 +234,7 @@ async def read_email(message_id: str) -> str:
 
     sender = msg.get("from", {}).get("emailAddress", {})
     to_addrs = ", ".join(
-        r.get("emailAddress", {}).get("address", "?")
-        for r in msg.get("toRecipients", [])
+        r.get("emailAddress", {}).get("address", "?") for r in msg.get("toRecipients", [])
     )
     body = msg.get("body", {})
     content = body.get("content", "")
@@ -194,7 +251,9 @@ async def read_email(message_id: str) -> str:
 
 
 @mcp.tool()
-async def send_email(to: str, subject: str, body: str, body_type: str = "auto", cc: str = "", from_address: str = "") -> str:
+async def send_email(
+    to: str, subject: str, body: str, body_type: str = "auto", cc: str = "", from_address: str = ""
+) -> str:
     """
     Send an email message.
 
@@ -216,8 +275,12 @@ async def send_email(to: str, subject: str, body: str, body_type: str = "auto", 
 
     async with AsyncGraphClient(token) as client:
         await mail_ops.asend_message(
-            client, to=to_list, subject=subject, body=body,
-            cc=cc_list, from_address=from_address or None,
+            client,
+            to=to_list,
+            subject=subject,
+            body=body,
+            cc=cc_list,
+            from_address=from_address or None,
             body_type=body_type,
         )
 
@@ -228,6 +291,7 @@ async def send_email(to: str, subject: str, body: str, body_type: str = "auto", 
 # ---------------------------------------------------------------------------
 # Calendar
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 async def list_calendar_events(
@@ -248,7 +312,8 @@ async def list_calendar_events(
                   Defaults to 7 days from start_date.
         top: Maximum number of events to return (default: 10).
     """
-    from datetime import datetime, timedelta, timezone as tz
+    from datetime import datetime, timedelta
+    from datetime import timezone as tz
 
     if not start_date:
         now = datetime.now(tz.utc)
@@ -283,10 +348,7 @@ async def list_calendar_events(
         time_str = "All day" if is_all_day else f"{start_str} - {end_str} ({start_tz})"
         status = " [CANCELLED]" if is_cancelled else ""
 
-        entry = (
-            f"{i}. **{subject}**{status}\n"
-            f"   Time: {time_str}\n"
-        )
+        entry = f"{i}. **{subject}**{status}\n" f"   Time: {time_str}\n"
         if organizer:
             entry += f"   Organizer: {organizer}\n"
         if location:
@@ -328,7 +390,9 @@ async def get_calendar_event(event_id: str) -> str:
     for att in attendees:
         email = att.get("emailAddress", {})
         status = att.get("status", {}).get("response", "none")
-        attendee_lines.append(f"  - {email.get('name', '?')} <{email.get('address', '?')}> ({status})")
+        attendee_lines.append(
+            f"  - {email.get('name', '?')} <{email.get('address', '?')}> ({status})"
+        )
 
     is_all_day = event.get("isAllDay", False)
     online_url = event.get("onlineMeetingUrl", "")
@@ -339,14 +403,18 @@ async def get_calendar_event(event_id: str) -> str:
         f"**Time:** {'All day' if is_all_day else f'{start_str} to {end_str}'}",
     ]
     if organizer:
-        lines.append(f"**Organizer:** {organizer.get('name', '?')} <{organizer.get('address', '?')}>")
+        lines.append(
+            f"**Organizer:** {organizer.get('name', '?')} <{organizer.get('address', '?')}>"
+        )
     if location:
         lines.append(f"**Location:** {location}")
     if online_url:
         lines.append(f"**Online Meeting:** {online_url}")
     if recurrence:
         pattern = recurrence.get("pattern", {})
-        lines.append(f"**Recurrence:** {pattern.get('type', 'unknown')} (every {pattern.get('interval', 1)} {pattern.get('type', '')})")
+        lines.append(
+            f"**Recurrence:** {pattern.get('type', 'unknown')} (every {pattern.get('interval', 1)} {pattern.get('type', '')})"
+        )
     if attendee_lines:
         lines.append(f"**Attendees ({len(attendee_lines)}):**")
         lines.extend(attendee_lines)
@@ -383,7 +451,9 @@ async def create_calendar_event(
         is_online_meeting: Whether to create a Teams online meeting link (default: false).
         is_all_day: Whether this is an all-day event (default: false).
     """
-    attendee_list = [addr.strip() for addr in attendees.split(",") if addr.strip()] if attendees else None
+    attendee_list = (
+        [addr.strip() for addr in attendees.split(",") if addr.strip()] if attendees else None
+    )
 
     token = get_graph_token()
     async with AsyncGraphClient(token) as client:
@@ -480,6 +550,7 @@ async def check_availability(
 # Teams
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 async def list_teams(team_id: str = "") -> str:
     """
@@ -557,14 +628,18 @@ async def list_chats(chat_type: str = "", top: int = 20) -> str:
         lines.append(
             f"{i}. **{label}** (type: {ct})\n"
             f"   Members: {members_str or '(unknown)'}\n"
-            f"   Last: {preview_sender}: {preview_text[:100]}" + (f" ({preview_date})" if preview_date else "") + "\n"
+            f"   Last: {preview_sender}: {preview_text[:100]}"
+            + (f" ({preview_date})" if preview_date else "")
+            + "\n"
             f"   ID: `{chat.get('id', '?')}`"
         )
     return "\n\n".join(lines)
 
 
 @mcp.tool()
-async def read_teams_messages(team_id: str = "", channel_id: str = "", chat_id: str = "", top: int = 20) -> str:
+async def read_teams_messages(
+    team_id: str = "", channel_id: str = "", chat_id: str = "", top: int = 20
+) -> str:
     """
     Read recent messages from a Teams channel or chat.
 
@@ -588,7 +663,9 @@ async def read_teams_messages(team_id: str = "", channel_id: str = "", chat_id: 
                 messages = await teams_ops.alist_chat_messages(client, chat_id, top=top)
                 source = f"chat `{chat_id}`"
             else:
-                messages = await teams_ops.alist_channel_messages(client, team_id, channel_id, top=top)
+                messages = await teams_ops.alist_channel_messages(
+                    client, team_id, channel_id, top=top
+                )
                 source = f"channel `{channel_id}`"
     except TeamsNotAvailableError:
         return "Microsoft Teams is not available for this account."
@@ -609,7 +686,9 @@ async def read_teams_messages(team_id: str = "", channel_id: str = "", chat_id: 
 
 
 @mcp.tool()
-async def send_teams_message(message: str, team_id: str = "", channel_id: str = "", chat_id: str = "") -> str:
+async def send_teams_message(
+    message: str, team_id: str = "", channel_id: str = "", chat_id: str = ""
+) -> str:
     """
     Send a message to a Teams channel or chat.
 
@@ -672,19 +751,22 @@ async def get_teams_activity(hours: int = 24) -> str:
     writer = csv.writer(output)
     writer.writerow(["source", "source_name", "sender", "timestamp", "preview"])
     for row in activity:
-        writer.writerow([
-            row["source"],
-            row["source_name"],
-            row["sender"],
-            row["timestamp"],
-            row["preview"],
-        ])
+        writer.writerow(
+            [
+                row["source"],
+                row["source_name"],
+                row["sender"],
+                row["timestamp"],
+                row["preview"],
+            ]
+        )
     return output.getvalue()
 
 
 # ---------------------------------------------------------------------------
 # Files / OneDrive / SharePoint
 # ---------------------------------------------------------------------------
+
 
 def _format_size(size_bytes: int) -> str:
     """Format a file size in bytes to a human-readable string."""
@@ -740,7 +822,9 @@ async def list_sharepoint_sites(query: str = "", top: int = 10) -> str:
 
 
 @mcp.tool()
-async def list_files(folder_path: str = "", site_id: str = "", query: str = "", top: int = 20) -> str:
+async def list_files(
+    folder_path: str = "", site_id: str = "", query: str = "", top: int = 20
+) -> str:
     """
     List or search files in OneDrive or SharePoint.
 
@@ -769,10 +853,7 @@ async def list_files(folder_path: str = "", site_id: str = "", query: str = "", 
                 web_url = item.get("webUrl", "")
                 summary = item.get("_searchSummary", "")
                 size = _format_size(item.get("size", 0))
-                lines.append(
-                    f"{i}. **{name}** ({size})\n"
-                    f"   ID: `{item.get('id', '?')}`"
-                )
+                lines.append(f"{i}. **{name}** ({size})\n" f"   ID: `{item.get('id', '?')}`")
                 if summary:
                     lines.append(f"   Summary: {summary}")
                 if web_url:
@@ -810,7 +891,9 @@ async def inspect_file(item_id: str, site_id: str = "", read_content: bool = Fal
     token = get_graph_token()
     async with AsyncGraphClient(token) as client:
         if read_content:
-            item, content = await files_ops.aget_drive_item_content(client, item_id, site_id=site_id)
+            item, content = await files_ops.aget_drive_item_content(
+                client, item_id, site_id=site_id
+            )
         else:
             item = await files_ops.aget_drive_item(client, item_id, site_id=site_id)
             content = None
@@ -960,6 +1043,7 @@ async def copy_or_rename_file(
 # Power BI
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 async def list_powerbi_workspaces() -> str:
     """
@@ -997,9 +1081,17 @@ async def list_powerbi_content(workspace_id: str, content_type: str = "all") -> 
     ws = "" if workspace_id.lower() == "me" else workspace_id
     token = get_powerbi_token()
     async with AsyncPowerBIClient(token) as client:
-        datasets = await pbi_ops.alist_datasets(client, ws) if content_type in ("datasets", "all") else []
-        reports = await pbi_ops.alist_reports(client, ws) if content_type in ("reports", "all") else []
-        dashboards = await pbi_ops.alist_dashboards(client, ws) if content_type in ("dashboards", "all") else []
+        datasets = (
+            await pbi_ops.alist_datasets(client, ws) if content_type in ("datasets", "all") else []
+        )
+        reports = (
+            await pbi_ops.alist_reports(client, ws) if content_type in ("reports", "all") else []
+        )
+        dashboards = (
+            await pbi_ops.alist_dashboards(client, ws)
+            if content_type in ("dashboards", "all")
+            else []
+        )
 
     lines = []
     if datasets:
@@ -1012,7 +1104,9 @@ async def list_powerbi_content(workspace_id: str, content_type: str = "all") -> 
             lines.append("")
         lines.append(f"**Reports** ({len(reports)}):")
         for r in reports:
-            lines.append(f"  - **{r.get('name', '?')}** (ID: `{r.get('id', '?')}`, dataset: `{r.get('datasetId', '?')}`)")
+            lines.append(
+                f"  - **{r.get('name', '?')}** (ID: `{r.get('id', '?')}`, dataset: `{r.get('datasetId', '?')}`)"
+            )
     if dashboards:
         if lines:
             lines.append("")

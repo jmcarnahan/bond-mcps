@@ -3,9 +3,9 @@
 import httpx
 import pytest
 import respx
-
 from atlassian.atlassian_client import AsyncAtlassianClient, AtlassianError
-from .conftest import CLOUD_ID, JIRA_BASE, CONFLUENCE_V2_BASE
+
+from .conftest import CLOUD_ID, JIRA_BASE
 
 TOKEN = "test-token"
 
@@ -21,6 +21,7 @@ class TestRateLimiting:
             )
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             with pytest.raises(AtlassianError) as exc_info:
                 await jira.alist_projects(client)
@@ -36,6 +37,7 @@ class TestRateLimiting:
             )
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             with pytest.raises(AtlassianError) as exc_info:
                 await jira.alist_projects(client)
@@ -49,6 +51,7 @@ class TestEmptyResults:
             return_value=httpx.Response(200, json={"issues": [], "isLast": True})
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             data = await jira.asearch_issues(client, jql="project = EMPTY")
         assert data["issues"] == []
@@ -59,6 +62,7 @@ class TestEmptyResults:
             return_value=httpx.Response(200, json={"count": 0})
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             count = await jira.acount_issues(client, jql="project = EMPTY")
         assert count == 0
@@ -69,6 +73,7 @@ class TestEmptyResults:
             return_value=httpx.Response(200, json={"comments": [], "total": 0})
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             comments = await jira.aget_issue_comments(client, "PROJ-1")
         assert comments == []
@@ -89,6 +94,7 @@ class TestInvalidJQL:
             )
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             with pytest.raises(AtlassianError) as exc_info:
                 await jira.asearch_issues(client, jql="blah blah blah")
@@ -102,20 +108,22 @@ class TestLargePayloads:
         """Test handling of max page size (100 issues)."""
         big_list = []
         for i in range(100):
-            big_list.append({
-                "id": str(10000 + i),
-                "key": f"PROJ-{i + 1}",
-                "fields": {
-                    "summary": f"Issue number {i + 1}",
-                    "status": {"name": "Open"},
-                    "issuetype": {"name": "Task"},
-                    "priority": {"name": "Medium"},
-                    "assignee": None,
-                    "labels": [],
-                    "created": "2025-01-01T00:00:00.000+0000",
-                    "updated": "2025-01-01T00:00:00.000+0000",
-                },
-            })
+            big_list.append(
+                {
+                    "id": str(10000 + i),
+                    "key": f"PROJ-{i + 1}",
+                    "fields": {
+                        "summary": f"Issue number {i + 1}",
+                        "status": {"name": "Open"},
+                        "issuetype": {"name": "Task"},
+                        "priority": {"name": "Medium"},
+                        "assignee": None,
+                        "labels": [],
+                        "created": "2025-01-01T00:00:00.000+0000",
+                        "updated": "2025-01-01T00:00:00.000+0000",
+                    },
+                }
+            )
         respx.get(f"{JIRA_BASE}/search/jql").mock(
             return_value=httpx.Response(
                 200,
@@ -123,6 +131,7 @@ class TestLargePayloads:
             )
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             data = await jira.asearch_issues(client, jql="project = PROJ", max_results=100)
         assert len(data["issues"]) == 100
@@ -159,13 +168,12 @@ class TestLargePayloads:
                 "description": f"<p>{long_text}</p>",
             },
         }
-        respx.get(f"{JIRA_BASE}/issue/PROJ-999").mock(
-            return_value=httpx.Response(200, json=issue)
-        )
+        respx.get(f"{JIRA_BASE}/issue/PROJ-999").mock(return_value=httpx.Response(200, json=issue))
         respx.get(f"{JIRA_BASE}/issue/PROJ-999/comment").mock(
             return_value=httpx.Response(200, json={"comments": [], "total": 0})
         )
         from atlassian import jira
+
         async with AsyncAtlassianClient(TOKEN, CLOUD_ID) as client:
             result = await jira.aget_issue(client, "PROJ-999")
         assert result["key"] == "PROJ-999"
@@ -174,28 +182,34 @@ class TestLargePayloads:
 class TestCapFunction:
     def test_cap_within_range(self):
         from atlassian.jira import _cap
+
         assert _cap(50) == 50
 
     def test_cap_above_max(self):
         from atlassian.jira import _cap
+
         assert _cap(200) == 100
 
     def test_cap_below_min(self):
         from atlassian.jira import _cap
+
         assert _cap(0) == 1
 
     def test_cap_negative(self):
         from atlassian.jira import _cap
+
         assert _cap(-5) == 1
 
     def test_cap_custom_max(self):
         from atlassian.jira import _cap
+
         assert _cap(50, maximum=25) == 25
 
 
 class TestTextToAdf:
     def test_simple_text(self):
         from atlassian.jira import _text_to_adf
+
         result = _text_to_adf("Hello world")
         assert result["type"] == "doc"
         assert result["version"] == 1
@@ -204,6 +218,7 @@ class TestTextToAdf:
 
     def test_multiline_text(self):
         from atlassian.jira import _text_to_adf
+
         result = _text_to_adf("Line 1\nLine 2\nLine 3")
         assert len(result["content"]) == 3
         assert result["content"][0]["content"][0]["text"] == "Line 1"
@@ -212,6 +227,7 @@ class TestTextToAdf:
 
     def test_empty_string(self):
         from atlassian.jira import _text_to_adf
+
         result = _text_to_adf("")
         assert result["type"] == "doc"
         assert len(result["content"]) == 1
@@ -222,6 +238,7 @@ class TestTextToAdf:
 class TestExtractAdfText:
     def test_simple_paragraph(self):
         from atlassian_mcp import _extract_adf_text
+
         adf = {
             "type": "doc",
             "version": 1,
@@ -241,11 +258,13 @@ class TestExtractAdfText:
 
     def test_empty_doc(self):
         from atlassian_mcp import _extract_adf_text
+
         adf = {"type": "doc", "version": 1, "content": []}
         assert _extract_adf_text(adf) == ""
 
     def test_single_paragraph(self):
         from atlassian_mcp import _extract_adf_text
+
         adf = {
             "type": "doc",
             "version": 1,
@@ -261,6 +280,7 @@ class TestExtractAdfText:
     def test_nested_inline_marks(self):
         """ADF with bold + link inline nodes in one paragraph."""
         from atlassian_mcp import _extract_adf_text
+
         adf = {
             "type": "doc",
             "version": 1,
@@ -279,6 +299,7 @@ class TestExtractAdfText:
 
     def test_bullet_list(self):
         from atlassian_mcp import _extract_adf_text
+
         adf = {
             "type": "doc",
             "version": 1,
@@ -286,12 +307,24 @@ class TestExtractAdfText:
                 {
                     "type": "bulletList",
                     "content": [
-                        {"type": "listItem", "content": [
-                            {"type": "paragraph", "content": [{"type": "text", "text": "Item A"}]}
-                        ]},
-                        {"type": "listItem", "content": [
-                            {"type": "paragraph", "content": [{"type": "text", "text": "Item B"}]}
-                        ]},
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Item A"}],
+                                }
+                            ],
+                        },
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Item B"}],
+                                }
+                            ],
+                        },
                     ],
                 },
             ],

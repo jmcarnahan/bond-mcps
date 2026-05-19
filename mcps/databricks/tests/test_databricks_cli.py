@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import WORKSPACE_HOST, HTTP_PATH
+from tests.conftest import HTTP_PATH, WORKSPACE_HOST
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +17,7 @@ def _env(monkeypatch):
 
 def _run_cli(argv, capsys):
     from databricks_cli import main
+
     old_argv = sys.argv[:]
     sys.argv = ["databricks-cli", *argv]
     try:
@@ -55,7 +56,11 @@ class TestWhoami:
 
 class TestQuery:
     def test_prints_columns_and_rows(self, capsys):
-        result = {"columns": ["id", "name"], "rows": [[1, "alpha"], [2, "beta"]], "truncated": False}
+        result = {
+            "columns": ["id", "name"],
+            "rows": [[1, "alpha"], [2, "beta"]],
+            "truncated": False,
+        }
         with patch("databricks_cli.db.run_query", return_value=result):
             out = _run_cli(["query", "SELECT id, name FROM t"], capsys)
         # Pipe-delimited (matches MCP server formatting).
@@ -89,10 +94,13 @@ class TestList:
         assert "a\nb" in out.out
 
     def test_tables_marks_temp(self, capsys):
-        with patch("databricks_cli.db.list_tables", return_value=[
-            {"database": "default", "table": "events", "is_temporary": False},
-            {"database": "default", "table": "tmp_join", "is_temporary": True},
-        ]):
+        with patch(
+            "databricks_cli.db.list_tables",
+            return_value=[
+                {"database": "default", "table": "events", "is_temporary": False},
+                {"database": "default", "table": "tmp_join", "is_temporary": True},
+            ],
+        ):
             out = _run_cli(["tables", "main", "default"], capsys)
         assert "default.events" in out.out
         assert "tmp_join (temp)" in out.out
@@ -132,8 +140,11 @@ class TestFriendlyErrors:
 
     def test_unauthorized_in_pat_mode_hints_sql_scope(self, capsys):
         from dbx.client import DatabricksError
-        with patch("databricks_cli.db.run_query",
-                   side_effect=DatabricksError("HTTP 401", error_code="Unauthorized")):
+
+        with patch(
+            "databricks_cli.db.run_query",
+            side_effect=DatabricksError("HTTP 401", error_code="Unauthorized"),
+        ):
             with pytest.raises(SystemExit):
                 _run_cli(["query", "SELECT 1"], capsys)
         err = capsys.readouterr().err
@@ -142,10 +153,13 @@ class TestFriendlyErrors:
 
     def test_unauthorized_in_oauth_mode_hints_login(self, monkeypatch, capsys):
         from dbx.client import DatabricksError
+
         monkeypatch.delenv("DATABRICKS_ACCESS_TOKEN", raising=False)
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", "id")
-        with patch("databricks_cli.db.run_query",
-                   side_effect=DatabricksError("HTTP 401", error_code="Unauthorized")):
+        with patch(
+            "databricks_cli.db.run_query",
+            side_effect=DatabricksError("HTTP 401", error_code="Unauthorized"),
+        ):
             with pytest.raises(SystemExit):
                 _run_cli(["query", "SELECT 1"], capsys)
         err = capsys.readouterr().err
@@ -153,10 +167,11 @@ class TestFriendlyErrors:
 
     def test_sql_error_rendered_with_fence(self, capsys):
         from dbx.client import DatabricksError
-        with patch("databricks_cli.db.run_query",
-                   side_effect=DatabricksError(
-                       "TABLE_OR_VIEW_NOT_FOUND: x.y",
-                       error_code="SQLError")):
+
+        with patch(
+            "databricks_cli.db.run_query",
+            side_effect=DatabricksError("TABLE_OR_VIEW_NOT_FOUND: x.y", error_code="SQLError"),
+        ):
             with pytest.raises(SystemExit):
                 _run_cli(["query", "SELECT * FROM x.y"], capsys)
         err = capsys.readouterr().err

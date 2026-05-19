@@ -5,8 +5,6 @@ DB URL or missing encryption key crashes immediately instead of accepting
 requests and silently failing every one.
 """
 
-import os
-
 import pytest
 
 from auth.db import reset_for_tests
@@ -51,7 +49,8 @@ def test_verify_raises_when_db_url_unset_and_not_a_checkout(monkeypatch):
 
     monkeypatch.delenv("BOND_MCPS_DB_URL", raising=False)
     monkeypatch.setattr(
-        session_mod, "_repo_root",
+        session_mod,
+        "_repo_root",
         lambda: __import__("pathlib").Path("/var/empty"),
     )
     reset_for_tests()
@@ -102,6 +101,7 @@ def test_verify_raises_when_encryption_key_missing(tmp_path, monkeypatch):
 def test_skip_env_var_bypasses_check(monkeypatch, caplog):
     """BOND_MCPS_SKIP_STARTUP_VERIFY=1 short-circuits with a warning."""
     import logging
+
     from auth.startup import SKIP_ENV_VAR, verify_runtime_config
 
     monkeypatch.setenv(SKIP_ENV_VAR, "1")
@@ -110,6 +110,5 @@ def test_skip_env_var_bypasses_check(monkeypatch, caplog):
         verify_runtime_config()
 
     assert any(
-        SKIP_ENV_VAR in rec.message and "Skipping" in rec.message
-        for rec in caplog.records
+        SKIP_ENV_VAR in rec.message and "Skipping" in rec.message for rec in caplog.records
     ), "skip should log a clear warning"

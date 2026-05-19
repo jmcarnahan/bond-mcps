@@ -7,9 +7,9 @@ Count uses the dedicated /search/approximate-count endpoint.
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .atlassian_client import AtlassianClient, AsyncAtlassianClient
+from .atlassian_client import AsyncAtlassianClient, AtlassianClient
 
 
 def _cap(value: int, maximum: int = 100) -> int:
@@ -21,32 +21,34 @@ def _cap(value: int, maximum: int = 100) -> int:
 _MENTION_RE = re.compile(r"@\{([^}]+)\}")
 
 
-def _line_to_adf_content(line: str) -> List[Dict[str, Any]]:
+def _line_to_adf_content(line: str) -> list[dict[str, Any]]:
     """Convert a single line of text (possibly with @{accountId} mentions) to ADF content nodes."""
     if not line:
         return []
 
-    content: List[Dict[str, Any]] = []
+    content: list[dict[str, Any]] = []
     last_end = 0
     for match in _MENTION_RE.finditer(line):
         if match.start() > last_end:
-            content.append({"type": "text", "text": line[last_end:match.start()]})
+            content.append({"type": "text", "text": line[last_end : match.start()]})
         account_id = match.group(1)
-        content.append({
-            "type": "mention",
-            "attrs": {
-                "id": account_id,
-                "text": f"@{account_id}",
-                "accessLevel": "SITE",
-            },
-        })
+        content.append(
+            {
+                "type": "mention",
+                "attrs": {
+                    "id": account_id,
+                    "text": f"@{account_id}",
+                    "accessLevel": "SITE",
+                },
+            }
+        )
         last_end = match.end()
     if last_end < len(line):
         content.append({"type": "text", "text": line[last_end:]})
     return content
 
 
-def _text_to_adf(text: str) -> Dict[str, Any]:
+def _text_to_adf(text: str) -> dict[str, Any]:
     """Wrap plain text in minimal Atlassian Document Format.
 
     Splits on newlines to produce multiple paragraphs.
@@ -72,10 +74,11 @@ def _text_to_adf(text: str) -> Dict[str, Any]:
 # List Projects
 # ---------------------------------------------------------------------------
 
+
 def list_projects(
     client: AtlassianClient,
     max_results: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List accessible Jira projects."""
     data = client.get(
         f"{client.jira_base}/project/search",
@@ -87,7 +90,7 @@ def list_projects(
 async def alist_projects(
     client: AsyncAtlassianClient,
     max_results: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List accessible Jira projects (async)."""
     data = await client.get(
         f"{client.jira_base}/project/search",
@@ -104,9 +107,7 @@ async def alist_projects(
 _SEARCH_FIELDS_MINIMAL = "summary,status,issuetype"
 
 # Extended fields available on request.
-_SEARCH_FIELDS_EXTENDED = (
-    "summary,status,issuetype,assignee,priority,created,updated,labels"
-)
+_SEARCH_FIELDS_EXTENDED = "summary,status,issuetype,assignee,priority,created,updated,labels"
 
 # Maximum issues per page (Jira hard limit is 100)
 _PAGE_SIZE = 100
@@ -120,10 +121,10 @@ def search_issues(
     jql: str,
     max_results: int = 50,
     fields: str = _SEARCH_FIELDS_MINIMAL,
-    next_page_token: Optional[str] = None,
-) -> Dict[str, Any]:
+    next_page_token: str | None = None,
+) -> dict[str, Any]:
     """Search issues using JQL (single page). Returns raw API response."""
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "jql": jql,
         "maxResults": _cap(max_results),
         "fields": fields,
@@ -138,10 +139,10 @@ async def asearch_issues(
     jql: str,
     max_results: int = 50,
     fields: str = _SEARCH_FIELDS_MINIMAL,
-    next_page_token: Optional[str] = None,
-) -> Dict[str, Any]:
+    next_page_token: str | None = None,
+) -> dict[str, Any]:
     """Search issues using JQL (single page, async). Returns raw API response."""
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "jql": jql,
         "maxResults": _cap(max_results),
         "fields": fields,
@@ -156,19 +157,20 @@ def search_all_issues(
     jql: str,
     fields: str = _SEARCH_FIELDS_MINIMAL,
     max_total: int = _MAX_TOTAL_ISSUES,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Fetch ALL issues matching JQL, auto-paginating in batches of 100.
 
     Returns a flat list of issue dicts. Stops after max_total issues as a
     safety cap.
     """
-    all_issues: List[Dict[str, Any]] = []
-    next_page_token: Optional[str] = None
+    all_issues: list[dict[str, Any]] = []
+    next_page_token: str | None = None
 
     while len(all_issues) < max_total:
         batch = min(_PAGE_SIZE, max_total - len(all_issues))
         data = search_issues(
-            client, jql,
+            client,
+            jql,
             max_results=batch,
             fields=fields,
             next_page_token=next_page_token,
@@ -190,19 +192,20 @@ async def asearch_all_issues(
     jql: str,
     fields: str = _SEARCH_FIELDS_MINIMAL,
     max_total: int = _MAX_TOTAL_ISSUES,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Fetch ALL issues matching JQL, auto-paginating in batches of 100 (async).
 
     Returns a flat list of issue dicts. Stops after max_total issues as a
     safety cap.
     """
-    all_issues: List[Dict[str, Any]] = []
-    next_page_token: Optional[str] = None
+    all_issues: list[dict[str, Any]] = []
+    next_page_token: str | None = None
 
     while len(all_issues) < max_total:
         batch = min(_PAGE_SIZE, max_total - len(all_issues))
         data = await asearch_issues(
-            client, jql,
+            client,
+            jql,
             max_results=batch,
             fields=fields,
             next_page_token=next_page_token,
@@ -222,6 +225,7 @@ async def asearch_all_issues(
 # ---------------------------------------------------------------------------
 # Count Issues
 # ---------------------------------------------------------------------------
+
 
 def count_issues(
     client: AtlassianClient,
@@ -251,11 +255,12 @@ async def acount_issues(
 # Get Issue
 # ---------------------------------------------------------------------------
 
+
 def get_issue(
     client: AtlassianClient,
     issue_key: str,
     expand: str = "renderedFields",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get full issue details including rendered fields."""
     return client.get(
         f"{client.jira_base}/issue/{issue_key}",
@@ -267,7 +272,7 @@ async def aget_issue(
     client: AsyncAtlassianClient,
     issue_key: str,
     expand: str = "renderedFields",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get full issue details including rendered fields (async)."""
     return await client.get(
         f"{client.jira_base}/issue/{issue_key}",
@@ -279,11 +284,12 @@ async def aget_issue(
 # Get Issue Comments
 # ---------------------------------------------------------------------------
 
+
 def get_issue_comments(
     client: AtlassianClient,
     issue_key: str,
     max_results: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get comments for an issue."""
     data = client.get(
         f"{client.jira_base}/issue/{issue_key}/comment",
@@ -296,7 +302,7 @@ async def aget_issue_comments(
     client: AsyncAtlassianClient,
     issue_key: str,
     max_results: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get comments for an issue (async)."""
     data = await client.get(
         f"{client.jira_base}/issue/{issue_key}/comment",
@@ -309,18 +315,19 @@ async def aget_issue_comments(
 # Create Issue
 # ---------------------------------------------------------------------------
 
+
 def create_issue(
     client: AtlassianClient,
     project_key: str,
     summary: str,
     issue_type: str = "Task",
-    description: Optional[str] = None,
-    assignee_id: Optional[str] = None,
-    priority: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    description: str | None = None,
+    assignee_id: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
     """Create a new Jira issue."""
-    fields: Dict[str, Any] = {
+    fields: dict[str, Any] = {
         "project": {"key": project_key},
         "summary": summary,
         "issuetype": {"name": issue_type},
@@ -342,13 +349,13 @@ async def acreate_issue(
     project_key: str,
     summary: str,
     issue_type: str = "Task",
-    description: Optional[str] = None,
-    assignee_id: Optional[str] = None,
-    priority: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    description: str | None = None,
+    assignee_id: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
     """Create a new Jira issue (async)."""
-    fields: Dict[str, Any] = {
+    fields: dict[str, Any] = {
         "project": {"key": project_key},
         "summary": summary,
         "issuetype": {"name": issue_type},
@@ -369,17 +376,18 @@ async def acreate_issue(
 # Update Issue
 # ---------------------------------------------------------------------------
 
+
 def update_issue(
     client: AtlassianClient,
     issue_key: str,
-    summary: Optional[str] = None,
-    description: Optional[str] = None,
-    assignee_id: Optional[str] = None,
-    priority: Optional[str] = None,
-    labels: Optional[List[str]] = None,
+    summary: str | None = None,
+    description: str | None = None,
+    assignee_id: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
 ) -> None:
     """Update an existing Jira issue. Returns None (204)."""
-    fields: Dict[str, Any] = {}
+    fields: dict[str, Any] = {}
     if summary:
         fields["summary"] = summary
     if description:
@@ -397,14 +405,14 @@ def update_issue(
 async def aupdate_issue(
     client: AsyncAtlassianClient,
     issue_key: str,
-    summary: Optional[str] = None,
-    description: Optional[str] = None,
-    assignee_id: Optional[str] = None,
-    priority: Optional[str] = None,
-    labels: Optional[List[str]] = None,
+    summary: str | None = None,
+    description: str | None = None,
+    assignee_id: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
 ) -> None:
     """Update an existing Jira issue (async). Returns None (204)."""
-    fields: Dict[str, Any] = {}
+    fields: dict[str, Any] = {}
     if summary:
         fields["summary"] = summary
     if description:
@@ -423,7 +431,8 @@ async def aupdate_issue(
 # Add Issue Comment
 # ---------------------------------------------------------------------------
 
-def _build_comment_adf(body: str, author_label: str = "") -> Dict[str, Any]:
+
+def _build_comment_adf(body: str, author_label: str = "") -> dict[str, Any]:
     """Build an ADF comment body, optionally prefixed with an author label."""
     adf = _text_to_adf(body)
     if author_label:
@@ -446,7 +455,7 @@ def add_issue_comment(
     issue_key: str,
     body: str,
     author_label: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Add a comment to an issue. Supports @{accountId} mentions and optional author label."""
     return client.post(
         f"{client.jira_base}/issue/{issue_key}/comment",
@@ -459,7 +468,7 @@ async def aadd_issue_comment(
     issue_key: str,
     body: str,
     author_label: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Add a comment to an issue (async). Supports @{accountId} mentions and optional author label."""
     return await client.post(
         f"{client.jira_base}/issue/{issue_key}/comment",
@@ -471,10 +480,11 @@ async def aadd_issue_comment(
 # Transition Issue
 # ---------------------------------------------------------------------------
 
+
 def get_transitions(
     client: AtlassianClient,
     issue_key: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get available transitions for an issue."""
     data = client.get(f"{client.jira_base}/issue/{issue_key}/transitions")
     return data.get("transitions", [])
@@ -483,7 +493,7 @@ def get_transitions(
 async def aget_transitions(
     client: AsyncAtlassianClient,
     issue_key: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get available transitions for an issue (async)."""
     data = await client.get(f"{client.jira_base}/issue/{issue_key}/transitions")
     return data.get("transitions", [])
@@ -549,9 +559,7 @@ async def atransition_issue(
     return match["name"]
 
 
-def _find_transition(
-    transitions: List[Dict[str, Any]], name: str
-) -> Optional[Dict[str, Any]]:
+def _find_transition(transitions: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     """Find a transition by name (case-insensitive)."""
     lower = name.lower()
     for t in transitions:
@@ -564,15 +572,16 @@ def _find_transition(
 # Get Project Versions
 # ---------------------------------------------------------------------------
 
+
 def get_project_versions(
     client: AtlassianClient,
     project_key: str,
     query: str = "",
     status: str = "",
     max_results: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get versions for a Jira project, optionally filtered by name pattern and status."""
-    params: Dict[str, Any] = {"maxResults": _cap(max_results)}
+    params: dict[str, Any] = {"maxResults": _cap(max_results)}
     if query:
         params["query"] = query
     if status:
@@ -590,9 +599,9 @@ async def aget_project_versions(
     query: str = "",
     status: str = "",
     max_results: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Get versions for a Jira project (async), optionally filtered by name pattern and status."""
-    params: Dict[str, Any] = {"maxResults": _cap(max_results)}
+    params: dict[str, Any] = {"maxResults": _cap(max_results)}
     if query:
         params["query"] = query
     if status:
@@ -608,6 +617,7 @@ async def aget_project_versions(
 # Create Version
 # ---------------------------------------------------------------------------
 
+
 def create_version(
     client: AtlassianClient,
     project_key: str,
@@ -615,9 +625,9 @@ def create_version(
     description: str = "",
     release_date: str = "",
     released: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a new version for a Jira project."""
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "project": project_key,
         "name": name,
         "released": released,
@@ -636,9 +646,9 @@ async def acreate_version(
     description: str = "",
     release_date: str = "",
     released: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a new version for a Jira project (async)."""
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "project": project_key,
         "name": name,
         "released": released,
@@ -654,11 +664,12 @@ async def acreate_version(
 # Search Users
 # ---------------------------------------------------------------------------
 
+
 def search_users(
     client: AtlassianClient,
     query: str,
     max_results: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search for Jira users by name or email."""
     data = client.get(
         f"{client.jira_base}/user/search",
@@ -671,7 +682,7 @@ async def asearch_users(
     client: AsyncAtlassianClient,
     query: str,
     max_results: int = 10,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Search for Jira users by name or email (async)."""
     data = await client.get(
         f"{client.jira_base}/user/search",

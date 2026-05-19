@@ -1,86 +1,41 @@
 """Tests for resolve_user_key_for_request() — the per-request resolver.
 
-Five behaviour branches:
-  1. Outside an HTTP context, JWT disabled  → current_user_key() (env)
-  2. Outside an HTTP context, JWT enabled   → current_user_key() (CLI fallback)
-  3. Inside an HTTP context, JWT disabled   → current_user_key()
-  4. Inside an HTTP context, JWT enabled,
-     no X-Bond-Auth header                  → IdentityVerificationError
-  5. Inside an HTTP context, JWT enabled,
-     valid X-Bond-Auth header               → JWT sub claim
+Behaviour branches:
+  1. JWT disabled                              → current_user_key()
+  2. JWT enabled, fastmcp not importable       → current_user_key()
+  3. JWT enabled, get_access_token() raises    → current_user_key() (no HTTP ctx)
+  4. JWT enabled, get_access_token() is None   → current_user_key() (no HTTP ctx)
+  5. JWT enabled, validated AccessToken sub    → claims[<sub_claim>]
+  6. JWT enabled, AccessToken missing sub      → RuntimeError (defensive)
+
+The FastMCP middleware enforces signature/audience/issuer at the HTTP layer
+before any tool runs, so by the time resolve_user_key_for_request() is called
+the access token has already been validated. These tests stub
+fastmcp.server.dependencies.get_access_token to model that contract.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-import time
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
-import jwt
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-
-from auth.jwt_identity import IdentityVerificationError
-
 
 # ---------------------------------------------------------------------------
-# Shared keypair + signing helper
+# FastMCP stub
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def keypair():
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    private_pem = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode()
-    public_pem = key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
-    return private_pem, public_pem
-
-
-def _sign(payload: dict, private_pem: str) -> str:
-    return jwt.encode(payload, private_pem, algorithm="RS256")
-
-
-# ---------------------------------------------------------------------------
-# HTTP-context simulation
-#
-# resolve_user_key_for_request() does a lazy `from fastmcp.server.dependencies
-# import get_http_headers`. We swap a stub module into sys.modules so the
-# function sees the headers we want (or raises to simulate non-HTTP context).
-# ---------------------------------------------------------------------------
-
-
-class _FakeFastMCPDeps:
-    """Backing for the stubbed fastmcp.server.dependencies module."""
-
-    def __init__(self, *, headers: dict | None = None, raise_outside_ctx: bool = False):
-        self.headers = headers or {}
-        self.raise_outside_ctx = raise_outside_ctx
-
-    def get_http_headers(self, include=None):
-        if self.raise_outside_ctx:
-            raise RuntimeError("Not inside an HTTP request context")
-        if include:
-            return {k.lower(): v for k, v in self.headers.items() if k.lower() in {n.lower() for n in include}}
-        return dict(self.headers)
-
-
-def _install_fastmcp_stub(deps: _FakeFastMCPDeps):
-    """Insert (or replace) a stub fastmcp.server.dependencies module so the
-    lazy import inside resolve_user_key_for_request() picks up our stub."""
+def _install_fastmcp_stub(get_access_token):
+    """Insert a stub fastmcp.server.dependencies module whose get_access_token
+    callable matches the caller's expectation (returns an AccessToken-like
+    object, returns None, or raises)."""
     fastmcp = ModuleType("fastmcp")
     server = ModuleType("fastmcp.server")
     dependencies = ModuleType("fastmcp.server.dependencies")
-    dependencies.get_http_headers = deps.get_http_headers
+    dependencies.get_access_token = get_access_token
     server.dependencies = dependencies
     fastmcp.server = server
     sys.modules["fastmcp"] = fastmcp
@@ -95,10 +50,14 @@ def _remove_fastmcp_stub():
 
 @pytest.fixture(autouse=True)
 def isolate_fastmcp():
-    """Each test starts with no fastmcp module visible."""
     _remove_fastmcp_stub()
     yield
     _remove_fastmcp_stub()
+
+
+def _access_token(claims: dict):
+    """Minimal AccessToken-shaped object for the resolver to read."""
+    return SimpleNamespace(claims=claims)
 
 
 # ---------------------------------------------------------------------------
@@ -106,106 +65,131 @@ def isolate_fastmcp():
 # ---------------------------------------------------------------------------
 
 
-class TestResolverNoFastMCP:
-    """When fastmcp isn't installed (or not on the path), fall back to env."""
+class TestResolverJWTDisabled:
+    """JWT mode off (no JWKS URI, no public key) → env-based identity."""
 
-    def test_falls_back_to_current_user_key(self):
+    def test_no_fastmcp_module(self):
         from auth.token_store import resolve_user_key_for_request
 
         with patch.dict(
             os.environ,
-            {"BOND_MCPS_USER_ID": "env-user", "BOND_MCPS_JWT_PUBLIC_KEY": ""},
+            {
+                "BOND_MCPS_USER_ID": "env-user",
+                "BOND_MCPS_JWT_JWKS_URI": "",
+                "BOND_MCPS_JWT_PUBLIC_KEY": "",
+            },
+        ):
+            assert resolve_user_key_for_request() == "env-user"
+
+    def test_fastmcp_present_jwt_off(self):
+        _install_fastmcp_stub(lambda: _access_token({"sub": "should-not-be-used"}))
+        from auth.token_store import resolve_user_key_for_request
+
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_USER_ID": "env-user",
+                "BOND_MCPS_JWT_JWKS_URI": "",
+                "BOND_MCPS_JWT_PUBLIC_KEY": "",
+            },
         ):
             assert resolve_user_key_for_request() == "env-user"
 
 
-class TestResolverOutsideHTTPContext:
-    """fastmcp is importable but we're not inside a request (CLI / tests)."""
+class TestResolverJWTEnabledFallbacks:
+    """JWT mode on but no live HTTP context — fall through to env."""
 
-    def test_jwt_disabled_falls_back_to_env(self):
-        _install_fastmcp_stub(_FakeFastMCPDeps(raise_outside_ctx=True))
+    def test_fastmcp_not_importable(self):
         from auth.token_store import resolve_user_key_for_request
 
+        # No stub installed — `from fastmcp.server.dependencies import
+        # get_access_token` raises ImportError.
         with patch.dict(
             os.environ,
-            {"BOND_MCPS_USER_ID": "cli-user", "BOND_MCPS_JWT_PUBLIC_KEY": ""},
+            {
+                "BOND_MCPS_USER_ID": "cli-user",
+                "BOND_MCPS_JWT_PUBLIC_KEY": "pem-placeholder",
+            },
         ):
             assert resolve_user_key_for_request() == "cli-user"
 
-    def test_jwt_enabled_still_falls_back_to_env(self, keypair):
-        """CLI paths don't carry an identity JWT; env is the right fallback
-        when JWT is otherwise enabled for HTTP requests."""
-        _, public_pem = keypair
-        _install_fastmcp_stub(_FakeFastMCPDeps(raise_outside_ctx=True))
+    def test_get_access_token_raises(self):
+        def _raises():
+            raise RuntimeError("no active request context")
+
+        _install_fastmcp_stub(_raises)
         from auth.token_store import resolve_user_key_for_request
 
         with patch.dict(
             os.environ,
             {
                 "BOND_MCPS_USER_ID": "cli-user",
-                "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
+                "BOND_MCPS_JWT_PUBLIC_KEY": "pem-placeholder",
             },
         ):
             assert resolve_user_key_for_request() == "cli-user"
 
-
-class TestResolverInsideHTTPContext:
-    """fastmcp is reachable and a request context is active."""
-
-    def test_jwt_disabled_returns_env_user(self):
-        _install_fastmcp_stub(_FakeFastMCPDeps(headers={}))
-        from auth.token_store import resolve_user_key_for_request
-
-        with patch.dict(
-            os.environ,
-            {"BOND_MCPS_USER_ID": "env-user", "BOND_MCPS_JWT_PUBLIC_KEY": ""},
-        ):
-            assert resolve_user_key_for_request() == "env-user"
-
-    def test_jwt_enabled_missing_header_raises(self, keypair):
-        _, public_pem = keypair
-        _install_fastmcp_stub(_FakeFastMCPDeps(headers={}))
+    def test_get_access_token_returns_none(self):
+        _install_fastmcp_stub(lambda: None)
         from auth.token_store import resolve_user_key_for_request
 
         with patch.dict(
             os.environ,
             {
-                "BOND_MCPS_USER_ID": "fallback",
-                "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
+                "BOND_MCPS_USER_ID": "cli-user",
+                "BOND_MCPS_JWT_PUBLIC_KEY": "pem-placeholder",
             },
         ):
-            with pytest.raises(IdentityVerificationError, match="X-Bond-Auth"):
-                resolve_user_key_for_request()
+            assert resolve_user_key_for_request() == "cli-user"
 
-    def test_jwt_enabled_non_bearer_header_raises(self, keypair):
-        _, public_pem = keypair
-        _install_fastmcp_stub(_FakeFastMCPDeps(headers={"x-bond-auth": "notBearer xxx"}))
-        from auth.token_store import resolve_user_key_for_request
 
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
-                resolve_user_key_for_request()
+class TestResolverJWTValidatedToken:
+    """JWT mode on, middleware-validated AccessToken present."""
 
-    def test_jwt_enabled_valid_token_returns_sub(self, keypair):
-        private_pem, public_pem = keypair
-        token = _sign({"sub": "alice", "exp": time.time() + 60}, private_pem)
-        _install_fastmcp_stub(_FakeFastMCPDeps(headers={"x-bond-auth": f"Bearer {token}"}))
+    def test_returns_sub_claim(self):
+        _install_fastmcp_stub(lambda: _access_token({"sub": "alice"}))
         from auth.token_store import resolve_user_key_for_request
 
         with patch.dict(
             os.environ,
             {
                 "BOND_MCPS_USER_ID": "fallback-should-not-be-used",
-                "BOND_MCPS_JWT_PUBLIC_KEY": public_pem,
+                "BOND_MCPS_JWT_PUBLIC_KEY": "pem-placeholder",
             },
         ):
             assert resolve_user_key_for_request() == "alice"
 
-    def test_jwt_enabled_invalid_token_raises(self, keypair):
-        _, public_pem = keypair
-        _install_fastmcp_stub(_FakeFastMCPDeps(headers={"x-bond-auth": "Bearer not.a.jwt"}))
+    def test_returns_custom_sub_claim(self):
+        _install_fastmcp_stub(lambda: _access_token({"user_id": "u-42"}))
         from auth.token_store import resolve_user_key_for_request
 
-        with patch.dict(os.environ, {"BOND_MCPS_JWT_PUBLIC_KEY": public_pem}):
-            with pytest.raises(IdentityVerificationError):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_PUBLIC_KEY": "pem-placeholder",
+                "BOND_MCPS_JWT_SUB_CLAIM": "user_id",
+            },
+        ):
+            assert resolve_user_key_for_request() == "u-42"
+
+    def test_missing_sub_claim_raises(self):
+        _install_fastmcp_stub(lambda: _access_token({"email": "nobody@example.com"}))
+        from auth.token_store import resolve_user_key_for_request
+
+        with patch.dict(
+            os.environ,
+            {"BOND_MCPS_JWT_PUBLIC_KEY": "pem-placeholder"},
+        ):
+            with pytest.raises(RuntimeError, match="sub"):
+                resolve_user_key_for_request()
+
+    def test_empty_sub_claim_raises(self):
+        _install_fastmcp_stub(lambda: _access_token({"sub": "   "}))
+        from auth.token_store import resolve_user_key_for_request
+
+        with patch.dict(
+            os.environ,
+            {"BOND_MCPS_JWT_PUBLIC_KEY": "pem-placeholder"},
+        ):
+            with pytest.raises(RuntimeError):
                 resolve_user_key_for_request()

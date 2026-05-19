@@ -9,7 +9,6 @@ state on SQLite.
 
 import multiprocessing as mp
 import os
-from pathlib import Path
 
 
 def _worker(db_path: str, encryption_key: str, result_q: mp.Queue) -> None:
@@ -18,7 +17,7 @@ def _worker(db_path: str, encryption_key: str, result_q: mp.Queue) -> None:
     os.environ["BOND_MCPS_ENCRYPTION_KEY"] = encryption_key
 
     from auth.db import reset_for_tests
-    from auth.db.session import ensure_schema_current, SchemaOutOfDateError
+    from auth.db.session import SchemaOutOfDateError, ensure_schema_current
 
     reset_for_tests()  # discard any state from before the fork
     try:
@@ -39,10 +38,7 @@ def test_three_processes_all_fail_with_helpful_error(tmp_path):
 
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
-    procs = [
-        ctx.Process(target=_worker, args=(str(db_path), key, q))
-        for _ in range(3)
-    ]
+    procs = [ctx.Process(target=_worker, args=(str(db_path), key, q)) for _ in range(3)]
     for p in procs:
         p.start()
     for p in procs:
@@ -62,9 +58,9 @@ def test_three_processes_all_fail_with_helpful_error(tmp_path):
 def test_migrate_db_then_processes_succeed(tmp_path):
     db_path = tmp_path / "tokens.db"
 
-    from auth.encryption import generate_key
     from auth.alembic_config import upgrade_head
     from auth.db import reset_for_tests
+    from auth.encryption import generate_key
 
     key = generate_key()
     os.environ["BOND_MCPS_DB_URL"] = f"sqlite:///{db_path}"
@@ -75,10 +71,7 @@ def test_migrate_db_then_processes_succeed(tmp_path):
 
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
-    procs = [
-        ctx.Process(target=_worker, args=(str(db_path), key, q))
-        for _ in range(3)
-    ]
+    procs = [ctx.Process(target=_worker, args=(str(db_path), key, q)) for _ in range(3)]
     for p in procs:
         p.start()
     for p in procs:

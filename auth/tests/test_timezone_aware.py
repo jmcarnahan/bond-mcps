@@ -58,10 +58,14 @@ def test_to_epoch_handles_aware_and_naive():
 def test_expires_at_round_trip_through_repository(repo):
     """Save with epoch float; read back as epoch float; values agree."""
     in_epoch = time.time() + 3600
-    repo.save_token("alice", "github", {
-        "access_token": "x",
-        "expires_at": in_epoch,
-    })
+    repo.save_token(
+        "alice",
+        "github",
+        {
+            "access_token": "x",
+            "expires_at": in_epoch,
+        },
+    )
     got = repo.get_token("alice", "github")
     assert abs(got["expires_at"] - in_epoch) < 1.0
 
@@ -71,9 +75,13 @@ def test_expires_at_with_naive_datetime_interpreted_as_utc(repo):
     naive_dt = _dt.datetime(2026, 5, 17, 12, 0, 0)
     expected_epoch = naive_dt.replace(tzinfo=_dt.timezone.utc).timestamp()
 
-    repo.save_token("alice", "github", {
-        "access_token": "x",
-        "expires_at": naive_dt,
-    })
+    repo.save_token(
+        "alice",
+        "github",
+        {
+            "access_token": "x",
+            "expires_at": naive_dt,
+        },
+    )
     got = repo.get_token("alice", "github")
     assert abs(got["expires_at"] - expected_epoch) < 1.0

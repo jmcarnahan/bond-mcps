@@ -2,9 +2,9 @@
 
 import base64
 import os
+from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch
 
 FAKE_BASIC_AUTH = base64.b64encode(b"user:pass").decode()
 
@@ -32,16 +32,17 @@ class TestGetAtlassianToken:
     def test_raises_if_no_auth_header(self):
         from atlassian.auth import get_atlassian_token
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {}, clear=True):
+        with patch(_HEADERS_PATCH, return_value={}), patch.dict(os.environ, {}, clear=True):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_atlassian_token()
 
     def test_raises_if_not_bearer(self):
         from atlassian.auth import get_atlassian_token
 
-        with patch(_HEADERS_PATCH, return_value={"authorization": f"Basic {FAKE_BASIC_AUTH}"}), \
-             patch.dict(os.environ, {}, clear=True):
+        with (
+            patch(_HEADERS_PATCH, return_value={"authorization": f"Basic {FAKE_BASIC_AUTH}"}),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_atlassian_token()
 
@@ -52,17 +53,23 @@ class TestGetAtlassianTokenFallback:
     def test_falls_back_to_local_auth(self):
         from atlassian.auth import get_atlassian_token
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {"ATLASSIAN_CLIENT_ID": "test"}), \
-             patch("atlassian.local_auth.get_local_token_and_cloud_id",
-                   return_value=("local-tok", "cloud-123")):
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch.dict(os.environ, {"ATLASSIAN_CLIENT_ID": "test"}),
+            patch(
+                "atlassian.local_auth.get_local_token_and_cloud_id",
+                return_value=("local-tok", "cloud-123"),
+            ),
+        ):
             assert get_atlassian_token() == "local-tok"
 
     def test_bearer_takes_priority(self):
         from atlassian.auth import get_atlassian_token
 
-        with patch(_HEADERS_PATCH, return_value={"authorization": "Bearer header-tok"}), \
-             patch.dict(os.environ, {"ATLASSIAN_CLIENT_ID": "test"}):
+        with (
+            patch(_HEADERS_PATCH, return_value={"authorization": "Bearer header-tok"}),
+            patch.dict(os.environ, {"ATLASSIAN_CLIENT_ID": "test"}),
+        ):
             assert get_atlassian_token() == "header-tok"
 
 
@@ -85,30 +92,37 @@ class TestGetCloudId:
     def test_falls_back_to_env_var(self):
         from atlassian.auth import get_cloud_id
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {"ATLASSIAN_CLOUD_ID": "env-cloud-id"}):
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch.dict(os.environ, {"ATLASSIAN_CLOUD_ID": "env-cloud-id"}),
+        ):
             assert get_cloud_id() == "env-cloud-id"
 
     def test_falls_back_to_local_auth(self):
         from atlassian.auth import get_cloud_id
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {"ATLASSIAN_CLIENT_ID": "test"}, clear=True), \
-             patch("atlassian.local_auth.get_local_token_and_cloud_id",
-                   return_value=("tok", "discovered-cloud")):
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch.dict(os.environ, {"ATLASSIAN_CLIENT_ID": "test"}, clear=True),
+            patch(
+                "atlassian.local_auth.get_local_token_and_cloud_id",
+                return_value=("tok", "discovered-cloud"),
+            ),
+        ):
             assert get_cloud_id() == "discovered-cloud"
 
     def test_raises_when_no_source(self):
         from atlassian.auth import get_cloud_id
 
-        with patch(_HEADERS_PATCH, return_value={}), \
-             patch.dict(os.environ, {}, clear=True):
+        with patch(_HEADERS_PATCH, return_value={}), patch.dict(os.environ, {}, clear=True):
             with pytest.raises(PermissionError, match="Cloud ID required"):
                 get_cloud_id()
 
     def test_header_takes_priority(self):
         from atlassian.auth import get_cloud_id
 
-        with patch(_HEADERS_PATCH, return_value={"x-atlassian-cloud-id": "header-cloud"}), \
-             patch.dict(os.environ, {"ATLASSIAN_CLOUD_ID": "env-cloud"}):
+        with (
+            patch(_HEADERS_PATCH, return_value={"x-atlassian-cloud-id": "header-cloud"}),
+            patch.dict(os.environ, {"ATLASSIAN_CLOUD_ID": "env-cloud"}),
+        ):
             assert get_cloud_id() == "header-cloud"

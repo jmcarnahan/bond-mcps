@@ -8,38 +8,39 @@ Tests the consolidated 5-tool structure:
   Confluence : confluence_search, confluence_manage
 """
 
+from unittest.mock import patch
+
 import httpx
 import pytest
 import respx
-from unittest.mock import patch
 
 from .conftest import (
+    ATLASSIAN_ERROR_400_JIRA,
+    ATLASSIAN_ERROR_401,
+    ATLASSIAN_ERROR_404,
+    ATLASSIAN_ERROR_429,
     CLOUD_ID,
-    JIRA_BASE,
     CONFLUENCE_V1_BASE,
     CONFLUENCE_V2_BASE,
+    JIRA_BASE,
+    SAMPLE_COMMENTS_RESPONSE,
+    SAMPLE_CONFLUENCE_SEARCH_RESPONSE,
+    SAMPLE_COUNT_RESPONSE,
+    SAMPLE_CREATED_COMMENT,
+    SAMPLE_CREATED_ISSUE,
+    SAMPLE_CREATED_PAGE,
+    SAMPLE_CREATED_VERSION,
+    SAMPLE_ISSUE,
+    SAMPLE_PAGE,
     SAMPLE_PROJECTS_RESPONSE,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_PAGINATED,
-    SAMPLE_COUNT_RESPONSE,
-    SAMPLE_ISSUE,
-    SAMPLE_COMMENTS_RESPONSE,
-    SAMPLE_CREATED_ISSUE,
-    SAMPLE_CREATED_COMMENT,
-    SAMPLE_TRANSITIONS,
     SAMPLE_SPACES_RESPONSE,
-    SAMPLE_CONFLUENCE_SEARCH_RESPONSE,
-    SAMPLE_PAGE,
-    SAMPLE_CREATED_PAGE,
+    SAMPLE_TRANSITIONS,
     SAMPLE_UPDATED_PAGE,
     SAMPLE_USER,
-    ATLASSIAN_ERROR_401,
-    ATLASSIAN_ERROR_404,
-    ATLASSIAN_ERROR_400_JIRA,
-    ATLASSIAN_ERROR_429,
-    SAMPLE_VERSIONS_RESPONSE,
-    SAMPLE_CREATED_VERSION,
     SAMPLE_USERS_RESPONSE,
+    SAMPLE_VERSIONS_RESPONSE,
 )
 
 
@@ -74,12 +75,14 @@ def _get_text(result) -> str:
 def mcp_server():
     """Import and return the MCP server instance."""
     from atlassian_mcp import mcp
+
     return mcp
 
 
 # ---------------------------------------------------------------------------
 # jira_search
 # ---------------------------------------------------------------------------
+
 
 class TestJiraSearch:
     @respx.mock
@@ -89,6 +92,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "projects"})
 
@@ -104,6 +108,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "projects"})
 
@@ -120,6 +125,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "issues", "jql": "project = PROJ"}
@@ -141,6 +147,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "issues", "jql": "project = NONE"}
@@ -162,6 +169,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "issues", "jql": "project = PROJ"}
@@ -181,6 +189,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search",
@@ -195,6 +204,7 @@ class TestJiraSearch:
     async def test_search_issues_missing_jql(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "issues"})
 
@@ -208,6 +218,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "issue_count", "jql": "project = PROJ"}
@@ -220,6 +231,7 @@ class TestJiraSearch:
     async def test_search_issue_count_missing_jql(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "issue_count"})
 
@@ -233,6 +245,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "versions", "project_key": "PROJ"}
@@ -252,6 +265,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "versions", "project_key": "PROJ"}
@@ -263,13 +277,17 @@ class TestJiraSearch:
     @respx.mock
     async def test_search_versions_with_status_filter(self, mcp_server):
         respx.get(f"{JIRA_BASE}/project/PROJ/version").mock(
-            return_value=httpx.Response(200, json={
-                "values": [SAMPLE_VERSIONS_RESPONSE["values"][0]],
-                "isLast": True,
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "values": [SAMPLE_VERSIONS_RESPONSE["values"][0]],
+                    "isLast": True,
+                },
+            )
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search",
@@ -283,6 +301,7 @@ class TestJiraSearch:
     async def test_search_versions_missing_project_key(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "versions"})
 
@@ -296,6 +315,7 @@ class TestJiraSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "users", "query": "alice"}
@@ -308,11 +328,10 @@ class TestJiraSearch:
 
     @respx.mock
     async def test_search_users_empty(self, mcp_server):
-        respx.get(f"{JIRA_BASE}/user/search").mock(
-            return_value=httpx.Response(200, json=[])
-        )
+        respx.get(f"{JIRA_BASE}/user/search").mock(return_value=httpx.Response(200, json=[]))
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_search", {"target": "users", "query": "nobody"}
@@ -325,6 +344,7 @@ class TestJiraSearch:
     async def test_search_users_missing_query(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "users"})
 
@@ -333,11 +353,10 @@ class TestJiraSearch:
 
     @respx.mock
     async def test_search_myself(self, mcp_server):
-        respx.get(f"{JIRA_BASE}/myself").mock(
-            return_value=httpx.Response(200, json=SAMPLE_USER)
-        )
+        respx.get(f"{JIRA_BASE}/myself").mock(return_value=httpx.Response(200, json=SAMPLE_USER))
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "myself"})
 
@@ -348,6 +367,7 @@ class TestJiraSearch:
     async def test_search_invalid_target(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "invalid"})
 
@@ -360,6 +380,7 @@ class TestJiraSearch:
 # jira_get
 # ---------------------------------------------------------------------------
 
+
 class TestJiraGet:
     @respx.mock
     async def test_get_issue(self, mcp_server):
@@ -371,6 +392,7 @@ class TestJiraGet:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_get", {"target": "issue", "issue_key": "PROJ-42"}
@@ -390,12 +412,11 @@ class TestJiraGet:
             return_value=httpx.Response(200, json=SAMPLE_ISSUE)
         )
         respx.get(f"{JIRA_BASE}/issue/PROJ-42/comment").mock(
-            return_value=httpx.Response(403, json={
-                "errorMessages": ["Forbidden"], "errors": {}
-            })
+            return_value=httpx.Response(403, json={"errorMessages": ["Forbidden"], "errors": {}})
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_get", {"target": "issue", "issue_key": "PROJ-42"}
@@ -413,6 +434,7 @@ class TestJiraGet:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_get", {"target": "transitions", "issue_key": "PROJ-42"}
@@ -431,6 +453,7 @@ class TestJiraGet:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_get", {"target": "transitions", "issue_key": "PROJ-42"}
@@ -442,6 +465,7 @@ class TestJiraGet:
     async def test_get_missing_issue_key(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_get", {"target": "issue"})
 
@@ -451,6 +475,7 @@ class TestJiraGet:
     async def test_get_invalid_target(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_get", {"target": "invalid"})
 
@@ -463,6 +488,7 @@ class TestJiraGet:
 # jira_manage
 # ---------------------------------------------------------------------------
 
+
 class TestJiraManage:
     @respx.mock
     async def test_create_issue(self, mcp_server):
@@ -471,6 +497,7 @@ class TestJiraManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -484,6 +511,7 @@ class TestJiraManage:
     async def test_create_issue_missing_project_key(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -496,6 +524,7 @@ class TestJiraManage:
     async def test_create_issue_missing_summary(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -507,11 +536,10 @@ class TestJiraManage:
 
     @respx.mock
     async def test_update_issue(self, mcp_server):
-        respx.put(f"{JIRA_BASE}/issue/PROJ-42").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.put(f"{JIRA_BASE}/issue/PROJ-42").mock(return_value=httpx.Response(204))
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -525,6 +553,7 @@ class TestJiraManage:
     async def test_update_issue_missing_issue_key(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -541,6 +570,7 @@ class TestJiraManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -558,6 +588,7 @@ class TestJiraManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -582,6 +613,7 @@ class TestJiraManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -601,6 +633,7 @@ class TestJiraManage:
     async def test_comment_missing_issue_key(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -613,6 +646,7 @@ class TestJiraManage:
     async def test_comment_missing_body(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -627,11 +661,10 @@ class TestJiraManage:
         respx.get(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
             return_value=httpx.Response(200, json=SAMPLE_TRANSITIONS)
         )
-        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.post(f"{JIRA_BASE}/issue/PROJ-42/transitions").mock(return_value=httpx.Response(204))
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -650,6 +683,7 @@ class TestJiraManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -662,6 +696,7 @@ class TestJiraManage:
     async def test_transition_missing_issue_key(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -674,6 +709,7 @@ class TestJiraManage:
     async def test_transition_missing_name(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -690,6 +726,7 @@ class TestJiraManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -712,6 +749,7 @@ class TestJiraManage:
     async def test_create_version_missing_project_key(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -724,6 +762,7 @@ class TestJiraManage:
     async def test_create_version_missing_name(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -736,6 +775,7 @@ class TestJiraManage:
     async def test_manage_invalid_target(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_manage", {"target": "invalid"})
 
@@ -748,6 +788,7 @@ class TestJiraManage:
 # confluence_search
 # ---------------------------------------------------------------------------
 
+
 class TestConfluenceSearch:
     @respx.mock
     async def test_search_spaces(self, mcp_server):
@@ -756,6 +797,7 @@ class TestConfluenceSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("confluence_search", {"target": "spaces"})
 
@@ -771,6 +813,7 @@ class TestConfluenceSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("confluence_search", {"target": "spaces"})
 
@@ -784,6 +827,7 @@ class TestConfluenceSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_search", {"target": "pages", "query": "type = page"}
@@ -801,6 +845,7 @@ class TestConfluenceSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_search", {"target": "pages", "query": "nonexistent"}
@@ -812,6 +857,7 @@ class TestConfluenceSearch:
     async def test_search_pages_missing_query(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("confluence_search", {"target": "pages"})
 
@@ -825,6 +871,7 @@ class TestConfluenceSearch:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_search", {"target": "page", "page_id": "12345"}
@@ -837,6 +884,7 @@ class TestConfluenceSearch:
     async def test_get_page_missing_page_id(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("confluence_search", {"target": "page"})
 
@@ -846,6 +894,7 @@ class TestConfluenceSearch:
     async def test_search_invalid_target(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("confluence_search", {"target": "invalid"})
 
@@ -858,6 +907,7 @@ class TestConfluenceSearch:
 # confluence_manage
 # ---------------------------------------------------------------------------
 
+
 class TestConfluenceManage:
     @respx.mock
     async def test_create_page(self, mcp_server):
@@ -866,6 +916,7 @@ class TestConfluenceManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_manage",
@@ -884,6 +935,7 @@ class TestConfluenceManage:
     async def test_create_page_missing_space_id(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_manage",
@@ -896,6 +948,7 @@ class TestConfluenceManage:
     async def test_create_page_missing_title(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_manage",
@@ -908,6 +961,7 @@ class TestConfluenceManage:
     async def test_create_page_missing_body(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_manage",
@@ -924,6 +978,7 @@ class TestConfluenceManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_manage",
@@ -950,6 +1005,7 @@ class TestConfluenceManage:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_manage",
@@ -968,6 +1024,7 @@ class TestConfluenceManage:
     async def test_update_page_missing_page_id(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "confluence_manage",
@@ -980,6 +1037,7 @@ class TestConfluenceManage:
     async def test_manage_invalid_target(self, mcp_server):
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("confluence_manage", {"target": "invalid"})
 
@@ -992,12 +1050,16 @@ class TestConfluenceManage:
 # Auth error handling
 # ---------------------------------------------------------------------------
 
+
 class TestMCPAuth:
     async def test_missing_token_raises_error(self, mcp_server):
         from fastmcp import Client
         from fastmcp.exceptions import ToolError
 
-        with patch("atlassian_mcp.get_atlassian_token", side_effect=PermissionError("Authorization required.")):
+        with patch(
+            "atlassian_mcp.get_atlassian_token",
+            side_effect=PermissionError("Authorization required."),
+        ):
             with patch("atlassian_mcp.get_cloud_id", return_value=CLOUD_ID):
                 async with Client(mcp_server) as client:
                     with pytest.raises(ToolError, match="Authorization required"):
@@ -1008,7 +1070,9 @@ class TestMCPAuth:
         from fastmcp.exceptions import ToolError
 
         with patch("atlassian_mcp.get_atlassian_token", return_value="token"):
-            with patch("atlassian_mcp.get_cloud_id", side_effect=PermissionError("Cloud ID required.")):
+            with patch(
+                "atlassian_mcp.get_cloud_id", side_effect=PermissionError("Cloud ID required.")
+            ):
                 async with Client(mcp_server) as client:
                     with pytest.raises(ToolError, match="Cloud ID required"):
                         await client.call_tool("jira_search", {"target": "projects"})
@@ -1018,6 +1082,7 @@ class TestMCPAuth:
 # API error handling
 # ---------------------------------------------------------------------------
 
+
 class TestMCPErrorHandling:
     @respx.mock
     async def test_401_friendly_message(self, mcp_server):
@@ -1026,6 +1091,7 @@ class TestMCPErrorHandling:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "projects"})
 
@@ -1043,6 +1109,7 @@ class TestMCPErrorHandling:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_get", {"target": "issue", "issue_key": "BAD-999"}
@@ -1058,6 +1125,7 @@ class TestMCPErrorHandling:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "jira_manage",
@@ -1078,6 +1146,7 @@ class TestMCPErrorHandling:
         )
         with _mock_auth():
             from fastmcp import Client
+
             async with Client(mcp_server) as client:
                 result = await client.call_tool("jira_search", {"target": "projects"})
 

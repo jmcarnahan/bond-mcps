@@ -22,9 +22,9 @@ import csv
 import io
 import logging
 import os
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Sequence
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -32,14 +32,83 @@ from starlette.responses import JSONResponse
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from atlassian.auth import get_atlassian_token, get_cloud_id
-from atlassian.atlassian_client import AsyncAtlassianClient, AtlassianError
-from atlassian import jira as jira_ops
 from atlassian import confluence as confluence_ops
+from atlassian import jira as jira_ops
 from atlassian import user as user_ops
+from atlassian.atlassian_client import AsyncAtlassianClient, AtlassianError
+from atlassian.auth import get_atlassian_token, get_cloud_id
+
+from auth.connect_routes import ProviderConnectConfig, register_connect_routes
+from auth.jwt_identity import build_remote_auth_provider
+
+
+def _atlassian_post_exchange(token_response: dict) -> dict:
+    """After Atlassian's token exchange, discover the cloud_id.
+
+    Atlassian's OAuth response doesn't include the cloud_id — we have to
+    GET /oauth/token/accessible-resources with the freshly issued bearer
+    and pick the first site the user has access to. Cache it alongside
+    the access_token so subsequent tool calls can read it from tokens.db
+    without an extra round trip.
+    """
+    import httpx
+
+    access_token = token_response.get("access_token")
+    cloud_id = None
+    if access_token:
+        try:
+            with httpx.Client(timeout=15.0) as http:
+                resp = http.get(
+                    "https://api.atlassian.com/oauth/token/accessible-resources",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json",
+                    },
+                )
+            if resp.status_code == 200:
+                resources = resp.json()
+                if isinstance(resources, list) and resources:
+                    cloud_id = resources[0].get("id")
+        except Exception:  # nosec B110 — surface the missing cloud_id below
+            cloud_id = None
+
+    out = {"access_token": access_token}
+    if rt := token_response.get("refresh_token"):
+        out["refresh_token"] = rt
+    if exp := token_response.get("expires_in"):
+        try:
+            import time
+
+            out["expires_at"] = time.time() + int(exp)
+        except (TypeError, ValueError):
+            pass
+    if scope := token_response.get("scope"):
+        out["scope"] = scope
+    if cloud_id:
+        out["cloud_id"] = cloud_id
+    return out
+
+
+ATLASSIAN_CONNECT_CONFIG = ProviderConnectConfig(
+    name="atlassian",
+    authorize_url="https://auth.atlassian.com/authorize",
+    token_url="https://auth.atlassian.com/oauth/token",
+    scopes=(
+        "read:jira-user read:jira-work write:jira-work manage:jira-project "
+        "read:content:confluence read:content-details:confluence "
+        "write:content:confluence read:space:confluence "
+        "read:space-details:confluence read:page:confluence "
+        "write:page:confluence offline_access"
+    ),
+    client_id_env="ATLASSIAN_CLIENT_ID",
+    client_secret_env="ATLASSIAN_CLIENT_SECRET",
+    post_exchange=_atlassian_post_exchange,
+)
+
 
 logging.basicConfig(level=logging.INFO)
 from auth import log_discipline  # noqa: E402
+
 log_discipline.apply()
 logger = logging.getLogger(__name__)
 
@@ -48,10 +117,12 @@ logger = logging.getLogger(__name__)
 async def _lifespan(app):
     """Fail fast on misconfig and warn if the auth proxy isn't reachable."""
     from auth import startup
+
     startup.verify_runtime_config()
 
     if os.environ.get("ATLASSIAN_CLIENT_ID"):
         from auth import OAuthProxyClient
+
         proxy = OAuthProxyClient()
         try:
             proxy.check_proxy()
@@ -61,7 +132,12 @@ async def _lifespan(app):
     yield
 
 
-mcp = FastMCP("Atlassian MCP Server", lifespan=_lifespan)
+mcp = FastMCP(
+    "Atlassian MCP Server", lifespan=_lifespan, auth=build_remote_auth_provider("atlassian")
+)
+
+# Per-user provider OAuth bootstrap (JWT mode only).
+register_connect_routes(mcp, ATLASSIAN_CONNECT_CONFIG)
 
 
 # Liveness/readiness probe. Returns 200 immediately if the ASGI app is up.
@@ -93,8 +169,7 @@ def _friendly_error(err: AtlassianError, context: str = "") -> str:
     if code == "Forbidden":
         resource = context if context else "this resource"
         return (
-            f"You don't have permission to access {resource}. "
-            "Check your Atlassian permissions."
+            f"You don't have permission to access {resource}. " "Check your Atlassian permissions."
         )
     if code == "NotFound":
         resource = context if context else "The requested resource"
@@ -125,8 +200,15 @@ def _extract_adf_text(adf: dict) -> str:
     if node_type in ("doc", "table", "tableRow", "bulletList", "orderedList"):
         return "\n".join(t for t in child_texts if t)
 
-    if node_type in ("paragraph", "heading", "listItem", "blockquote",
-                      "codeBlock", "tableCell", "tableHeader"):
+    if node_type in (
+        "paragraph",
+        "heading",
+        "listItem",
+        "blockquote",
+        "codeBlock",
+        "tableCell",
+        "tableHeader",
+    ):
         return "".join(child_texts)
 
     return "".join(child_texts)
@@ -191,6 +273,7 @@ def _format_issue_details(issue: dict, comments: list) -> str:
 # Jira tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 async def jira_search(
     target: str,
@@ -235,7 +318,9 @@ async def jira_search(
             return _friendly_error(e)
         if not projects:
             return "No Jira projects found."
-        rows = [[p.get("key", "?"), p.get("name", "?"), p.get("projectTypeKey", "?")] for p in projects]
+        rows = [
+            [p.get("key", "?"), p.get("name", "?"), p.get("projectTypeKey", "?")] for p in projects
+        ]
         return f"{len(projects)} project(s):\n" + _format_table(["key", "name", "type"], rows)
 
     elif target == "issues":
@@ -252,7 +337,10 @@ async def jira_search(
                 count = await jira_ops.acount_issues(client, jql=jql)
                 cap = max_results if max_results > 0 else jira_ops._MAX_TOTAL_ISSUES
                 issues = await jira_ops.asearch_all_issues(
-                    client, jql=jql, fields=field_str, max_total=cap,
+                    client,
+                    jql=jql,
+                    fields=field_str,
+                    max_total=cap,
                 )
         except AtlassianError as e:
             return _friendly_error(e)
@@ -262,17 +350,21 @@ async def jira_search(
         rows = []
         for issue in issues:
             f = issue.get("fields", {})
-            rows.append([
-                issue.get("key", "?"),
-                f.get("summary", "?"),
-                f.get("status", {}).get("name", "?"),
-                f.get("issuetype", {}).get("name", ""),
-                f.get("assignee", {}).get("displayName", "") if f.get("assignee") else "",
-                f.get("priority", {}).get("name", "") if f.get("priority") else "",
-                ",".join(f.get("labels", [])),
-            ])
+            rows.append(
+                [
+                    issue.get("key", "?"),
+                    f.get("summary", "?"),
+                    f.get("status", {}).get("name", "?"),
+                    f.get("issuetype", {}).get("name", ""),
+                    f.get("assignee", {}).get("displayName", "") if f.get("assignee") else "",
+                    f.get("priority", {}).get("name", "") if f.get("priority") else "",
+                    ",".join(f.get("labels", [])),
+                ]
+            )
         result = f"{fetched} of ~{count} issue(s) for `{jql}`:\n"
-        result += _format_table(["key", "summary", "status", "type", "assignee", "priority", "labels"], rows)
+        result += _format_table(
+            ["key", "summary", "status", "type", "assignee", "priority", "labels"], rows
+        )
         if fetched < count:
             result += f"\n({fetched} of ~{count} shown. Refine JQL or set max_results for more.)"
         return result
@@ -310,10 +402,17 @@ async def jira_search(
                 filter_desc += f" with status '{status}'"
             return f"No versions found for {project_key}{filter_desc}."
         rows = [
-            [v.get("id", "?"), v.get("name", "?"), "released" if v.get("released", False) else "unreleased", v.get("releaseDate", "")]
+            [
+                v.get("id", "?"),
+                v.get("name", "?"),
+                "released" if v.get("released", False) else "unreleased",
+                v.get("releaseDate", ""),
+            ]
             for v in versions
         ]
-        return f"{len(versions)} version(s) for {project_key}:\n" + _format_table(["id", "name", "status", "releaseDate"], rows)
+        return f"{len(versions)} version(s) for {project_key}:\n" + _format_table(
+            ["id", "name", "status", "releaseDate"], rows
+        )
 
     elif target == "users":
         if not query:
@@ -326,8 +425,13 @@ async def jira_search(
             return _friendly_error(e)
         if not users:
             return f"No users found matching '{query}'."
-        rows = [[u.get("accountId", "?"), u.get("displayName", "?"), u.get("emailAddress", "")] for u in users]
-        return f"{len(users)} user(s) matching '{query}':\n" + _format_table(["accountId", "displayName", "email"], rows)
+        rows = [
+            [u.get("accountId", "?"), u.get("displayName", "?"), u.get("emailAddress", "")]
+            for u in users
+        ]
+        return f"{len(users)} user(s) matching '{query}':\n" + _format_table(
+            ["accountId", "displayName", "email"], rows
+        )
 
     elif target == "myself":
         try:
@@ -493,7 +597,10 @@ async def jira_manage(
         try:
             async with AsyncAtlassianClient(token, cloud_id) as client:
                 result = await jira_ops.aadd_issue_comment(
-                    client, issue_key, body, author_label=author_label,
+                    client,
+                    issue_key,
+                    body,
+                    author_label=author_label,
                 )
         except AtlassianError as e:
             return _friendly_error(e, context=issue_key)
@@ -537,6 +644,7 @@ async def jira_manage(
 # Confluence tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 async def confluence_search(
     target: str,
@@ -572,7 +680,10 @@ async def confluence_search(
             return _friendly_error(e)
         if not spaces:
             return "No Confluence spaces found."
-        rows = [[s.get("key", "?"), s.get("name", "?"), s.get("type", "?"), s.get("status", "?")] for s in spaces]
+        rows = [
+            [s.get("key", "?"), s.get("name", "?"), s.get("type", "?"), s.get("status", "?")]
+            for s in spaces
+        ]
         return f"{len(spaces)} space(s):\n" + _format_table(["key", "name", "type", "status"], rows)
 
     elif target == "pages":
@@ -581,13 +692,20 @@ async def confluence_search(
         limit = max_results if max_results > 0 else 25
         try:
             async with AsyncAtlassianClient(token, cloud_id) as client:
-                results = await confluence_ops.asearch_content(client, query=query, max_results=limit)
+                results = await confluence_ops.asearch_content(
+                    client, query=query, max_results=limit
+                )
         except AtlassianError as e:
             return _friendly_error(e)
         if not results:
             return f"No content found matching: `{query}`"
-        rows = [[r.get("id", "?"), r.get("title", "?"), r.get("type", "?"), r.get("status", "?")] for r in results]
-        return f"{len(results)} result(s) for `{query}`:\n" + _format_table(["id", "title", "type", "status"], rows)
+        rows = [
+            [r.get("id", "?"), r.get("title", "?"), r.get("type", "?"), r.get("status", "?")]
+            for r in results
+        ]
+        return f"{len(results)} result(s) for `{query}`:\n" + _format_table(
+            ["id", "title", "type", "status"], rows
+        )
 
     elif target == "page":
         if not page_id:

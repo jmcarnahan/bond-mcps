@@ -18,7 +18,7 @@ resource "aws_db_subnet_group" "aurora" {
 resource "aws_rds_cluster_parameter_group" "aurora" {
   name        = "${local.name_prefix}-aurora-pg15"
   family      = "aurora-postgresql15"
-  description = "${local.name_prefix} — force TLS for bond-mcps Aurora cluster"
+  description = "${local.name_prefix} - force TLS for bond-mcps Aurora cluster"
 
   parameter {
     name  = "rds.force_ssl"

@@ -19,6 +19,12 @@ def test_upgrade_head_creates_expected_tables(tmp_path, monkeypatch):
         assert "provider_tokens" in tables
         assert "msal_token_caches" in tables
         assert "alembic_version" in tables
+        # AS + connect tables (migration 0002)
+        assert "oauth_clients" in tables
+        assert "oauth_pending_auth" in tables
+        assert "oauth_auth_codes" in tables
+        assert "oauth_refresh_tokens" in tables
+        assert "connect_tickets" in tables
 
         # Verify PK columns exist
         pt_cols = {c["name"] for c in insp.get_columns("provider_tokens")}
@@ -35,10 +41,12 @@ def test_upgrade_head_creates_expected_tables(tmp_path, monkeypatch):
         reset_for_tests()
 
 
-def test_head_revision_is_initial(tmp_path, monkeypatch):
+def test_head_revision_is_oauth_authorization_server(tmp_path, monkeypatch):
+    """Head moves forward as new migrations land. Update this test alongside
+    any migration that becomes the new head."""
     monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{tmp_path / 'tokens.db'}")
     head = get_head_revision()
-    assert head == "0001_initial_schema"
+    assert head == "0002_oauth_authorization_server"
 
 
 def test_ensure_schema_current_passes_after_upgrade(tmp_path, monkeypatch):
@@ -62,6 +70,7 @@ def test_ensure_schema_current_raises_for_empty_db(tmp_path, monkeypatch):
         # Trigger engine creation (creates the empty file) but no migrations
         get_engine()
         import pytest as _pt
+
         with _pt.raises(SchemaOutOfDateError, match="migrate-db"):
             ensure_schema_current()
     finally:
@@ -109,9 +118,12 @@ def test_ensure_schema_current_propagates_unexpected_errors(tmp_path, monkeypatc
         class BoomError(RuntimeError):
             pass
 
-        with _patch("sqlalchemy.engine.Connection.execute",
-                    side_effect=BoomError("simulated network failure")):
+        with _patch(
+            "sqlalchemy.engine.Connection.execute",
+            side_effect=BoomError("simulated network failure"),
+        ):
             import pytest as _pt
+
             with _pt.raises(BoomError, match="simulated network failure"):
                 ensure_schema_current()
     finally:

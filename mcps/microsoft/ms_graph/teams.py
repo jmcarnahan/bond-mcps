@@ -9,11 +9,10 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
-
+from typing import Any
 from urllib.parse import quote
 
-from .graph_client import GraphClient, AsyncGraphClient, GraphError
+from .graph_client import AsyncGraphClient, GraphClient, GraphError
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +43,7 @@ def _check_teams_access(e: GraphError) -> None:
 # Message text / sender extraction helpers
 # ---------------------------------------------------------------------------
 
+
 def _extract_adaptive_card_text(card_json: str) -> str:
     """Extract readable text from an adaptive card JSON string."""
     try:
@@ -72,7 +72,7 @@ def _extract_adaptive_card_text(card_json: str) -> str:
     return " | ".join(texts)
 
 
-def extract_message_text(msg: Dict[str, Any], max_length: int = 500) -> str:
+def extract_message_text(msg: dict[str, Any], max_length: int = 500) -> str:
     """Extract readable text from a Teams message.
 
     Handles plain text, HTML (strips tags), and adaptive card attachments.
@@ -101,7 +101,7 @@ def extract_message_text(msg: Dict[str, Any], max_length: int = 500) -> str:
     return content
 
 
-def extract_message_sender(msg: Dict[str, Any]) -> str:
+def extract_message_sender(msg: dict[str, Any]) -> str:
     """Extract the display name of the message sender."""
     sender = msg.get("from") or {}
     user = sender.get("user") or {}
@@ -113,7 +113,8 @@ def extract_message_sender(msg: Dict[str, Any]) -> str:
 # Synchronous
 # ---------------------------------------------------------------------------
 
-def list_joined_teams(client: GraphClient) -> List[Dict[str, Any]]:
+
+def list_joined_teams(client: GraphClient) -> list[dict[str, Any]]:
     """List teams the current user has joined."""
     try:
         data = client.get("/me/joinedTeams")
@@ -122,7 +123,7 @@ def list_joined_teams(client: GraphClient) -> List[Dict[str, Any]]:
     return data.get("value", [])
 
 
-def list_channels(client: GraphClient, team_id: str) -> List[Dict[str, Any]]:
+def list_channels(client: GraphClient, team_id: str) -> list[dict[str, Any]]:
     """List channels in a team."""
     try:
         data = client.get(f"/teams/{_safe_id(team_id)}/channels")
@@ -136,7 +137,7 @@ def send_channel_message(
     team_id: str,
     channel_id: str,
     content: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Send a message to a Teams channel."""
     try:
         result = client.post(
@@ -153,7 +154,7 @@ def list_channel_messages(
     team_id: str,
     channel_id: str,
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List recent messages in a Teams channel."""
     try:
         data = client.get(
@@ -169,9 +170,9 @@ def list_chats(
     client: GraphClient,
     chat_type: str = "",
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List the user's recent chats (1:1, group, meeting)."""
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "$top": top,
         "$expand": "lastMessagePreview,members",
         "$orderby": "lastMessagePreview/createdDateTime desc",
@@ -190,7 +191,7 @@ def list_chat_messages(
     client: GraphClient,
     chat_id: str,
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List recent messages in a chat."""
     try:
         data = client.get(
@@ -206,7 +207,7 @@ def send_chat_message(
     client: GraphClient,
     chat_id: str,
     content: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Send a message to a chat."""
     try:
         result = client.post(
@@ -222,7 +223,8 @@ def send_chat_message(
 # Asynchronous
 # ---------------------------------------------------------------------------
 
-async def alist_joined_teams(client: AsyncGraphClient) -> List[Dict[str, Any]]:
+
+async def alist_joined_teams(client: AsyncGraphClient) -> list[dict[str, Any]]:
     """List teams the current user has joined (async)."""
     try:
         data = await client.get("/me/joinedTeams")
@@ -231,7 +233,7 @@ async def alist_joined_teams(client: AsyncGraphClient) -> List[Dict[str, Any]]:
     return data.get("value", [])
 
 
-async def alist_channels(client: AsyncGraphClient, team_id: str) -> List[Dict[str, Any]]:
+async def alist_channels(client: AsyncGraphClient, team_id: str) -> list[dict[str, Any]]:
     """List channels in a team (async)."""
     try:
         data = await client.get(f"/teams/{_safe_id(team_id)}/channels")
@@ -245,7 +247,7 @@ async def asend_channel_message(
     team_id: str,
     channel_id: str,
     content: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Send a message to a Teams channel (async)."""
     try:
         result = await client.post(
@@ -262,7 +264,7 @@ async def alist_channel_messages(
     team_id: str,
     channel_id: str,
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List recent messages in a Teams channel (async)."""
     try:
         data = await client.get(
@@ -278,9 +280,9 @@ async def alist_chats(
     client: AsyncGraphClient,
     chat_type: str = "",
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List the user's recent chats (async)."""
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "$top": top,
         "$expand": "lastMessagePreview,members",
         "$orderby": "lastMessagePreview/createdDateTime desc",
@@ -299,7 +301,7 @@ async def alist_chat_messages(
     client: AsyncGraphClient,
     chat_id: str,
     top: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """List recent messages in a chat (async)."""
     try:
         data = await client.get(
@@ -315,7 +317,7 @@ async def asend_chat_message(
     client: AsyncGraphClient,
     chat_id: str,
     content: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Send a message to a chat (async)."""
     try:
         result = await client.post(
@@ -331,11 +333,12 @@ async def asend_chat_message(
 # Activity aggregator (async-only)
 # ---------------------------------------------------------------------------
 
+
 async def aget_teams_activity(
     client: AsyncGraphClient,
     hours: int = 24,
     max_channels: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Aggregate recent Teams activity across channels and chats.
 
     Returns a list of dicts with keys: source, source_name, sender, timestamp, preview.
@@ -376,10 +379,12 @@ async def aget_teams_activity(
     )
 
     # Build (team_name, team_id, channel) tuples
-    channel_pairs: list[tuple[str, str, Dict]] = []
-    for team, ch_result in zip(teams_list, channel_results):
+    channel_pairs: list[tuple[str, str, dict]] = []
+    for team, ch_result in zip(teams_list, channel_results, strict=False):
         if isinstance(ch_result, Exception):
-            logger.warning("Failed to fetch channels for team %s: %s", team.get("displayName"), ch_result)
+            logger.warning(
+                "Failed to fetch channels for team %s: %s", team.get("displayName"), ch_result
+            )
             continue
         for ch in ch_result:
             channel_pairs.append((team.get("displayName", "?"), team["id"], ch))
@@ -397,7 +402,7 @@ async def aget_teams_activity(
     )
 
     # Build activity list
-    activity: List[Dict[str, Any]] = []
+    activity: list[dict[str, Any]] = []
 
     def _parse_ts(ts_str: str) -> datetime | None:
         """Parse an ISO timestamp from Graph API (handles both Z and +00:00)."""
@@ -409,20 +414,22 @@ async def aget_teams_activity(
             return None
 
     # Process channel messages
-    for (team_name, _, ch), msgs in zip(channel_pairs, msg_results):
+    for (team_name, _, ch), msgs in zip(channel_pairs, msg_results, strict=False):
         if isinstance(msgs, Exception) or not msgs:
             continue
         msg = msgs[0]
         ts = msg.get("createdDateTime", "")
         parsed = _parse_ts(ts)
         if parsed and parsed >= cutoff:
-            activity.append({
-                "source": "channel",
-                "source_name": f"{team_name} > {ch.get('displayName', '?')}",
-                "sender": extract_message_sender(msg),
-                "timestamp": ts,
-                "preview": extract_message_text(msg, max_length=200),
-            })
+            activity.append(
+                {
+                    "source": "channel",
+                    "source_name": f"{team_name} > {ch.get('displayName', '?')}",
+                    "sender": extract_message_sender(msg),
+                    "timestamp": ts,
+                    "preview": extract_message_text(msg, max_length=200),
+                }
+            )
 
     # Process chats from lastMessagePreview (no extra API calls)
     for chat in chats_list:
@@ -448,13 +455,15 @@ async def aget_teams_activity(
         sender = preview_sender.get("displayName") or "(unknown)"
         preview_body = (preview.get("body") or {}).get("content", "")
 
-        activity.append({
-            "source": "chat",
-            "source_name": source_name,
-            "sender": sender,
-            "timestamp": ts,
-            "preview": preview_body[:200],
-        })
+        activity.append(
+            {
+                "source": "chat",
+                "source_name": source_name,
+                "sender": sender,
+                "timestamp": ts,
+                "preview": preview_body[:200],
+            }
+        )
 
     # Sort by timestamp descending
     activity.sort(key=lambda x: x.get("timestamp", ""), reverse=True)

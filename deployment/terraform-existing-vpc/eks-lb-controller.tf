@@ -17,6 +17,11 @@ resource "helm_release" "alb_controller" {
 
   values = [yamlencode({
     clusterName = module.eks.cluster_name
+    # EKS managed-node-group default hop-limit (1) blocks pods from
+    # reaching IMDS. Pass region + vpcId explicitly so the controller never
+    # falls back to instance-metadata discovery.
+    region = var.aws_region
+    vpcId  = data.aws_vpc.existing.id
     serviceAccount = {
       create = true
       name   = "aws-load-balancer-controller"
