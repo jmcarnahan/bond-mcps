@@ -1,0 +1,45 @@
+# Repo-root pyproject.toml. Config-only — NO `[tool.poetry]` section, so
+# Poetry will not treat this as a package. Per-package Poetry projects live in
+# `auth/` and `mcps/<name>/` and are unaffected: Poetry walks up only to the
+# nearest `[tool.poetry]` table.
+#
+# Ruff and Bandit walk up from the current directory and pick up this file
+# when invoked from anywhere in the repo. Pre-commit hooks invoke them at the
+# repo root, so config applies uniformly.
+
+[tool.bandit]
+exclude_dirs = [".venv", "tests", "_shared_auth_pkg", "tmp"]
+skips = [
+  "B101", # assert_used — fine in tests and asserts-for-invariants
+  "B106", # hardcoded_password_funcarg — false positives on OAuth token endpoint URLs and env-var name strings
+  "B107", # hardcoded_password_default
+  "B110", # try/except/pass — we use this deliberately when swallowing best-effort cleanup errors
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["_shared_auth_pkg", ".terraform", "tmp"]
+
+[tool.ruff.lint]
+# Initial baseline for a codebase that's never been linted. We start narrow:
+# real-bug rules only. After a code-cleanup pass, future PRs can widen the
+# select to E (style), B (bugbear), UP (pyupgrade), etc.
+#
+# Rules NOT in select yet (deliberately deferred):
+#   E   — pycodestyle (96+ E402 in test conftests; not a bug)
+#   B   — bugbear (B904 is real but cosmetic; B008 false positives)
+#   UP  — pyupgrade (6 UP038 nudges; cosmetic)
+#   SIM — simplify (157 SIM117 nested-with findings; cosmetic)
+select = [
+  "F", # pyflakes (undefined names, unused imports — actual bugs)
+  "I", # isort (import ordering)
+]
+ignore = [
+  "F821", # undefined name — false positives on stringified type refs (TYPE_CHECKING)
+  "F841", # unused local — frequent in tests where `result = call()` documents intent
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["B011", "B017", "B018"] # asserts + bare-except + useless expressions OK in tests
+"**/alembic/versions/*.py" = ["E402"]    # alembic auto-generated: imports after env setup

@@ -1,0 +1,37 @@
+# Gitleaks config for bond-mcps. Mirror of bond-ai's approach plus rules
+# specific to this repo's risk surface (AS RSA PEM, deployed AWS creds).
+#
+# See https://github.com/gitleaks/gitleaks#configuration for rule schema.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths gitleaks should ignore. Test fixtures intentionally embed sample tokens."
+paths = [
+  '''\.venv/.*''',
+  '''poetry\.lock$''',
+  '''mcps/[^/]+/_shared_auth_pkg/.*''',
+  '''deployment/terraform-existing-vpc/\.terraform/.*''',
+  '''auth/tests/.*''',
+  '''mcps/[^/]+/tests/.*''',
+  '''docs/.*\.md$''',
+]
+
+[[rules]]
+id = "bond-mcps-as-private-key"
+description = "BOND_MCPS_AS_PRIVATE_KEY_PEM blob committed in source/config"
+regex = '''BOND_MCPS_AS_PRIVATE_KEY_PEM\s*[:=]\s*["']?-----BEGIN'''
+tags = ["key", "private"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_-]{80,}'''
+tags = ["key", "anthropic"]
+
+[[rules]]
+id = "aws-secret-key"
+description = "AWS secret access key (40-char base64-ish blob next to aws*secret)"
+regex = '''(?i)aws(.{0,20})?(secret|access)?[\s]*[:=][\s]*["']?[A-Za-z0-9/+=]{40}["']?'''
+tags = ["key", "aws"]
