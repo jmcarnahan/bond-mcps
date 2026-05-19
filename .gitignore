@@ -27,6 +27,14 @@ tmp/
 # Git worktrees
 .worktrees/
 
+# Claude Code per-user local state (settings, scheduled tasks, etc.). Never
+# commit — it's machine-specific and may contain task IDs that leak.
+.claude/
+
+# Org-specific operational notes that should not be committed to a public/
+# fork-shareable repo. Local working notes only.
+docs/REDIRECT_URIS.md
+
 # CI-generated build context (auth/ subtree copied into each MCP's build dir
 # before `docker build`; cleaned up afterward).
 mcps/*/_shared_auth_pkg/
@@ -39,6 +47,22 @@ mcps/*/_shared_auth_pkg/
 *.tfvars.json
 crash.log
 *.tfstate.lock.info
-# But: keep the per-env templates checked in.
-!deployment/terraform-existing-vpc/environments/*.tfvars
+# Only the sanitized example template is tracked. Live env tfvars
+# (dev.tfvars, staging.tfvars, etc.) stay local — they hold deployment
+# identifiers (VPC IDs, Cognito pool IDs, hosted zone IDs) that tie the
+# repo to a specific org's infrastructure. Forks ship their own.
+!deployment/terraform-existing-vpc/environments/example.tfvars
 
+# Private keys + cert material that shouldn't ever land in VCS, even if
+# generated under the repo root by accident.
+*.pem
+*.key
+*.p12
+*.pfx
+# CA bundles in venvs are fine — Python certifi ships them. .venv/ is
+# already ignored above; this catches any rogue ones at the root.
+
+# SQLite databases that may hold encrypted-but-still-sensitive token state
+*.sqlite
+*.sqlite3
+*.db-journal
