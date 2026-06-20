@@ -226,9 +226,12 @@ def run_proxy(host: str = "127.0.0.1", port: int = 8000) -> None:
     signal.signal(signal.SIGINT, _shutdown)
 
     logger.info("Auth proxy listening on %s:%d", host, port)
+    public_url = os.environ.get("BOND_AUTH_PROXY_PUBLIC_URL", "").strip()
+    effective_redirect_base = public_url or f"http://localhost:{port}"
     print(f"\n{'=' * 50}", flush=True)
     print("  Bond MCPs OAuth Proxy", flush=True)
     print(f"  Listening on {host}:{port}", flush=True)
+    print(f"  Public redirect base: {effective_redirect_base}", flush=True)
     print(f"  PID: {os.getpid()}", flush=True)
     print("  Press Ctrl+C to stop", flush=True)
     print(f"{'=' * 50}\n", flush=True)
