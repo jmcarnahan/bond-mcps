@@ -142,6 +142,28 @@ on demand. The same harness runs in CI via `.github/workflows/lint.yml`.
 
 Logs land in `tmp/logs/` and are gitignored.
 
+### Combined mode (paired with bond-ai's nginx front door)
+
+When bond-ai runs in combined mode (single front door on `http://localhost:8080`),
+use `make dev-combined` instead:
+
+```bash
+make dev-combined     # same services + BOND_AUTH_PROXY_PUBLIC_URL=http://localhost:8080
+```
+
+This exports `BOND_AUTH_PROXY_PUBLIC_URL` into the auth proxy and every
+MCP, so the OAuth redirect URIs they hand to providers point at bond-ai's
+nginx (which forwards `/connections/*` back here) instead of `:8000`
+directly. Each provider then only needs **one** localhost callback URL
+registered: `http://localhost:8080/connections/<provider>/callback`.
+
+The auth proxy logs the effective public redirect base on startup
+(`tmp/logs/auth.log`) so you can confirm the env var took effect. Override
+the front-door URL via `COMBINED_PUBLIC_URL=... make dev-combined`.
+
+`make stop` works for both modes; `make dev` (plain split-mode) is
+unchanged.
+
 ### By hand: a single MCP
 
 ```bash
