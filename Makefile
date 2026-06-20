@@ -16,7 +16,7 @@
         logout logout-microsoft logout-github logout-atlassian logout-databricks \
         migrate-db import-tokens doctor migrate-tokens \
         check-mcp-deps \
-        _check-proxy _ensure-as-keypair _ensure-as-shared-secret
+        _check-proxy _ensure-as-keypair _ensure-as-shared-secret _wait-mcp-binds
 
 # Login flows open the browser one at a time — never parallelize.
 .NOTPARALLEL:
@@ -127,10 +127,23 @@ dev: check-ports check-mcp-deps
 	@( cd mcps/atlassian && BOND_AUTH_PROXY_PORT=$(AUTH_PORT) nohup poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port $(ATLASSIAN_PORT) ) > $(CURDIR)/$(LOG_DIR)/atlassian.log 2>&1 &
 	@echo "Starting Databricks MCP on :$(DATABRICKS_PORT)..."
 	@( cd mcps/databricks && BOND_AUTH_PROXY_PORT=$(AUTH_PORT) nohup poetry run fastmcp run databricks_mcp.py --transport streamable-http --port $(DATABRICKS_PORT) ) > $(CURDIR)/$(LOG_DIR)/databricks.log 2>&1 &
-	@# Heuristic — FastMCP normally binds within ~1s. Bump if `make status`
-	@# shows [down] services immediately after `make dev` on a slow system.
-	@sleep 3
+	@$(MAKE) --no-print-directory _wait-mcp-binds
 	@$(MAKE) --no-print-directory status
+
+# Poll each MCP port up to MCP_READY_TIMEOUT seconds (default 30). FastMCP
+# cold-start (especially the first time after a `poetry install`) routinely
+# takes >3s, so the previous `sleep 3` fired status too early and reported
+# false [down]. Polling each port keeps the happy-path fast and only waits
+# when needed.
+MCP_READY_TIMEOUT ?= 30
+_wait-mcp-binds:
+	@for port in $(MS_GRAPH_PORT) $(GITHUB_PORT) $(ATLASSIAN_PORT) $(DATABRICKS_PORT); do \
+	  i=0; \
+	  while [ $$i -lt $(MCP_READY_TIMEOUT) ]; do \
+	    if lsof -nP -iTCP:$$port -sTCP:LISTEN >/dev/null 2>&1; then break; fi; \
+	    i=$$((i+1)); sleep 1; \
+	  done; \
+	done
 
 # Alias for `dev` — kept for symmetry with bond-ai's `make dev-combined`. In
 # the current combined-mode design, OAuth callbacks stay at :8000 (the
