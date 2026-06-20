@@ -15,6 +15,7 @@
         login login-microsoft login-github login-atlassian login-databricks \
         logout logout-microsoft logout-github logout-atlassian logout-databricks \
         migrate-db import-tokens doctor migrate-tokens \
+        check-mcp-deps \
         _check-proxy _ensure-as-keypair _ensure-as-shared-secret
 
 # Login flows open the browser one at a time — never parallelize.
@@ -95,7 +96,25 @@ check-ports:
 	  exit 1; \
 	fi
 
-dev: check-ports
+# Warn if any MCP venv is missing fastmcp. Without this check, missing deps
+# manifest as silent [down] services because nohup swallows the
+# "command not found" error from the fastmcp launch. Listed as a warning
+# rather than a hard fail — running `make dev` for auth-proxy-only testing
+# is a valid workflow.
+check-mcp-deps:
+	@missing=""; \
+	for mcp in microsoft github atlassian databricks; do \
+	  if [ ! -x mcps/$$mcp/.venv/bin/fastmcp ]; then \
+	    missing="$$missing $$mcp"; \
+	  fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "  [warn] missing fastmcp in MCP venv(s):$$missing" >&2; \
+	  echo "         these MCPs will fail to start silently. run \`make install\`" >&2; \
+	  echo "         (or \`cd mcps/<svc> && poetry install\` per service) to fix." >&2; \
+	fi
+
+dev: check-ports check-mcp-deps
 	@mkdir -p $(LOG_DIR)
 	@echo "Starting auth proxy on :$(AUTH_PORT)..."
 	@( cd auth && BOND_AUTH_PROXY_PORT=$(AUTH_PORT) nohup poetry run python -m auth ) > $(CURDIR)/$(LOG_DIR)/auth.log 2>&1 &
