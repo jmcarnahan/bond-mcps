@@ -30,12 +30,6 @@ GITHUB_PORT     ?= 18002
 ATLASSIAN_PORT  ?= 18003
 DATABRICKS_PORT ?= 18004
 
-# Combined-mode pairing: when bond-ai runs nginx :8080 as the front door, the
-# auth proxy and MCPs need BOND_AUTH_PROXY_PUBLIC_URL set so the OAuth
-# redirect URIs they hand to providers point at the front door instead of
-# directly at :8000. See bond-ai's docs/local-dev-combined-mode.md.
-COMBINED_FRONT_PORT ?= 8080
-COMBINED_PUBLIC_URL ?= http://localhost:$(COMBINED_FRONT_PORT)
 
 # Multi-tenant local dev defaults — used by dev-multitenant.
 AS_BASE_URL     ?= http://localhost:$(AS_PORT)
@@ -119,41 +113,12 @@ dev: check-ports
 	@sleep 3
 	@$(MAKE) --no-print-directory status
 
-# Same as `dev` but advertises BOND_AUTH_PROXY_PUBLIC_URL to the auth proxy
-# and every MCP so OAuth redirect URIs sent to providers point at the bond-ai
-# nginx front door (default http://localhost:8080) instead of the auth proxy
-# directly. Pairs with `make dev-combined` in bond-ai. Override the front
-# door via COMBINED_PUBLIC_URL.
-dev-combined: check-ports
-	@mkdir -p $(LOG_DIR)
-	@echo "Starting auth proxy on :$(AUTH_PORT) (PUBLIC_URL=$(COMBINED_PUBLIC_URL))..."
-	@( cd auth && \
-	   BOND_AUTH_PROXY_PORT=$(AUTH_PORT) \
-	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
-	   nohup poetry run python -m auth ) > $(CURDIR)/$(LOG_DIR)/auth.log 2>&1 &
-	@sleep 1
-	@echo "Starting Microsoft MCP on :$(MS_GRAPH_PORT)..."
-	@( cd mcps/microsoft && \
-	   BOND_AUTH_PROXY_PORT=$(AUTH_PORT) \
-	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
-	   nohup poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port $(MS_GRAPH_PORT) ) > $(CURDIR)/$(LOG_DIR)/microsoft.log 2>&1 &
-	@echo "Starting GitHub MCP on :$(GITHUB_PORT)..."
-	@( cd mcps/github && \
-	   BOND_AUTH_PROXY_PORT=$(AUTH_PORT) \
-	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
-	   nohup poetry run fastmcp run github_mcp.py --transport streamable-http --port $(GITHUB_PORT) ) > $(CURDIR)/$(LOG_DIR)/github.log 2>&1 &
-	@echo "Starting Atlassian MCP on :$(ATLASSIAN_PORT)..."
-	@( cd mcps/atlassian && \
-	   BOND_AUTH_PROXY_PORT=$(AUTH_PORT) \
-	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
-	   nohup poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port $(ATLASSIAN_PORT) ) > $(CURDIR)/$(LOG_DIR)/atlassian.log 2>&1 &
-	@echo "Starting Databricks MCP on :$(DATABRICKS_PORT)..."
-	@( cd mcps/databricks && \
-	   BOND_AUTH_PROXY_PORT=$(AUTH_PORT) \
-	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
-	   nohup poetry run fastmcp run databricks_mcp.py --transport streamable-http --port $(DATABRICKS_PORT) ) > $(CURDIR)/$(LOG_DIR)/databricks.log 2>&1 &
-	@sleep 3
-	@$(MAKE) --no-print-directory status
+# Alias for `dev` — kept for symmetry with bond-ai's `make dev-combined`. In
+# the current combined-mode design, OAuth callbacks stay at :8000 (the
+# bond-mcps auth proxy's default), so no env-var change is needed. The auth
+# proxy's startup log will show "Public redirect base: http://localhost:8000"
+# which is exactly what's already registered with OAuth providers.
+dev-combined: dev
 
 # Snapshot-then-kill: list PIDs first (so we can report all 4 services even
 # when the first pgid-sweep kills the rest), then loop kills. The window
