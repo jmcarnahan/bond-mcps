@@ -1,0 +1,6 @@
+{
+  "name": "ms-graph",
+  "display_name": "Microsoft",
+  "port": 18001,
+  "path": "/mcp"
+}

@@ -24,6 +24,7 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from auth import log_discipline
+from auth.discovery import discover_mcps
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
         if path == "/health":
             self._handle_health()
+        elif path == "/connections/discovery":
+            self._handle_discovery()
         elif path.startswith("/auth/result/"):
             state = path[len("/auth/result/") :]
             self._handle_result(state)
@@ -86,6 +89,20 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_health(self) -> None:
         self._send_json(200, {"status": "ok"})
+
+    def _handle_discovery(self) -> None:
+        """Unauthenticated: list the MCP servers available in this project.
+
+        Returns only endpoints; consumers use the MCP protocol for anything
+        beyond the URL. See ``auth.discovery``.
+        """
+        try:
+            mcps = discover_mcps()
+        except Exception:  # noqa: BLE001 - never let discovery 500-crash silently
+            logger.exception("MCP discovery failed")
+            self._send_json(500, {"error": "discovery_failed"})
+            return
+        self._send_json(200, {"mcps": mcps})
 
     def _handle_register(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))

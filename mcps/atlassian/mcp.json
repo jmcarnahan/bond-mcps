@@ -1,0 +1,6 @@
+{
+  "name": "atlassian",
+  "display_name": "Atlassian",
+  "port": 18003,
+  "path": "/mcp"
+}
