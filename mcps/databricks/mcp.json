@@ -1,0 +1,6 @@
+{
+  "name": "databricks",
+  "display_name": "Databricks",
+  "port": 18004,
+  "path": "/mcp"
+}

@@ -24,6 +24,7 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from auth import log_discipline
+from auth.discovery import discover_mcps
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
         if path == "/health":
             self._handle_health()
+        elif path == "/connections/discovery":
+            self._handle_discovery()
         elif path.startswith("/auth/result/"):
             state = path[len("/auth/result/") :]
             self._handle_result(state)
@@ -86,6 +89,20 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_health(self) -> None:
         self._send_json(200, {"status": "ok"})
+
+    def _handle_discovery(self) -> None:
+        """Unauthenticated: list the MCP servers available in this project.
+
+        Returns only endpoints; consumers use the MCP protocol for anything
+        beyond the URL. See ``auth.discovery``.
+        """
+        try:
+            mcps = discover_mcps()
+        except Exception:  # noqa: BLE001 - never let discovery 500-crash silently
+            logger.exception("MCP discovery failed")
+            self._send_json(500, {"error": "discovery_failed"})
+            return
+        self._send_json(200, {"mcps": mcps})
 
     def _handle_register(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -226,9 +243,12 @@ def run_proxy(host: str = "127.0.0.1", port: int = 8000) -> None:
     signal.signal(signal.SIGINT, _shutdown)
 
     logger.info("Auth proxy listening on %s:%d", host, port)
+    public_url = os.environ.get("BOND_AUTH_PROXY_PUBLIC_URL", "").strip()
+    effective_redirect_base = public_url or f"http://localhost:{port}"
     print(f"\n{'=' * 50}", flush=True)
     print("  Bond MCPs OAuth Proxy", flush=True)
     print(f"  Listening on {host}:{port}", flush=True)
+    print(f"  Public redirect base: {effective_redirect_base}", flush=True)
     print(f"  PID: {os.getpid()}", flush=True)
     print("  Press Ctrl+C to stop", flush=True)
     print(f"{'=' * 50}\n", flush=True)

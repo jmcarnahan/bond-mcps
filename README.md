@@ -142,6 +142,27 @@ on demand. The same harness runs in CI via `.github/workflows/lint.yml`.
 
 Logs land in `tmp/logs/` and are gitignored.
 
+### Combined mode (paired with bond-ai's nginx front door)
+
+When bond-ai runs in combined mode (nginx front door on
+`http://localhost:8000`), use:
+
+```bash
+make dev-combined
+```
+
+This binds the auth proxy to **`:18000`** (NOT `:8000` — that's taken by
+bond-ai's nginx in combined mode) and exports
+`BOND_AUTH_PROXY_PUBLIC_URL=http://localhost:8000` so MCPs hand OAuth
+providers the front-door URL that's already registered. The auth proxy
+logs "Public redirect base: http://localhost:8000" on startup
+(`tmp/logs/auth.log`) so you can confirm.
+
+`make stop` works for both modes; plain `make dev` is unchanged and keeps
+the auth proxy on `:8000` as before. See bond-ai's
+`docs/local-dev-combined-mode.md` for the full architecture and OAuth
+flow details.
+
 ### By hand: a single MCP
 
 ```bash

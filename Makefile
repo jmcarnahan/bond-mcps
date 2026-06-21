@@ -10,12 +10,15 @@
 # auth proxy). Auth proxy port flows via BOND_AUTH_PROXY_PORT which both the
 # proxy server and the MCP-side OAuthProxyClient read.
 
-.PHONY: install dev dev-multitenant stop logs status check-ports check-ports-mt \
+.PHONY: install dev dev-combined dev-multitenant stop logs status status-combined \
+        check-ports check-ports-combined check-ports-mt \
         claude-add claude-remove \
         login login-microsoft login-github login-atlassian login-databricks \
         logout logout-microsoft logout-github logout-atlassian logout-databricks \
         migrate-db import-tokens doctor migrate-tokens \
-        _check-proxy _ensure-as-keypair _ensure-as-shared-secret
+        check-mcp-deps \
+        _check-proxy _ensure-as-keypair _ensure-as-shared-secret \
+        _wait-mcp-binds _wait-mcp-binds-combined
 
 # Login flows open the browser one at a time — never parallelize.
 .NOTPARALLEL:
@@ -29,6 +32,7 @@ MS_GRAPH_PORT   ?= 18001
 GITHUB_PORT     ?= 18002
 ATLASSIAN_PORT  ?= 18003
 DATABRICKS_PORT ?= 18004
+
 
 # Multi-tenant local dev defaults — used by dev-multitenant.
 AS_BASE_URL     ?= http://localhost:$(AS_PORT)
@@ -94,7 +98,42 @@ check-ports:
 	  exit 1; \
 	fi
 
-dev: check-ports
+# Combined-mode port check. Probes the ports combined mode actually binds —
+# COMBINED_AUTH_PORT (18000) + the MCP ports — NOT AUTH_PORT (8000). In combined
+# mode :8000 is bond-ai's nginx front door (Docker), which is SUPPOSED to be in
+# use; probing it (as plain check-ports does) wrongly blocks `make dev-combined`
+# once nginx is up. nginx coexisting on :8000 is the whole point of this mode.
+check-ports-combined:
+	@busy=0; for p in $(COMBINED_AUTH_PORT) $(MS_GRAPH_PORT) $(GITHUB_PORT) $(ATLASSIAN_PORT) $(DATABRICKS_PORT); do \
+	  if lsof -nP -iTCP:$$p -sTCP:LISTEN >/dev/null 2>&1; then \
+	    owner=$$(lsof -nP -iTCP:$$p -sTCP:LISTEN -t | head -1 | xargs -I{} ps -p {} -o comm= 2>/dev/null | tail -1); \
+	    echo "  port $$p in use by $$owner"; busy=1; \
+	  fi; \
+	done; \
+	if [ $$busy -ne 0 ]; then \
+	  echo "Free the ports above or override via COMBINED_AUTH_PORT / MS_GRAPH_PORT / GITHUB_PORT / ATLASSIAN_PORT / DATABRICKS_PORT." >&2; \
+	  exit 1; \
+	fi
+
+# Warn if any MCP venv is missing fastmcp. Without this check, missing deps
+# manifest as silent [down] services because nohup swallows the
+# "command not found" error from the fastmcp launch. Listed as a warning
+# rather than a hard fail — running `make dev` for auth-proxy-only testing
+# is a valid workflow.
+check-mcp-deps:
+	@missing=""; \
+	for mcp in microsoft github atlassian databricks; do \
+	  if [ ! -x mcps/$$mcp/.venv/bin/fastmcp ]; then \
+	    missing="$$missing $$mcp"; \
+	  fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "  [warn] missing fastmcp in MCP venv(s):$$missing" >&2; \
+	  echo "         these MCPs will fail to start silently. run \`make install\`" >&2; \
+	  echo "         (or \`cd mcps/<svc> && poetry install\` per service) to fix." >&2; \
+	fi
+
+dev: check-ports check-mcp-deps
 	@mkdir -p $(LOG_DIR)
 	@echo "Starting auth proxy on :$(AUTH_PORT)..."
 	@( cd auth && BOND_AUTH_PROXY_PORT=$(AUTH_PORT) nohup poetry run python -m auth ) > $(CURDIR)/$(LOG_DIR)/auth.log 2>&1 &
@@ -107,24 +146,113 @@ dev: check-ports
 	@( cd mcps/atlassian && BOND_AUTH_PROXY_PORT=$(AUTH_PORT) nohup poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port $(ATLASSIAN_PORT) ) > $(CURDIR)/$(LOG_DIR)/atlassian.log 2>&1 &
 	@echo "Starting Databricks MCP on :$(DATABRICKS_PORT)..."
 	@( cd mcps/databricks && BOND_AUTH_PROXY_PORT=$(AUTH_PORT) nohup poetry run fastmcp run databricks_mcp.py --transport streamable-http --port $(DATABRICKS_PORT) ) > $(CURDIR)/$(LOG_DIR)/databricks.log 2>&1 &
-	@# Heuristic — FastMCP normally binds within ~1s. Bump if `make status`
-	@# shows [down] services immediately after `make dev` on a slow system.
-	@sleep 3
+	@$(MAKE) --no-print-directory _wait-mcp-binds
 	@$(MAKE) --no-print-directory status
+
+# Poll each MCP port up to MCP_READY_TIMEOUT seconds (default 30). FastMCP
+# cold-start (especially the first time after a `poetry install`) routinely
+# takes >3s, so the previous `sleep 3` fired status too early and reported
+# false [down]. Polling each port keeps the happy-path fast and only waits
+# when needed.
+MCP_READY_TIMEOUT ?= 30
+_wait-mcp-binds:
+	@for port in $(MS_GRAPH_PORT) $(GITHUB_PORT) $(ATLASSIAN_PORT) $(DATABRICKS_PORT); do \
+	  i=0; \
+	  while [ $$i -lt $(MCP_READY_TIMEOUT) ]; do \
+	    if lsof -nP -iTCP:$$port -sTCP:LISTEN >/dev/null 2>&1; then break; fi; \
+	    i=$$((i+1)); sleep 1; \
+	  done; \
+	done
+
+# Combined-mode auth proxy port. nginx in bond-ai takes :8000 as the unified
+# front door, so we move the auth proxy to :18000 here. The PUBLIC_URL points
+# at the front door so MCPs hand OAuth providers the :8000 URL that's already
+# registered. See bond-ai's docs/local-dev-combined-mode.md.
+COMBINED_AUTH_PORT  ?= 18000
+COMBINED_PUBLIC_URL ?= http://localhost:8000
+
+# Combined-mode variant of `dev`. Binds the auth proxy to :$(COMBINED_AUTH_PORT)
+# instead of :$(AUTH_PORT) and advertises BOND_AUTH_PROXY_PUBLIC_URL so the
+# MCPs' OAuth redirect URIs go through the bond-ai nginx front door.
+dev-combined: check-ports-combined check-mcp-deps
+	@mkdir -p $(LOG_DIR)
+	@echo "Starting auth proxy on :$(COMBINED_AUTH_PORT) (PUBLIC_URL=$(COMBINED_PUBLIC_URL))..."
+	@( cd auth && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run python -m auth ) > $(CURDIR)/$(LOG_DIR)/auth.log 2>&1 &
+	@sleep 1
+	@echo "Starting Microsoft MCP on :$(MS_GRAPH_PORT)..."
+	@( cd mcps/microsoft && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port $(MS_GRAPH_PORT) ) > $(CURDIR)/$(LOG_DIR)/microsoft.log 2>&1 &
+	@echo "Starting GitHub MCP on :$(GITHUB_PORT)..."
+	@( cd mcps/github && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run github_mcp.py --transport streamable-http --port $(GITHUB_PORT) ) > $(CURDIR)/$(LOG_DIR)/github.log 2>&1 &
+	@echo "Starting Atlassian MCP on :$(ATLASSIAN_PORT)..."
+	@( cd mcps/atlassian && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port $(ATLASSIAN_PORT) ) > $(CURDIR)/$(LOG_DIR)/atlassian.log 2>&1 &
+	@echo "Starting Databricks MCP on :$(DATABRICKS_PORT)..."
+	@( cd mcps/databricks && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run databricks_mcp.py --transport streamable-http --port $(DATABRICKS_PORT) ) > $(CURDIR)/$(LOG_DIR)/databricks.log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-mcp-binds-combined
+	@$(MAKE) --no-print-directory status-combined
+
+# Poll bind for each combined-mode service.
+_wait-mcp-binds-combined:
+	@for port in $(COMBINED_AUTH_PORT) $(MS_GRAPH_PORT) $(GITHUB_PORT) $(ATLASSIAN_PORT) $(DATABRICKS_PORT); do \
+	  i=0; \
+	  while [ $$i -lt $(MCP_READY_TIMEOUT) ]; do \
+	    if lsof -nP -iTCP:$$port -sTCP:LISTEN >/dev/null 2>&1; then break; fi; \
+	    i=$$((i+1)); sleep 1; \
+	  done; \
+	done
+
+# Status using the combined-mode auth port.
+status-combined:
+	@for entry in "auth:$(COMBINED_AUTH_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
+	  name=$${entry%%:*}; port=$${entry##*:}; \
+	  pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	  if [ -n "$$pid" ]; then echo "  [up]   $$name :$$port (pid $$pid)"; \
+	  else echo "  [down] $$name :$$port"; fi; \
+	done
 
 # Snapshot-then-kill: list PIDs first (so we can report all 4 services even
 # when the first pgid-sweep kills the rest), then loop kills. The window
 # between snapshot and kill is tiny; signals to already-dead PIDs are
 # silenced. Don't "fix" this into a per-port find+kill — that pattern only
 # reports the first service stopped, since subsequent iterations find nothing.
+#
+# Ownership guard: only kill a port's listener if its command line points back
+# into THIS checkout ($(CURDIR)). The kill is a process-group sweep
+# (kill -- -$pgid), which is intended to take down our `poetry -> python`
+# child tree — but it's catastrophic against a process that's its own group
+# leader. In combined mode :8000 (AUTH_PORT) is held by Docker's
+# `com.docker.backend` (the nginx front door's host port), and pgid-killing
+# that nukes Docker Desktop. The $(CURDIR) check spares Docker and any other
+# foreign process squatting one of these ports, while still stopping the
+# split-mode auth proxy (which DOES run as <repo>/auth/.venv/bin/python).
+# nginx is bond-ai's to stop ("make nginx-stop" there).
 stop:
 	@pids_to_kill=""; \
-	for entry in "auth:$(AUTH_PORT)" "as:$(AS_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
+	for entry in "auth:$(AUTH_PORT)" "auth-combined:$(COMBINED_AUTH_PORT)" "as:$(AS_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
 	  name=$${entry%%:*}; port=$${entry##*:}; \
 	  pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	  if [ -n "$$pid" ]; then \
-	    echo "Stopping $$name :$$port (pid $$pid)"; \
-	    pids_to_kill="$$pids_to_kill $$pid"; \
+	    cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	    case "$$cmd" in \
+	      *"$(CURDIR)"*) echo "Stopping $$name :$$port (pid $$pid)"; \
+	                     pids_to_kill="$$pids_to_kill $$pid" ;; \
+	      *) echo "  [skip] $$name :$$port held by a foreign process (pid $$pid) — not killing it." >&2; \
+	         echo "         If that's the combined-mode nginx front door, stop it with 'make nginx-stop' in bond-ai." >&2 ;; \
+	    esac; \
 	  fi; \
 	done; \
 	for pid in $$pids_to_kill; do \
