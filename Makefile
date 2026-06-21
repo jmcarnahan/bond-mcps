@@ -10,13 +10,15 @@
 # auth proxy). Auth proxy port flows via BOND_AUTH_PROXY_PORT which both the
 # proxy server and the MCP-side OAuthProxyClient read.
 
-.PHONY: install dev dev-combined dev-multitenant stop logs status check-ports check-ports-mt \
+.PHONY: install dev dev-combined dev-multitenant stop logs status status-combined \
+        check-ports check-ports-mt \
         claude-add claude-remove \
         login login-microsoft login-github login-atlassian login-databricks \
         logout logout-microsoft logout-github logout-atlassian logout-databricks \
         migrate-db import-tokens doctor migrate-tokens \
         check-mcp-deps \
-        _check-proxy _ensure-as-keypair _ensure-as-shared-secret _wait-mcp-binds
+        _check-proxy _ensure-as-keypair _ensure-as-shared-secret \
+        _wait-mcp-binds _wait-mcp-binds-combined
 
 # Login flows open the browser one at a time — never parallelize.
 .NOTPARALLEL:
@@ -145,12 +147,71 @@ _wait-mcp-binds:
 	  done; \
 	done
 
-# Alias for `dev` — kept for symmetry with bond-ai's `make dev-combined`. In
-# the current combined-mode design, OAuth callbacks stay at :8000 (the
-# bond-mcps auth proxy's default), so no env-var change is needed. The auth
-# proxy's startup log will show "Public redirect base: http://localhost:8000"
-# which is exactly what's already registered with OAuth providers.
-dev-combined: dev
+# Combined-mode auth proxy port. nginx in bond-ai takes :8000 as the unified
+# front door, so we move the auth proxy to :18000 here. The PUBLIC_URL points
+# at the front door so MCPs hand OAuth providers the :8000 URL that's already
+# registered. See bond-ai's docs/local-dev-combined-mode.md.
+COMBINED_AUTH_PORT  ?= 18000
+COMBINED_PUBLIC_URL ?= http://localhost:8000
+
+# Combined-mode variant of `dev`. Binds the auth proxy to :$(COMBINED_AUTH_PORT)
+# instead of :$(AUTH_PORT) and advertises BOND_AUTH_PROXY_PUBLIC_URL so the
+# MCPs' OAuth redirect URIs go through the bond-ai nginx front door.
+dev-combined: check-ports check-mcp-deps
+	@if lsof -nP -iTCP:$(COMBINED_AUTH_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+	  owner=$$(lsof -nP -iTCP:$(COMBINED_AUTH_PORT) -sTCP:LISTEN -t | head -1 | xargs -I{} ps -p {} -o comm= 2>/dev/null | tail -1); \
+	  echo "  port $(COMBINED_AUTH_PORT) in use by $$owner" >&2; \
+	  echo "  Free it or override COMBINED_AUTH_PORT." >&2; \
+	  exit 1; \
+	fi
+	@mkdir -p $(LOG_DIR)
+	@echo "Starting auth proxy on :$(COMBINED_AUTH_PORT) (PUBLIC_URL=$(COMBINED_PUBLIC_URL))..."
+	@( cd auth && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run python -m auth ) > $(CURDIR)/$(LOG_DIR)/auth.log 2>&1 &
+	@sleep 1
+	@echo "Starting Microsoft MCP on :$(MS_GRAPH_PORT)..."
+	@( cd mcps/microsoft && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port $(MS_GRAPH_PORT) ) > $(CURDIR)/$(LOG_DIR)/microsoft.log 2>&1 &
+	@echo "Starting GitHub MCP on :$(GITHUB_PORT)..."
+	@( cd mcps/github && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run github_mcp.py --transport streamable-http --port $(GITHUB_PORT) ) > $(CURDIR)/$(LOG_DIR)/github.log 2>&1 &
+	@echo "Starting Atlassian MCP on :$(ATLASSIAN_PORT)..."
+	@( cd mcps/atlassian && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run atlassian_mcp.py --transport streamable-http --port $(ATLASSIAN_PORT) ) > $(CURDIR)/$(LOG_DIR)/atlassian.log 2>&1 &
+	@echo "Starting Databricks MCP on :$(DATABRICKS_PORT)..."
+	@( cd mcps/databricks && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run fastmcp run databricks_mcp.py --transport streamable-http --port $(DATABRICKS_PORT) ) > $(CURDIR)/$(LOG_DIR)/databricks.log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-mcp-binds-combined
+	@$(MAKE) --no-print-directory status-combined
+
+# Poll bind for each combined-mode service.
+_wait-mcp-binds-combined:
+	@for port in $(COMBINED_AUTH_PORT) $(MS_GRAPH_PORT) $(GITHUB_PORT) $(ATLASSIAN_PORT) $(DATABRICKS_PORT); do \
+	  i=0; \
+	  while [ $$i -lt $(MCP_READY_TIMEOUT) ]; do \
+	    if lsof -nP -iTCP:$$port -sTCP:LISTEN >/dev/null 2>&1; then break; fi; \
+	    i=$$((i+1)); sleep 1; \
+	  done; \
+	done
+
+# Status using the combined-mode auth port.
+status-combined:
+	@for entry in "auth:$(COMBINED_AUTH_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
+	  name=$${entry%%:*}; port=$${entry##*:}; \
+	  pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	  if [ -n "$$pid" ]; then echo "  [up]   $$name :$$port (pid $$pid)"; \
+	  else echo "  [down] $$name :$$port"; fi; \
+	done
 
 # Snapshot-then-kill: list PIDs first (so we can report all 4 services even
 # when the first pgid-sweep kills the rest), then loop kills. The window
@@ -159,7 +220,7 @@ dev-combined: dev
 # reports the first service stopped, since subsequent iterations find nothing.
 stop:
 	@pids_to_kill=""; \
-	for entry in "auth:$(AUTH_PORT)" "as:$(AS_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
+	for entry in "auth:$(AUTH_PORT)" "auth-combined:$(COMBINED_AUTH_PORT)" "as:$(AS_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
 	  name=$${entry%%:*}; port=$${entry##*:}; \
 	  pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	  if [ -n "$$pid" ]; then \
