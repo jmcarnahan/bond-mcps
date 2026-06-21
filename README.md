@@ -144,22 +144,24 @@ Logs land in `tmp/logs/` and are gitignored.
 
 ### Combined mode (paired with bond-ai's nginx front door)
 
-When bond-ai runs in combined mode (`make dev-combined` over there, nginx
-on `http://localhost:8080`), use:
+When bond-ai runs in combined mode (nginx front door on
+`http://localhost:8000`), use:
 
 ```bash
-make dev-combined     # currently an alias for `make dev`
+make dev-combined
 ```
 
-The MCP OAuth callback URL stays at `http://localhost:8000/connections/<provider>/callback`
-(the bond-mcps default) — no provider console changes needed. bond-ai's
-nginx fronts only the app UI + REST API; OAuth callbacks bypass nginx
-entirely and rely on localhost cross-port cookie sharing for session
-continuity. See bond-ai's `docs/local-dev-combined-mode.md` for the
-architectural detail.
+This binds the auth proxy to **`:18000`** (NOT `:8000` — that's taken by
+bond-ai's nginx in combined mode) and exports
+`BOND_AUTH_PROXY_PUBLIC_URL=http://localhost:8000` so MCPs hand OAuth
+providers the front-door URL that's already registered. The auth proxy
+logs "Public redirect base: http://localhost:8000" on startup
+(`tmp/logs/auth.log`) so you can confirm.
 
-The auth proxy prints "Public redirect base: http://localhost:8000" on
-startup (`tmp/logs/auth.log`) so you can confirm which URL providers see.
+`make stop` works for both modes; plain `make dev` is unchanged and keeps
+the auth proxy on `:8000` as before. See bond-ai's
+`docs/local-dev-combined-mode.md` for the full architecture and OAuth
+flow details.
 
 ### By hand: a single MCP
 
