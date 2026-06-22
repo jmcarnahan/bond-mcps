@@ -37,6 +37,7 @@ from atlassian import jira as jira_ops
 from atlassian import user as user_ops
 from atlassian.atlassian_client import AsyncAtlassianClient, AtlassianError
 from atlassian.auth import get_atlassian_token, get_cloud_id
+from atlassian.local_auth import SCOPES as ATLASSIAN_SCOPES
 
 from auth.connect_routes import ProviderConnectConfig, register_connect_routes
 from auth.jwt_identity import build_remote_auth_provider
@@ -82,8 +83,9 @@ def _atlassian_post_exchange(token_response: dict) -> dict:
             out["expires_at"] = time.time() + int(exp)
         except (TypeError, ValueError):
             pass
+    # Persist under the storage key "scopes" (what TokenRepository reads).
     if scope := token_response.get("scope"):
-        out["scope"] = scope
+        out["scopes"] = scope
     if cloud_id:
         out["cloud_id"] = cloud_id
     return out
@@ -93,13 +95,8 @@ ATLASSIAN_CONNECT_CONFIG = ProviderConnectConfig(
     name="atlassian",
     authorize_url="https://auth.atlassian.com/authorize",
     token_url="https://auth.atlassian.com/oauth/token",
-    scopes=(
-        "read:jira-user read:jira-work write:jira-work manage:jira-project "
-        "read:content:confluence read:content-details:confluence "
-        "write:content:confluence read:space:confluence "
-        "read:space-details:confluence read:page:confluence "
-        "write:page:confluence offline_access"
-    ),
+    # Single source of truth: the granular scope list in atlassian.local_auth.
+    scopes=" ".join(ATLASSIAN_SCOPES),
     client_id_env="ATLASSIAN_CLIENT_ID",
     client_secret_env="ATLASSIAN_CLIENT_SECRET",
     post_exchange=_atlassian_post_exchange,
@@ -168,9 +165,7 @@ def _friendly_error(err: AtlassianError, context: str = "") -> str:
         )
     if code == "Forbidden":
         resource = context if context else "this resource"
-        return (
-            f"You don't have permission to access {resource}. " "Check your Atlassian permissions."
-        )
+        return f"You don't have permission to access {resource}. Check your Atlassian permissions."
     if code == "NotFound":
         resource = context if context else "The requested resource"
         return f"{resource} was not found. Check the identifier and your access permissions."
