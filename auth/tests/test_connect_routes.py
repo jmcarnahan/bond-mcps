@@ -20,6 +20,7 @@ from auth.connect_routes import (
     _finish_connect,
     _mint_ticket,
     _public_base,
+    _redirect_uri,
     _stash_pkce,
     _validate_return_url,
 )
@@ -105,6 +106,12 @@ class TestPublicBase:
         monkeypatch.delenv("BOND_MCPS_CONNECT_PUBLIC_URL", raising=False)
         monkeypatch.setenv("BOND_MCPS_PUBLIC_URL", "http://localhost:18003")
         assert _public_base(CFG) == "http://localhost:18003"
+
+    def test_redirect_uri_uses_canonical_connections_path(self, monkeypatch):
+        # The provider redirect_uri must be the already-registered
+        # /connections/<name>/callback path, NOT /connect/<name>/callback.
+        monkeypatch.setenv("BOND_MCPS_CONNECT_PUBLIC_URL", "http://localhost:8000")
+        assert _redirect_uri(CFG) == "http://localhost:8000/connections/atlassian/callback"
 
 
 # ---------------------------------------------------------------------------

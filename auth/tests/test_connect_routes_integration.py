@@ -112,3 +112,16 @@ class TestConnectRoutesLive:
         # must yield 400 (route ran), proving the route is not JWT-gated (not 401).
         resp = client.get("/connect/atlassian")
         assert resp.status_code == 400
+
+    def test_callback_is_registered_at_connections_path(self, client):
+        # The provider redirect lands at /connections/<name>/callback (the
+        # canonical, already-registered path), without a Bearer. Missing
+        # code/state -> 400 (route ran), proving the route exists here.
+        resp = client.get("/connections/atlassian/callback")
+        assert resp.status_code == 400
+
+    def test_old_connect_callback_path_is_gone(self, client):
+        # The old /connect/<name>/callback must no longer exist (that path was
+        # what forced provider re-registration).
+        resp = client.get("/connect/atlassian/callback")
+        assert resp.status_code == 404

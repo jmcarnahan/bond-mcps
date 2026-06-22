@@ -151,7 +151,7 @@ class TestRealRepoManifests:
         """
         found = {e["name"]: e for e in discover_mcps()}
         expected = {
-            "ms-graph": "http://localhost:18001/mcp",
+            "microsoft": "http://localhost:18001/mcp",
             "github": "http://localhost:18002/mcp",
             "atlassian": "http://localhost:18003/mcp",
             "databricks": "http://localhost:18004/mcp",

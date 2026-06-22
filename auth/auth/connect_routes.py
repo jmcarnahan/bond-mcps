@@ -12,11 +12,13 @@ Builds the connect surface from a ``ProviderConnectConfig``:
   provider's authorize URL with state bound to (user_key, code_verifier,
   return_url).
 
-* ``GET /connect/<name>/callback`` -- exchanges the provider's code for a
-  token, persists it into ``tokens.db`` keyed by the user_key, then 302s back
-  to ``return_url`` with ``?connection_success=<name>`` (or
-  ``?connection_error=<name>&error=...``). With no ``return_url`` (legacy CLI
-  flow) it renders a terminal "you can close this tab" page.
+* ``GET /connections/<name>/callback`` -- the provider OAuth redirect target.
+  Exchanges the code for a token, persists it into ``tokens.db`` keyed by the
+  user_key, then 302s back to ``return_url`` with ``?connection_success=<name>``
+  (or ``?connection_error=<name>&error=...``). With no ``return_url`` (legacy
+  CLI flow) it renders a terminal "you can close this tab" page. Note this is
+  ``/connections/`` (plural) — the canonical, already-registered redirect path
+  shared with the CLI flow — so delegating needs NO new provider registration.
 
 * ``GET /connect/<name>/status`` -- returns ``{connected, valid, scopes}`` for
   the authenticated user. ``connected`` = a token row exists; ``valid`` = the
@@ -136,7 +138,13 @@ def register_connect_routes(mcp, config: ProviderConnectConfig) -> None:
     async def _start(request: Request) -> Response:
         return await _start_connect(request, config)
 
-    @mcp.custom_route(f"{base}/callback", methods=["GET"])
+    # The provider OAuth callback lives at /connections/<name>/callback — the
+    # canonical, already-registered redirect path (the CLI flow + bond-ai use
+    # it too). Keeping it here means NO new provider-console registration when
+    # delegating. The other routes (ticket/start/status/delete) stay under
+    # /connect/<name> since they're server-to-server or internal and never
+    # registered with providers.
+    @mcp.custom_route(f"/connections/{config.name}/callback", methods=["GET"])
     async def _callback(request: Request) -> Response:
         return await _finish_connect(request, config)
 
@@ -552,7 +560,7 @@ def _redirect_uri(config: ProviderConnectConfig) -> str:
         raise RuntimeError(
             f"{ENV_CONNECT_PUBLIC_URL} or {config.public_url_env} must be set for /connect."
         )
-    return f"{base}/connect/{config.name}/callback"
+    return f"{base}/connections/{config.name}/callback"
 
 
 def _aware(value: datetime) -> datetime:
