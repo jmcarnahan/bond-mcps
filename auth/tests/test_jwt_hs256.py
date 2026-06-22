@@ -63,7 +63,7 @@ class TestHs256Verification:
         assert result.claims.get("sub") == "alice@example.com"
 
     def test_reject_wrong_secret(self):
-        assert _verify(_bond_token(secret="not-the-secret")) is None
+        assert _verify(_bond_token(secret="a-different-secret-also-at-least-32b")) is None
 
     def test_reject_wrong_issuer(self):
         assert _verify(_bond_token(iss="evil-issuer")) is None
