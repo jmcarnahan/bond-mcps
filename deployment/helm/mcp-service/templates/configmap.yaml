@@ -37,6 +37,9 @@ data:
   BOND_MCPS_PUBLIC_URL: {{ .Values.jwt.publicUrl | quote }}
   {{- end }}
   {{- end }}
+  {{- if .Values.discovery.json }}
+  BOND_MCPS_DISCOVERY_FILE: "/etc/bond-mcps/discovery.json"
+  {{- end }}
   {{- range $k, $v := .Values.env }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}

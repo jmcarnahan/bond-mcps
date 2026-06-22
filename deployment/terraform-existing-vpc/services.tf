@@ -79,6 +79,10 @@ module "service" {
   # Per-MCP public URL is the canonical hostname stitched together above.
   jwt_public_url = local.service_hostnames[each.key] != null ? "https://${local.service_hostnames[each.key]}" : ""
 
+  # Deployment discovery manifest — only the Authorization Server serves
+  # /connections/discovery in deployment, so only it gets the rendered file.
+  discovery_json = each.value.is_auth_server ? local.discovery_json : ""
+
   depends_on = [
     kubectl_manifest.cluster_secret_store, # ESO must be ready
     helm_release.alb_controller,           # so the ingress class resolves

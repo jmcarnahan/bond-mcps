@@ -209,3 +209,9 @@ variable "chart_path" {
   description = "Filesystem path to the mcp-service Helm chart (relative to this module)."
   default     = "../../../helm/mcp-service"
 }
+
+variable "discovery_json" {
+  type        = string
+  default     = ""
+  description = "MCP discovery manifest JSON. When set, the chart mounts it at /etc/bond-mcps/discovery.json and sets BOND_MCPS_DISCOVERY_FILE. Set only on the Authorization Server."
+}

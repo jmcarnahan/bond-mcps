@@ -79,6 +79,10 @@ locals {
       publicUrl = var.jwt_public_url
     }
 
+    discovery = {
+      json = var.discovery_json
+    }
+
     networkPolicy = {
       # Off by default; flip to true in production tfvars + ensure vpcCidr
       # is set so ALB → pod traffic is permitted.

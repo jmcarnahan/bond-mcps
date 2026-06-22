@@ -136,6 +136,13 @@ class TestDiscoverMcps:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _clear_discovery_env(monkeypatch):
+    """Keep filesystem/real-repo tests hermetic against ambient deploy env."""
+    monkeypatch.delenv("BOND_MCPS_DISCOVERY_FILE", raising=False)
+    monkeypatch.delenv("BOND_MCPS_MCPS_DIR", raising=False)
+
+
 class TestRealRepoManifests:
     def test_known_mcps_present(self):
         """Discovery against the real checkout returns the four shipped MCPs.
@@ -226,3 +233,104 @@ class TestDiscoveryRoute:
         _, port = server
         status, _ = _get(port, "/connections/nope")
         assert status == 404
+
+
+# ---------------------------------------------------------------------------
+# Deployment source: BOND_MCPS_DISCOVERY_FILE (deploy-time JSON manifest)
+# ---------------------------------------------------------------------------
+
+
+def _write_discovery_file(tmp_path, payload) -> str:
+    path = tmp_path / "discovery.json"
+    body = payload if isinstance(payload, str) else json.dumps(payload)
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+class TestDiscoveryFileSource:
+    def test_absolute_urls_used_verbatim(self, tmp_path, monkeypatch):
+        f = _write_discovery_file(
+            tmp_path,
+            {
+                "mcps": [
+                    {
+                        "name": "ms-graph",
+                        "display_name": "Microsoft",
+                        "url": "https://ms-graph.x/mcp",
+                    },
+                    {"name": "github", "url": "https://github.x/mcp"},
+                ]
+            },
+        )
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", f)
+        result = discover_mcps()
+        assert result == [
+            {"name": "github", "display_name": "github", "url": "https://github.x/mcp"},
+            {"name": "ms-graph", "display_name": "Microsoft", "url": "https://ms-graph.x/mcp"},
+        ]
+
+    def test_bare_list_accepted(self, tmp_path, monkeypatch):
+        f = _write_discovery_file(tmp_path, [{"name": "github", "url": "https://github.x/mcp"}])
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", f)
+        assert [e["name"] for e in discover_mcps()] == ["github"]
+
+    def test_port_form_in_file_uses_base_host(self, tmp_path, monkeypatch):
+        f = _write_discovery_file(tmp_path, {"mcps": [{"name": "github", "port": 18002}]})
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", f)
+        assert discover_mcps()[0]["url"] == "http://localhost:18002/mcp"
+
+    def test_malformed_entry_skipped(self, tmp_path, monkeypatch):
+        f = _write_discovery_file(
+            tmp_path,
+            {
+                "mcps": [
+                    {"display_name": "no name"},
+                    {"name": "github", "url": "https://github.x/mcp"},
+                ]
+            },
+        )
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", f)
+        assert [e["name"] for e in discover_mcps()] == ["github"]
+
+    def test_malformed_file_returns_empty(self, tmp_path, monkeypatch):
+        f = _write_discovery_file(tmp_path, "{not valid json")
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", f)
+        assert discover_mcps() == []
+
+    def test_missing_file_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", str(tmp_path / "nope.json"))
+        assert discover_mcps() == []
+
+    def test_explicit_mcps_dir_overrides_file_env(self, tmp_path, monkeypatch):
+        # An explicit mcps_dir arg wins over the ambient file env (test seam).
+        f = _write_discovery_file(
+            tmp_path, {"mcps": [{"name": "fromfile", "url": "https://x/mcp"}]}
+        )
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", f)
+        scan_dir = tmp_path / "scan"
+        _write_mcp(scan_dir, "github", {"name": "github", "port": 18002})
+        assert [e["name"] for e in discover_mcps(mcps_dir=scan_dir)] == ["github"]
+
+
+# ---------------------------------------------------------------------------
+# Authorization Server hosts /connections/discovery in deployment
+# ---------------------------------------------------------------------------
+
+
+class TestAuthServerDiscoveryRoute:
+    def test_as_serves_discovery_from_file(self, tmp_path, monkeypatch):
+        from starlette.testclient import TestClient
+
+        from auth.auth_server import build_app
+
+        f = _write_discovery_file(
+            tmp_path,
+            {"mcps": [{"name": "github", "display_name": "GitHub", "url": "https://github.x/mcp"}]},
+        )
+        monkeypatch.setenv("BOND_MCPS_DISCOVERY_FILE", f)
+        client = TestClient(build_app())
+        resp = client.get("/connections/discovery")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "mcps": [{"name": "github", "display_name": "GitHub", "url": "https://github.x/mcp"}]
+        }

@@ -2,31 +2,36 @@
 
 bond-ai (and other consumers) should not be hard-configured with the list of
 MCP servers and their endpoints. Instead they call a single unauthenticated
-REST endpoint (``GET /connections/discovery`` on the auth proxy) that returns
-the MCPs available here. Everything beyond the endpoint URL — tools, auth,
-capabilities — the consumer learns via the MCP protocol's ``initialize`` call.
+REST endpoint (``GET /connections/discovery``) that returns the MCPs available
+here. Everything beyond the endpoint URL — tools, auth, capabilities — the
+consumer learns via the MCP protocol's ``initialize`` call.
 
-Discovery is filesystem-based and dynamic: each MCP self-describes with a tiny
-``mcp.json`` in its own ``mcps/<name>/`` directory. Dropping in a new MCP
-directory (with an ``mcp.json``) makes it appear; removing the directory makes
-it disappear. No central registry to edit.
+Two data sources, resolved in priority order:
 
-``mcp.json`` schema::
+1. **Deployment** — ``BOND_MCPS_DISCOVERY_FILE`` points at a JSON manifest
+   authored at deploy time (rendered by Terraform/Helm, mounted via ConfigMap).
+   Its entries carry absolute ``url``s. This is "hard-coded at deploy time, but
+   dynamic": the operator/infra controls the file, no code change to add/remove
+   an MCP. Served by the always-on Authorization Server in deployment.
+
+2. **Local dev** — scan ``mcps/*/mcp.json``. Each MCP self-describes with a tiny
+   manifest in its own directory; dropping a directory in makes it appear,
+   removing it makes it disappear. No central registry to edit.
+
+Manifest entry schema (both sources share it)::
 
     {
-      "name": "ms-graph",         # required — stable identifier
-      "display_name": "Microsoft", # optional — human label (defaults to name)
-      "port": 18001,               # required — local HTTP port
-      "path": "/mcp"               # optional — mount path (defaults to /mcp)
+      "name": "ms-graph",          # required — stable identifier
+      "display_name": "Microsoft",  # optional — human label (defaults to name)
+      "url": "https://ms-graph.x/mcp",  # absolute URL (deployment); OR:
+      "port": 18001,                # local HTTP port (-> http://localhost:<port>)
+      "path": "/mcp"                # optional — mount path for the port form
     }
 
-The presence of ``mcp.json`` is the opt-in marker: directories without it are
-skipped, so non-MCP directories need no special-casing.
-
-Scope: this is a local / dev-checkout feature. It needs the ``mcps/`` directory
-present on disk, which a deployed/installed copy of the ``auth`` package does
-not have — in that case discovery returns an empty list rather than scanning
-somewhere meaningless.
+An entry provides EITHER ``url`` (absolute, used verbatim) OR ``port`` (+ optional
+``path``, built against ``base_host`` which defaults to ``http://localhost``).
+In the filesystem source, the presence of ``mcp.json`` is the opt-in marker, so
+non-MCP directories are skipped. When no source resolves, discovery returns ``[]``.
 """
 
 from __future__ import annotations
@@ -41,6 +46,10 @@ logger = logging.getLogger(__name__)
 MANIFEST_NAME = "mcp.json"
 DEFAULT_PATH = "/mcp"
 DEFAULT_BASE_HOST = "http://localhost"
+
+# Deployment source: a JSON manifest file authored at deploy time. Takes
+# precedence over the filesystem scan when set.
+ENV_DISCOVERY_FILE = "BOND_MCPS_DISCOVERY_FILE"
 
 # Env override pointing directly at the directory that contains the per-MCP
 # subdirectories. Primarily a testing seam, but also lets a non-standard
@@ -75,67 +84,73 @@ def _mcps_dir() -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
-def _load_manifest(manifest_path: Path, base_host: str) -> dict | None:
-    """Parse one ``mcp.json`` into a discovery entry, or ``None`` if invalid.
+def _entry_from_dict(data: dict, base_host: str, *, source: str) -> dict | None:
+    """Build a ``{name, display_name, url}`` entry from a manifest dict.
 
-    Invalid manifests are logged and skipped so a single bad file never breaks
-    discovery for every other MCP.
+    Accepts either an absolute ``url`` (used verbatim — deployment) or a
+    ``port`` (+ optional ``path``) built against ``base_host`` (local dev).
+    Invalid entries are logged and skipped so one bad entry never breaks the
+    rest.
     """
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning("Skipping unreadable MCP manifest %s: %s", manifest_path, exc)
-        return None
-
     if not isinstance(data, dict):
-        logger.warning("Skipping MCP manifest %s: not a JSON object", manifest_path)
+        logger.warning("Skipping MCP entry from %s: not a JSON object", source)
         return None
 
     name = data.get("name")
-    port = data.get("port")
     if not isinstance(name, str) or not name.strip():
-        logger.warning("Skipping MCP manifest %s: missing/invalid 'name'", manifest_path)
+        logger.warning("Skipping MCP entry from %s: missing/invalid 'name'", source)
         return None
-    if not isinstance(port, int) or isinstance(port, bool):
-        logger.warning("Skipping MCP manifest %s: missing/invalid 'port'", manifest_path)
-        return None
-
     name = name.strip()
-    path = data.get("path") or DEFAULT_PATH
-    if not isinstance(path, str) or not path.startswith("/"):
-        logger.warning("Skipping MCP manifest %s: invalid 'path'", manifest_path)
-        return None
+
+    url = data.get("url")
+    if isinstance(url, str) and url.strip():
+        resolved_url = url.strip()
+    else:
+        port = data.get("port")
+        if not isinstance(port, int) or isinstance(port, bool):
+            logger.warning("Skipping MCP entry %r from %s: needs 'url' or 'port'", name, source)
+            return None
+        path = data.get("path") or DEFAULT_PATH
+        if not isinstance(path, str) or not path.startswith("/"):
+            logger.warning("Skipping MCP entry %r from %s: invalid 'path'", name, source)
+            return None
+        resolved_url = f"{base_host}:{port}{path}"
 
     display_name = data.get("display_name")
     if not isinstance(display_name, str) or not display_name.strip():
         display_name = name
 
-    return {
-        "name": name,
-        "display_name": display_name,
-        "url": f"{base_host}:{port}{path}",
-    }
+    return {"name": name, "display_name": display_name, "url": resolved_url}
 
 
-def discover_mcps(mcps_dir: Path | None = None, base_host: str | None = None) -> list[dict]:
-    """Return the MCP servers available in this project.
+def _discover_from_file(path: Path, base_host: str) -> list[dict]:
+    """Load discovery entries from a deploy-time JSON manifest file.
 
-    Args:
-        mcps_dir: Directory containing per-MCP subdirectories. Defaults to the
-            resolved ``mcps/`` directory (see :func:`_mcps_dir`).
-        base_host: Scheme+host the endpoint URLs are built from. Defaults to
-            ``http://localhost`` (local dev).
-
-    Returns:
-        A list of ``{"name", "display_name", "url"}`` dicts, sorted by name.
-        Empty if the ``mcps/`` directory can't be found or contains no valid
-        manifests.
+    Accepts either ``{"mcps": [...]}`` or a bare list. A missing/unreadable/
+    malformed file yields ``[]`` (fail soft — discovery should never 500 the
+    whole endpoint over a bad file).
     """
-    base_host = (base_host or DEFAULT_BASE_HOST).rstrip("/")
-    directory = mcps_dir if mcps_dir is not None else _mcps_dir()
-    if directory is None or not directory.is_dir():
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Discovery file %s unreadable/invalid: %s", path, exc)
         return []
 
+    items = raw.get("mcps") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        logger.warning("Discovery file %s: expected a list or {'mcps': [...]}", path)
+        return []
+
+    entries: list[dict] = []
+    for item in items:
+        entry = _entry_from_dict(item, base_host, source=str(path))
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _discover_from_dir(directory: Path, base_host: str) -> list[dict]:
+    """Scan ``<directory>/*/mcp.json`` for per-MCP manifests (local dev)."""
     entries: list[dict] = []
     for child in directory.iterdir():
         if not child.is_dir() or child.name.startswith("."):
@@ -143,9 +158,50 @@ def discover_mcps(mcps_dir: Path | None = None, base_host: str | None = None) ->
         manifest_path = child / MANIFEST_NAME
         if not manifest_path.is_file():
             continue
-        entry = _load_manifest(manifest_path, base_host)
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("Skipping unreadable MCP manifest %s: %s", manifest_path, exc)
+            continue
+        entry = _entry_from_dict(data, base_host, source=str(manifest_path))
         if entry is not None:
             entries.append(entry)
+    return entries
+
+
+def discover_mcps(mcps_dir: Path | None = None, base_host: str | None = None) -> list[dict]:
+    """Return the MCP servers available in this project.
+
+    Source precedence:
+      1. An explicit ``mcps_dir`` argument (test/override seam) — scanned directly.
+      2. ``BOND_MCPS_DISCOVERY_FILE`` (deploy-time JSON manifest), if set.
+      3. The resolved ``mcps/`` directory scan (local dev).
+      4. ``[]``.
+
+    Args:
+        mcps_dir: Scan this directory directly, bypassing the file source. When
+            ``None``, the file source then the resolved ``mcps/`` dir are tried.
+        base_host: Scheme+host that ``port``-form entries are built against.
+            Defaults to ``http://localhost``. Absolute-``url`` entries ignore it.
+
+    Returns:
+        A list of ``{"name", "display_name", "url"}`` dicts, sorted by name.
+    """
+    base_host = (base_host or DEFAULT_BASE_HOST).rstrip("/")
+
+    if mcps_dir is not None:
+        entries = _discover_from_dir(mcps_dir, base_host) if mcps_dir.is_dir() else []
+    else:
+        discovery_file = os.environ.get(ENV_DISCOVERY_FILE, "").strip()
+        if discovery_file:
+            entries = _discover_from_file(Path(discovery_file), base_host)
+        else:
+            directory = _mcps_dir()
+            entries = (
+                _discover_from_dir(directory, base_host)
+                if directory is not None and directory.is_dir()
+                else []
+            )
 
     entries.sort(key=lambda e: e["name"])
     return entries

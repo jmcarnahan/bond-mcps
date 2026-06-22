@@ -41,6 +41,17 @@ resources:
 # guarantee in auth/auth/startup.py.
 env: {}
 
+# === MCP discovery manifest (set ONLY on the Authorization Server) ===
+# In deployment there is no on-disk mcps/ directory to scan, so the discovery
+# endpoint (GET /connections/discovery) reads a JSON manifest authored at
+# deploy time. When `json` is non-empty, the chart renders it into a ConfigMap,
+# mounts it read-only at /etc/bond-mcps/discovery.json, and sets
+# BOND_MCPS_DISCOVERY_FILE so auth.discovery.discover_mcps() picks it up.
+# Terraform renders this from the enabled MCP services + base_domain.
+# Shape: {"mcps":[{"name","display_name","url":"https://<host>/mcp"}, ...]}
+discovery:
+  json: ""
+
 # === BOND_MCPS_USER_ID — multi-tenancy boundary ===
 # Owner identifier for cached tokens in the encrypted DB.
 # REQUIRED on Postgres deployments — empty value crashes pods at startup

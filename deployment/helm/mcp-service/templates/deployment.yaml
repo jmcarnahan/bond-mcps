@@ -63,6 +63,12 @@ spec:
               protocol: TCP
           envFrom:
             {{- include "mcp-service.envFrom" . | nindent 12 }}
+          {{- if .Values.discovery.json }}
+          volumeMounts:
+            - name: discovery
+              mountPath: /etc/bond-mcps
+              readOnly: true
+          {{- end }}
           {{- /* Liveness probe: http or tcp per .Values.probes.liveness.type */}}
           livenessProbe:
             {{- if eq .Values.probes.liveness.type "http" }}
@@ -88,6 +94,12 @@ spec:
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.discovery.json }}
+      volumes:
+        - name: discovery
+          configMap:
+            name: {{ include "mcp-service.fullname" . }}-discovery
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

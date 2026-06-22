@@ -1,0 +1,19 @@
+{{- /*
+  Deploy-time MCP discovery manifest. Rendered only on the Authorization
+  Server (the always-on component that hosts GET /connections/discovery in
+  deployment, since the auth proxy is usually off in JWT mode). Mounted as a
+  file and read by auth.discovery.discover_mcps() via BOND_MCPS_DISCOVERY_FILE.
+  Kept in a dedicated ConfigMap (NOT the envFrom -config map) so the JSON is a
+  file, never an env var.
+*/ -}}
+{{- if .Values.discovery.json }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mcp-service.fullname" . }}-discovery
+  labels:
+    {{- include "mcp-service.labels" . | nindent 4 }}
+data:
+  discovery.json: |-
+    {{- .Values.discovery.json | nindent 4 }}
+{{- end }}
