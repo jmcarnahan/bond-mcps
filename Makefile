@@ -10,8 +10,9 @@
 # auth proxy). Auth proxy port flows via BOND_AUTH_PROXY_PORT which both the
 # proxy server and the MCP-side OAuthProxyClient read.
 
-.PHONY: install dev dev-combined dev-multitenant stop logs status status-combined \
+.PHONY: install dev dev-combined dev-combined-jwt dev-multitenant stop logs status status-combined \
         check-ports check-ports-combined check-ports-mt \
+        _require-jwt-secret _start-mcp-deleg \
         claude-add claude-remove \
         login login-microsoft login-github login-atlassian login-databricks \
         logout logout-microsoft logout-github logout-atlassian logout-databricks \
@@ -25,6 +26,15 @@
 
 LOG_DIR := tmp/logs
 TOKEN_DIR := $(HOME)/.bond_mcps
+
+# Optional local dev secrets/overrides (gitignored). Set BOND_MCPS_JWT_SECRET
+# here ONCE (= bond-ai JWT_SECRET_KEY) instead of passing it on every
+# `make dev-combined-jwt`. Parsed by make, so keep entries simple KEY=value
+# (no surrounding quotes / no '#' or '$' in the value). `export` so the
+# per-MCP sub-make (_start-mcp-deleg) inherits it. A command-line override
+# (`make ... BOND_MCPS_JWT_SECRET=x`) still wins; CI without a .env is unaffected.
+-include .env
+export BOND_MCPS_JWT_SECRET
 
 AUTH_PORT       ?= 8000
 AS_PORT         ?= 8001
@@ -171,6 +181,17 @@ _wait-mcp-binds:
 COMBINED_AUTH_PORT  ?= 18000
 COMBINED_PUBLIC_URL ?= http://localhost:8000
 
+# Delegation (HS256) mode — used by dev-combined-jwt. bond-ai issues the Bond
+# JWT; bond-mcps validates it with the SHARED SECRET (= bond-ai JWT_SECRET_KEY),
+# which also un-dormants the per-MCP /connect routes. Provide the secret via env:
+#   BOND_MCPS_JWT_SECRET=<bond-ai JWT_SECRET_KEY> make dev-combined-jwt
+# Provider client creds (ATLASSIAN_CLIENT_ID/SECRET, GITHUB_CLIENT_ID/SECRET, …)
+# must also be present (each MCP's .env or exported) for token exchange.
+BOND_MCPS_JWT_SECRET ?=
+DELEG_JWT_ISSUER     ?= bond-ai
+DELEG_JWT_AUDIENCE   ?= mcp-server
+DELEG_RETURN_HOSTS   ?= localhost
+
 # Combined-mode variant of `dev`. Binds the auth proxy to :$(COMBINED_AUTH_PORT)
 # instead of :$(AUTH_PORT) and advertises BOND_AUTH_PROXY_PUBLIC_URL so the
 # MCPs' OAuth redirect URIs go through the bond-ai nginx front door.
@@ -204,6 +225,50 @@ dev-combined: check-ports-combined check-mcp-deps
 	   nohup poetry run fastmcp run databricks_mcp.py --transport streamable-http --port $(DATABRICKS_PORT) ) > $(CURDIR)/$(LOG_DIR)/databricks.log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-mcp-binds-combined
 	@$(MAKE) --no-print-directory status-combined
+
+# Combined mode + HS256 delegation: MCPs validate bond-ai's Bond JWT (shared
+# secret) and expose the /connect/<name> surface (ticket/start/callback/status/
+# disconnect) that bond-ai's Connect UI drives. The auth proxy still runs to
+# serve /connections/discovery locally. nginx (in bond-ai) routes
+# /connect/<provider>/* to the per-MCP ports; the connect_url + provider
+# redirect_uri use the front door via BOND_MCPS_CONNECT_PUBLIC_URL.
+dev-combined-jwt: check-ports-combined check-mcp-deps _require-jwt-secret
+	@mkdir -p $(LOG_DIR)
+	@echo "Starting auth proxy on :$(COMBINED_AUTH_PORT) (PUBLIC_URL=$(COMBINED_PUBLIC_URL))..."
+	@( cd auth && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   nohup poetry run python -m auth ) > $(CURDIR)/$(LOG_DIR)/auth.log 2>&1 &
+	@sleep 1
+	@$(MAKE) --no-print-directory _start-mcp-deleg MCP=microsoft  ENTRY=ms_graph_mcp.py  PORT=$(MS_GRAPH_PORT)
+	@$(MAKE) --no-print-directory _start-mcp-deleg MCP=github     ENTRY=github_mcp.py    PORT=$(GITHUB_PORT)
+	@$(MAKE) --no-print-directory _start-mcp-deleg MCP=atlassian  ENTRY=atlassian_mcp.py PORT=$(ATLASSIAN_PORT)
+	@$(MAKE) --no-print-directory _start-mcp-deleg MCP=databricks ENTRY=databricks_mcp.py PORT=$(DATABRICKS_PORT)
+	@$(MAKE) --no-print-directory _wait-mcp-binds-combined
+	@$(MAKE) --no-print-directory status-combined
+
+_require-jwt-secret:
+	@if [ -z "$(BOND_MCPS_JWT_SECRET)" ]; then \
+	  echo "BOND_MCPS_JWT_SECRET is required for dev-combined-jwt (= bond-ai JWT_SECRET_KEY)." >&2; \
+	  echo "Run: BOND_MCPS_JWT_SECRET=<secret> make dev-combined-jwt" >&2; \
+	  exit 1; \
+	fi
+
+_start-mcp-deleg:
+	@echo "Starting $(MCP) MCP on :$(PORT) (HS256 delegation)..."
+	@( cd mcps/$(MCP) && \
+	   BOND_AUTH_PROXY_PORT=$(COMBINED_AUTH_PORT) \
+	   BOND_AUTH_PROXY_PUBLIC_URL=$(COMBINED_PUBLIC_URL) \
+	   BOND_MCPS_JWT_PUBLIC_KEY='$(BOND_MCPS_JWT_SECRET)' \
+	   BOND_MCPS_JWT_ALGORITHM=HS256 \
+	   BOND_MCPS_JWT_ISSUER='$(DELEG_JWT_ISSUER)' \
+	   BOND_MCPS_JWT_AUDIENCE='$(DELEG_JWT_AUDIENCE)' \
+	   BOND_MCPS_AS_BASE_URL='$(COMBINED_PUBLIC_URL)' \
+	   BOND_MCPS_PUBLIC_URL=http://localhost:$(PORT) \
+	   BOND_MCPS_CONNECT_PUBLIC_URL='$(COMBINED_PUBLIC_URL)' \
+	   BOND_MCPS_ALLOWED_RETURN_HOSTS='$(DELEG_RETURN_HOSTS)' \
+	   nohup poetry run fastmcp run $(ENTRY) --transport streamable-http --port $(PORT) ) \
+	     > $(CURDIR)/$(LOG_DIR)/$(MCP).log 2>&1 &
 
 # Poll bind for each combined-mode service.
 _wait-mcp-binds-combined:
@@ -241,7 +306,7 @@ status-combined:
 # split-mode auth proxy (which DOES run as <repo>/auth/.venv/bin/python).
 # nginx is bond-ai's to stop ("make nginx-stop" there).
 stop:
-	@pids_to_kill=""; \
+	@pids_to_kill=""; ports_to_wait=""; \
 	for entry in "auth:$(AUTH_PORT)" "auth-combined:$(COMBINED_AUTH_PORT)" "as:$(AS_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
 	  name=$${entry%%:*}; port=$${entry##*:}; \
 	  pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null | head -1); \
@@ -249,7 +314,7 @@ stop:
 	    cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
 	    case "$$cmd" in \
 	      *"$(CURDIR)"*) echo "Stopping $$name :$$port (pid $$pid)"; \
-	                     pids_to_kill="$$pids_to_kill $$pid" ;; \
+	                     pids_to_kill="$$pids_to_kill $$pid"; ports_to_wait="$$ports_to_wait $$port" ;; \
 	      *) echo "  [skip] $$name :$$port held by a foreign process (pid $$pid) — not killing it." >&2; \
 	         echo "         If that's the combined-mode nginx front door, stop it with 'make nginx-stop' in bond-ai." >&2 ;; \
 	    esac; \
@@ -257,8 +322,16 @@ stop:
 	done; \
 	for pid in $$pids_to_kill; do \
 	  pgid=$$(ps -o pgid= -p $$pid 2>/dev/null | tr -d ' '); \
-	  if [ -n "$$pgid" ]; then kill -- -$$pgid 2>/dev/null; fi; \
-	  kill $$pid 2>/dev/null || true; \
+	  if [ -n "$$pgid" ]; then kill -TERM -- -$$pgid 2>/dev/null; fi; \
+	  kill -TERM $$pid 2>/dev/null || true; \
+	done; \
+	for port in $$ports_to_wait; do \
+	  for i in 1 2 3 4 5 6 7 8 9 10; do \
+	    rem=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null); \
+	    [ -z "$$rem" ] && break; \
+	    sleep 0.5; \
+	    for pid in $$rem; do kill -KILL $$pid 2>/dev/null || true; done; \
+	  done; \
 	done
 
 status:

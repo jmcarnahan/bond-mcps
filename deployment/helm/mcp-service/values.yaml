@@ -41,6 +41,17 @@ resources:
 # guarantee in auth/auth/startup.py.
 env: {}
 
+# === MCP discovery manifest (set ONLY on the Authorization Server) ===
+# In deployment there is no on-disk mcps/ directory to scan, so the discovery
+# endpoint (GET /connections/discovery) reads a JSON manifest authored at
+# deploy time. When `json` is non-empty, the chart renders it into a ConfigMap,
+# mounts it read-only at /etc/bond-mcps/discovery.json, and sets
+# BOND_MCPS_DISCOVERY_FILE so auth.discovery.discover_mcps() picks it up.
+# Terraform renders this from the enabled MCP services + base_domain.
+# Shape: {"mcps":[{"name","display_name","url":"https://<host>/mcp"}, ...]}
+discovery:
+  json: ""
+
 # === BOND_MCPS_USER_ID — multi-tenancy boundary ===
 # Owner identifier for cached tokens in the encrypted DB.
 # REQUIRED on Postgres deployments — empty value crashes pods at startup
@@ -110,16 +121,32 @@ secrets:
 # instead — the SM secret should contain {"BOND_MCPS_JWT_PUBLIC_KEY": "<PEM
 # or HS256 shared secret>"}. Exactly one of jwksUri or publicKey must be
 # configured when `enabled: true`.
+#
+# ⚠️ ONE VERIFIER, ONE TOKEN POPULATION. A pod validates tokens with exactly
+# one key source (jwksUri OR publicKey) and one algorithm. The two known
+# callers use DIFFERENT contracts:
+#   * Claude Code (via the bond-mcps AS): RS256/JWKS,
+#     issuer = AS base URL, audience = <publicUrl>/mcp (auto-accepted).
+#   * bond-ai delegation: HS256 shared secret (= bond-ai's JWT_SECRET_KEY),
+#     issuer = "bond-ai", audience = "mcp-server".
+# The current design cannot serve BOTH from one pod — configuring for one
+# 401s the other. If a deployment needs both, that requires a composite
+# verifier (or bond-ai obtaining tokens from the AS) — an open design
+# decision; see bond-ai docs/mcp-discovery-delegation-architecture.md §12.
 jwt:
   enabled: false
   jwksUri: ""                  # e.g. https://auth.mcps.example.com/.well-known/jwks.json
   publicKey:
     secretsManagerName: ""     # SM secret with {"BOND_MCPS_JWT_PUBLIC_KEY": "<PEM>"}
+  # Claude Code/AS mode: the AS base URL. bond-ai delegation mode: "bond-ai".
   issuer: ""                   # e.g. https://auth.mcps.example.com  (matches AS base URL)
-  # OPTIONAL. The verifier auto-accepts `<publicUrl>/mcp` (the canonical
-  # PRM resource URI Claude Code sends per RFC 8707). Set this only if
-  # another caller emits a non-URI friendly audience — the auto-default
-  # is merged in, so both will work.
+  # OPTIONAL for Claude Code/AS mode — the verifier auto-accepts
+  # `<publicUrl>/mcp` (the canonical PRM resource URI per RFC 8707).
+  # REQUIRED ("mcp-server") for bond-ai delegation mode — bond-ai's tokens
+  # carry aud ["bond-ai-api","mcp-server"] (forwarded sessions) or
+  # ["mcp-server"] (server-side mints), neither of which matches the
+  # auto-default. The auto-default is merged in, so setting this never
+  # breaks Claude Code's audience — the key/issuer above still do (see ⚠️).
   audience: ""
   algorithm: "RS256"
   subClaim: "sub"

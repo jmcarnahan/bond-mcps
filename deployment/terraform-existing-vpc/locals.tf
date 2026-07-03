@@ -45,6 +45,22 @@ locals {
   auth_server_key      = one([for k, v in var.services : k if v.is_auth_server])
   auth_server_hostname = local.auth_server_key != null ? local.service_hostnames[local.auth_server_key] : null
 
+  # MCP discovery manifest served by the Authorization Server in deployment.
+  # The on-disk mcps/ scan only exists in a dev checkout, so deployed discovery
+  # reads this rendered manifest (mounted as a file, see modules/service +
+  # the chart's discovery ConfigMap). Includes the enabled MCP services only
+  # (excludes the AS and the auth proxy). name/display_name use hostname_prefix
+  # so they match the local mcps/<name>/mcp.json identifiers bond-ai expects.
+  discovery_mcps = [
+    for k, v in local.enabled_services : {
+      name         = v.hostname_prefix
+      display_name = v.hostname_prefix
+      url          = "https://${local.service_hostnames[k]}/mcp"
+    }
+    if !v.is_auth_server && !v.is_auth_proxy
+  ]
+  discovery_json = jsonencode({ mcps = local.discovery_mcps })
+
   # ============================================================
   # Secrets Manager naming
   # ============================================================

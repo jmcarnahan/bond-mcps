@@ -98,6 +98,7 @@ def build_app() -> Starlette:
             ),
             Route("/oauth/token", oauth_token, methods=["POST"]),
             Route("/oauth/register", oauth_register, methods=["POST"]),
+            Route("/connections/discovery", connections_discovery, methods=["GET"]),
         ]
     )
     return app
@@ -157,6 +158,18 @@ async def authorization_server_metadata(_: Request) -> JSONResponse:
 
 async def jwks(_: Request) -> JSONResponse:
     return JSONResponse(build_jwks_document())
+
+
+async def connections_discovery(_: Request) -> JSONResponse:
+    """Unauthenticated: list the MCP servers available in this deployment.
+
+    Mirrors the auth proxy's ``/connections/discovery`` (the always-on home in
+    deployment, where the proxy is usually off). Sources the MCP set from
+    ``BOND_MCPS_DISCOVERY_FILE`` in deployment. See ``auth.discovery``.
+    """
+    from auth.discovery import discover_mcps
+
+    return JSONResponse({"mcps": discover_mcps()})
 
 
 # ---------------------------------------------------------------------------
