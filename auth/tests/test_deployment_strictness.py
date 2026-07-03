@@ -215,6 +215,35 @@ def test_doctor_passes_when_sslrootcert_file_exists(monkeypatch, tmp_path, capsy
         reset_for_tests()
 
 
+# ---------- token-exchange Cognito passthrough fail-closed ----------
+
+
+def test_cognito_passthrough_refused_on_postgres(monkeypatch):
+    """No Cognito pool + Postgres DB must NOT fall back to sub=email."""
+    from auth.auth_server import cognito_lookup
+
+    cognito_lookup.reset_cache_for_tests()
+    monkeypatch.delenv("BOND_MCPS_AS_COGNITO_USER_POOL_ID", raising=False)
+    monkeypatch.setenv("BOND_MCPS_DB_URL", "postgresql://u:p@h:5432/d?sslmode=require")
+    try:
+        assert cognito_lookup.resolve_cognito_sub("alice@example.com") is None
+    finally:
+        cognito_lookup.reset_cache_for_tests()
+
+
+def test_cognito_passthrough_allowed_on_sqlite(monkeypatch):
+    """No Cognito pool + SQLite dev returns the email as the subject."""
+    from auth.auth_server import cognito_lookup
+
+    cognito_lookup.reset_cache_for_tests()
+    monkeypatch.delenv("BOND_MCPS_AS_COGNITO_USER_POOL_ID", raising=False)
+    monkeypatch.setenv("BOND_MCPS_DB_URL", "sqlite:///./tokens.db")
+    try:
+        assert cognito_lookup.resolve_cognito_sub("alice@example.com") == "alice@example.com"
+    finally:
+        cognito_lookup.reset_cache_for_tests()
+
+
 # ---------- F3 doctor + user_key for Postgres ----------
 
 
