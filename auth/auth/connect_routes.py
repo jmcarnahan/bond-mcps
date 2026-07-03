@@ -130,6 +130,22 @@ def register_connect_routes(mcp, config: ProviderConnectConfig) -> None:
         logger.debug("JWT mode off; skipping /connect/%s routes.", config.name)
         return
 
+    # Loud misconfiguration guard: without the front-door origin, _redirect_uri
+    # falls back to this MCP's own BOND_MCPS_PUBLIC_URL, producing a per-MCP
+    # redirect_uri that no provider console has registered. Nothing fails
+    # server-side — the provider rejects the redirect at authorize time and the
+    # user sees an opaque provider error. Warn at startup, where operators look.
+    if not os.environ.get(ENV_CONNECT_PUBLIC_URL, "").strip():
+        logger.warning(
+            "%s is not set; /connect/%s will build provider redirect_uris from "
+            "%s (this MCP's own origin), which is almost certainly NOT a "
+            "registered OAuth callback. Set %s to the front-door origin.",
+            ENV_CONNECT_PUBLIC_URL,
+            config.name,
+            config.public_url_env,
+            ENV_CONNECT_PUBLIC_URL,
+        )
+
     base = f"/connect/{config.name}"
 
     @mcp.custom_route(f"{base}/ticket", methods=["POST"])

@@ -106,6 +106,22 @@ class TestConnectRoutesLive:
         bad = _token(secret="wrong-secret-wrong-secret-wrong-secret")
         assert client.get("/connect/atlassian/status", headers=_bearer(bad)).status_code == 401
 
+    def test_narrow_audience_token_accepted(self, client):
+        # bond-ai's SERVER-SIDE mint sends aud=["mcp-server"] only (no
+        # "bond-ai-api" session audience — deliberately not a bond-ai API
+        # token). The verifier's expected-audience list merges
+        # BOND_MCPS_JWT_AUDIENCE with <PUBLIC_URL>/mcp, and fastmcp matches on
+        # any intersection, so this narrow shape must be accepted too.
+        narrow = _token(aud=["mcp-server"])
+        resp = client.get("/connect/atlassian/status", headers=_bearer(narrow))
+        assert resp.status_code == 200
+
+    def test_wrong_audience_token_rejected(self, client):
+        # ...and a token whose aud matches NEITHER the configured audience nor
+        # <PUBLIC_URL>/mcp must be rejected (proves the check is real).
+        wrong = _token(aud=["some-other-service"])
+        assert client.get("/connect/atlassian/status", headers=_bearer(wrong)).status_code == 401
+
     def test_disconnect_with_valid_bearer(self, client):
         TokenRepository().save_token(USER, "atlassian", {"access_token": "t"})
         resp = client.request("DELETE", "/connect/atlassian", headers=_bearer(_token()))
