@@ -23,6 +23,7 @@ from starlette.routing import Route
 from auth import log_discipline
 from auth.auth_server import clients as client_registry
 from auth.auth_server import codes as code_store
+from auth.auth_server import token_exchange
 from auth.auth_server.keys import build_jwks_document, load_signing_key
 from auth.auth_server.upstream import (
     UpstreamAuthError,
@@ -140,6 +141,12 @@ async def healthz(_: Request) -> JSONResponse:
 
 async def authorization_server_metadata(_: Request) -> JSONResponse:
     base = _base_url()
+    grant_types = ["authorization_code", "refresh_token"]
+    # The delegated token-exchange grant is advertised only when it's wired
+    # up (shared secret set); otherwise the endpoint rejects it as
+    # unsupported and it stays invisible to clients.
+    if token_exchange.is_enabled():
+        grant_types.append(token_exchange.GRANT_TOKEN_EXCHANGE)
     return JSONResponse(
         {
             "issuer": base,
@@ -148,7 +155,7 @@ async def authorization_server_metadata(_: Request) -> JSONResponse:
             "registration_endpoint": f"{base}/oauth/register",
             "jwks_uri": f"{base}/.well-known/jwks.json",
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "grant_types_supported": grant_types,
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": ["openid", "email", "profile"],
@@ -324,6 +331,8 @@ async def oauth_token(request: Request) -> Response:
         return _handle_code_grant(form)
     if grant_type == "refresh_token":
         return _handle_refresh_grant(form)
+    if grant_type == token_exchange.GRANT_TOKEN_EXCHANGE:
+        return token_exchange.handle_token_exchange(form)
     return JSONResponse(
         {
             "error": "unsupported_grant_type",
@@ -492,16 +501,18 @@ def _sign_access_token(
     client_id: str,
     resource: str | None,
     scope: str | None,
+    ttl_seconds: int | None = None,
 ) -> str:
     signing = load_signing_key()
     now = int(time.time())
+    ttl = ttl_seconds if ttl_seconds is not None else _access_token_ttl_seconds()
     payload = {
         "iss": _base_url(),
         "sub": user_key,
         "aud": resource or "bond-mcps",
         "client_id": client_id,
         "iat": now,
-        "exp": now + _access_token_ttl_seconds(),
+        "exp": now + ttl,
         "jti": str(uuid.uuid4()),
     }
     if email:

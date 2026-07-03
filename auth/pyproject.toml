@@ -23,6 +23,10 @@ starlette = ">=0.40,<1.0"
 uvicorn = ">=0.30,<1.0"
 httpx = ">=0.27,<1.0"
 python-multipart = ">=0.0.9,<1.0"
+# Cognito ListUsers for the token-exchange grant's email → sub resolution.
+# Imported lazily (auth_server/cognito_lookup.py) so laptop dev without a
+# user pool configured never needs it installed.
+boto3 = ">=1.34,<2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"
