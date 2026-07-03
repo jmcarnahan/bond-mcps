@@ -27,6 +27,15 @@
 LOG_DIR := tmp/logs
 TOKEN_DIR := $(HOME)/.bond_mcps
 
+# Optional local dev secrets/overrides (gitignored). Set BOND_MCPS_JWT_SECRET
+# here ONCE (= bond-ai JWT_SECRET_KEY) instead of passing it on every
+# `make dev-combined-jwt`. Parsed by make, so keep entries simple KEY=value
+# (no surrounding quotes / no '#' or '$' in the value). `export` so the
+# per-MCP sub-make (_start-mcp-deleg) inherits it. A command-line override
+# (`make ... BOND_MCPS_JWT_SECRET=x`) still wins; CI without a .env is unaffected.
+-include .env
+export BOND_MCPS_JWT_SECRET
+
 AUTH_PORT       ?= 8000
 AS_PORT         ?= 8001
 MS_GRAPH_PORT   ?= 18001
@@ -297,7 +306,7 @@ status-combined:
 # split-mode auth proxy (which DOES run as <repo>/auth/.venv/bin/python).
 # nginx is bond-ai's to stop ("make nginx-stop" there).
 stop:
-	@pids_to_kill=""; \
+	@pids_to_kill=""; ports_to_wait=""; \
 	for entry in "auth:$(AUTH_PORT)" "auth-combined:$(COMBINED_AUTH_PORT)" "as:$(AS_PORT)" "microsoft:$(MS_GRAPH_PORT)" "github:$(GITHUB_PORT)" "atlassian:$(ATLASSIAN_PORT)" "databricks:$(DATABRICKS_PORT)"; do \
 	  name=$${entry%%:*}; port=$${entry##*:}; \
 	  pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null | head -1); \
@@ -305,7 +314,7 @@ stop:
 	    cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
 	    case "$$cmd" in \
 	      *"$(CURDIR)"*) echo "Stopping $$name :$$port (pid $$pid)"; \
-	                     pids_to_kill="$$pids_to_kill $$pid" ;; \
+	                     pids_to_kill="$$pids_to_kill $$pid"; ports_to_wait="$$ports_to_wait $$port" ;; \
 	      *) echo "  [skip] $$name :$$port held by a foreign process (pid $$pid) — not killing it." >&2; \
 	         echo "         If that's the combined-mode nginx front door, stop it with 'make nginx-stop' in bond-ai." >&2 ;; \
 	    esac; \
@@ -313,8 +322,16 @@ stop:
 	done; \
 	for pid in $$pids_to_kill; do \
 	  pgid=$$(ps -o pgid= -p $$pid 2>/dev/null | tr -d ' '); \
-	  if [ -n "$$pgid" ]; then kill -- -$$pgid 2>/dev/null; fi; \
-	  kill $$pid 2>/dev/null || true; \
+	  if [ -n "$$pgid" ]; then kill -TERM -- -$$pgid 2>/dev/null; fi; \
+	  kill -TERM $$pid 2>/dev/null || true; \
+	done; \
+	for port in $$ports_to_wait; do \
+	  for i in 1 2 3 4 5 6 7 8 9 10; do \
+	    rem=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null); \
+	    [ -z "$$rem" ] && break; \
+	    sleep 0.5; \
+	    for pid in $$rem; do kill -KILL $$pid 2>/dev/null || true; done; \
+	  done; \
 	done
 
 status:
