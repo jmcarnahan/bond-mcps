@@ -29,7 +29,17 @@ module "service" {
 
   user_key = "${local.name_prefix}-${each.key}"
 
-  hostname = local.service_hostnames[each.key]
+  hostname           = local.service_hostnames[each.key]
+  ingress_group_name = var.ingress_group_name
+
+  # IRSA for the Authorization Server: annotate its ServiceAccount with the
+  # role that grants cognito-idp:ListUsers (token-exchange email→sub lookup).
+  # Only the AS pod gets it; MCP pods keep an un-annotated SA.
+  service_account_annotations = (
+    each.value.is_auth_server && local.enable_as_cognito_irsa
+    ? { "eks.amazonaws.com/role-arn" = module.as_cognito_irsa[0].iam_role_arn }
+    : {}
+  )
   # Compose env in three layers: (1) operator-provided extra_env on the
   # service (highest precedence), (2) AS-only system env when this is the
   # AS, (3) MCP-only system env when this is a JWT-mode MCP. Layer order

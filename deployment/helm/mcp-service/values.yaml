@@ -174,7 +174,7 @@ ingress:
   host: ""                     # e.g. auth.mcps.example.com
   className: alb
   certificateArn: ""           # ACM cert ARN; Terraform passes it
-  groupName: bond-mcps         # alb.ingress.kubernetes.io/group.name — shared ALB
+  groupName: bond-platform     # alb.ingress.kubernetes.io/group.name — shared platform ALB (Terraform overrides via var.ingress_group_name)
   groupOrder: 10
   scheme: internet-facing
   healthCheckPath: /health     # auth serves /health; MCPs fall back to TCP target health

@@ -6,7 +6,7 @@
 # poll until exactly ONE ALB carries all three IngressGroup tags:
 #
 #   elbv2.k8s.aws/cluster = <cluster-name>
-#   ingress.k8s.aws/stack = bond-mcps
+#   ingress.k8s.aws/stack = <var.ingress_group_name>   (the IngressGroup name)
 #   bond-mcps-environment = <var.environment>
 #
 # The third tag is stamped via the chart's alb.ingress.kubernetes.io/tags
@@ -33,19 +33,19 @@ resource "null_resource" "wait_for_alb" {
           --resource-type-filters elasticloadbalancing:loadbalancer \
           --tag-filters \
             "Key=elbv2.k8s.aws/cluster,Values=${module.eks.cluster_name}" \
-            "Key=ingress.k8s.aws/stack,Values=bond-mcps" \
+            "Key=ingress.k8s.aws/stack,Values=${var.ingress_group_name}" \
             "Key=bond-mcps-environment,Values=${var.environment}" \
           --query 'length(ResourceTagMappingList)' \
           --output text 2>/dev/null || echo "0")
 
         if [ "$count" = "1" ]; then
-          echo "ALB ready (1 match on bond-mcps + ${module.eks.cluster_name} + ${var.environment})."
+          echo "ALB ready (1 match on ${var.ingress_group_name} + ${module.eks.cluster_name} + ${var.environment})."
           exit 0
         fi
 
         if [ "$count" -gt "1" ] 2>/dev/null; then
-          echo "ERROR: $count ALBs match the bond-mcps IngressGroup tags. Expected 1." >&2
-          echo "Inspect:  aws resourcegroupstaggingapi get-resources --region ${var.aws_region} --tag-filters Key=ingress.k8s.aws/stack,Values=bond-mcps" >&2
+          echo "ERROR: $count ALBs match the ${var.ingress_group_name} IngressGroup tags. Expected 1." >&2
+          echo "Inspect:  aws resourcegroupstaggingapi get-resources --region ${var.aws_region} --tag-filters Key=ingress.k8s.aws/stack,Values=${var.ingress_group_name}" >&2
           echo "Likely cause: a previous destroy left an orphan ALB. Delete it before re-applying." >&2
           exit 1
         fi
@@ -67,7 +67,7 @@ resource "null_resource" "wait_for_alb" {
 data "aws_lb" "shared" {
   tags = {
     "elbv2.k8s.aws/cluster" = module.eks.cluster_name
-    "ingress.k8s.aws/stack" = "bond-mcps"
+    "ingress.k8s.aws/stack" = var.ingress_group_name
     "bond-mcps-environment" = var.environment
   }
 

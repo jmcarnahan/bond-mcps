@@ -108,9 +108,20 @@ resource "aws_secretsmanager_secret_version" "jwt_public_key" {
 # Authorization Server credentials (created when an AS service is declared).
 #
 # Holds the AS's RSA signing key (BOND_MCPS_AS_PRIVATE_KEY_PEM) plus the
-# upstream IdP client_secret if the upstream client is confidential. The
-# JSON keys are env var names — ESO dataFrom.extract maps each to a
-# Kubernetes Secret key that the chart consumes via envFrom.
+# upstream IdP client_secret if the upstream client is confidential, and the
+# HS256 shared secret used to verify bond-ai subject tokens during RFC 8693
+# token exchange (BOND_MCPS_AS_BOND_JWT_SECRET ≡ bond-ai JWT_SECRET_KEY; see
+# docs/PLATFORM-CONTRACT.md). The JSON keys are env var names — ESO
+# dataFrom.extract maps each to a Kubernetes Secret key that the chart
+# consumes via envFrom (the AS routes as-credentials through the chart's
+# `oauth` ExternalSecret — services.tf oauth_secret_name).
+#
+# Real secret material is seeded manually post-apply via
+# `aws secretsmanager put-secret-value`; the placeholders below only apply on
+# first create and are pinned by lifecycle.ignore_changes so rotations don't
+# bounce. Because ESO uses dataFrom.extract, once BOND_MCPS_AS_BOND_JWT_SECRET
+# exists in the secret it flows to the AS pod env automatically — no chart
+# change is needed (mirrors the optional BOND_MCPS_AS_PREVIOUS_KEY_PEM).
 # -------------------------------------------------------------------------
 
 locals {
@@ -133,6 +144,7 @@ resource "aws_secretsmanager_secret_version" "as_credentials" {
   secret_string = jsonencode({
     BOND_MCPS_AS_PRIVATE_KEY_PEM     = "REPLACE_WITH_RSA_PEM"
     BOND_MCPS_UPSTREAM_CLIENT_SECRET = "" # Empty for public OIDC clients (PKCE-only)
+    BOND_MCPS_AS_BOND_JWT_SECRET     = "REPLACE_WITH_BOND_AI_JWT_SECRET_KEY"
   })
 
   lifecycle {

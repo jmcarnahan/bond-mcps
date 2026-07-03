@@ -121,8 +121,8 @@ output "shared_alb_dns_name" {
 }
 
 output "shared_alb_group_name" {
-  description = "alb.ingress.kubernetes.io/group.name shared by all bond-mcps ingresses."
-  value       = "bond-mcps"
+  description = "alb.ingress.kubernetes.io/group.name shared by all platform ingresses (bond-mcps + bond-ai). See docs/PLATFORM-CONTRACT.md."
+  value       = var.ingress_group_name
 }
 
 # =========================================================================

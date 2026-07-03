@@ -80,6 +80,18 @@ variable "hostname" {
   description = "External hostname this service is exposed at."
 }
 
+variable "ingress_group_name" {
+  type        = string
+  default     = "bond-platform"
+  description = "alb.ingress.kubernetes.io/group.name — the shared platform ALB IngressGroup. See docs/PLATFORM-CONTRACT.md."
+}
+
+variable "service_account_annotations" {
+  type        = map(string)
+  default     = {}
+  description = "Annotations on the service's ServiceAccount (e.g. eks.amazonaws.com/role-arn for IRSA)."
+}
+
 variable "extra_env" {
   type    = map(string)
   default = {}

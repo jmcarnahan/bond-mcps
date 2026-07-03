@@ -266,6 +266,83 @@ variable "secrets_recovery_window_days" {
 }
 
 # =========================================================================
+# Shared-platform naming (see docs/PLATFORM-CONTRACT.md)
+# =========================================================================
+
+variable "cluster_name" {
+  type        = string
+  description = <<-EOT
+    EKS cluster name. Pinned by docs/PLATFORM-CONTRACT.md ("bond-platform-dev").
+    Required (no default) so every environment states it explicitly and a
+    rename shows up unambiguously in `terraform plan` as a cluster replace.
+    Decoupled from local.name_prefix so renaming the cluster does NOT churn
+    the Secrets Manager / ECR / IAM / Aurora resources that keep the
+    bond-mcps-<env>-* names.
+  EOT
+}
+
+variable "ingress_group_name" {
+  type        = string
+  default     = "bond-platform"
+  description = <<-EOT
+    alb.ingress.kubernetes.io/group.name shared by every Ingress on the
+    platform ALB. Pinned by docs/PLATFORM-CONTRACT.md ("bond-platform"); bond-ai
+    joins the same group. The AWS LB Controller stamps this value as the
+    `ingress.k8s.aws/stack` tag, so eks-domain.tf's ALB lookup filters on it.
+  EOT
+}
+
+# =========================================================================
+# Delegation / token-exchange config (see docs/PLATFORM-CONTRACT.md "Auth seam")
+# =========================================================================
+
+variable "connect_public_url" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Browser front-door origin injected on every MCP pod as
+    BOND_MCPS_CONNECT_PUBLIC_URL (auth/auth/connect_routes.py). This is
+    bond-ai's origin (https://ai.southbayequity.cloud) whose nginx routes
+    /connect/*, /connections/<p>/callback and /connections/discovery to the
+    MCP services. Empty = omit the env var entirely (preserves prior behavior).
+  EOT
+}
+
+variable "allowed_return_hosts" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    CSV of hostnames allowed as post-connect return targets, injected on every
+    MCP pod as BOND_MCPS_ALLOWED_RETURN_HOSTS (auth/auth/connect_routes.py).
+    Empty = omit the env var entirely (fail-closed default in the app).
+  EOT
+}
+
+variable "cognito_user_pool_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Cognito user pool the Authorization Server queries (ListUsers) to resolve
+    an email to a Cognito sub during RFC 8693 token exchange. Injected on the
+    auth_server pod ONLY as BOND_MCPS_AS_COGNITO_USER_POOL_ID
+    (auth/auth/auth_server/cognito_lookup.py). Empty = omit the env var (dev
+    passthrough; refused on Postgres deployments). When set, an IRSA role
+    granting cognito-idp:ListUsers on this pool is created for the AS SA.
+  EOT
+}
+
+variable "cognito_region" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Region of cognito_user_pool_id. Injected on the auth_server pod as
+    BOND_MCPS_AS_COGNITO_REGION. Empty = omit (the app falls back to AWS_REGION).
+    Also used to build the pool ARN for the ListUsers IRSA policy; falls back to
+    var.aws_region there when empty.
+  EOT
+}
+
+# =========================================================================
 # EKS (consumed in 3b; declared here so dev.tfvars is the single source)
 # =========================================================================
 

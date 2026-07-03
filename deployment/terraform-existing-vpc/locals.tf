@@ -108,6 +108,12 @@ locals {
       BOND_MCPS_AS_ALLOWED_REDIRECT_HOSTS   = var.jwt_verification.as_allowed_redirect_hosts
       BOND_MCPS_AS_ACCESS_TOKEN_TTL_SECONDS = tostring(var.jwt_verification.access_token_ttl_seconds)
     },
+    # RFC 8693 token exchange: the AS resolves an email to a Cognito sub via
+    # ListUsers on this pool (auth/auth/auth_server/cognito_lookup.py). Omitted
+    # when unset (dev passthrough). The matching BOND_MCPS_AS_BOND_JWT_SECRET
+    # arrives from the as-credentials SM secret via ESO (see secrets.tf).
+    var.cognito_user_pool_id != "" ? { BOND_MCPS_AS_COGNITO_USER_POOL_ID = var.cognito_user_pool_id } : {},
+    var.cognito_region != "" ? { BOND_MCPS_AS_COGNITO_REGION = var.cognito_region } : {},
     var.services[local.auth_server_key].extra_env,
   )
 
@@ -121,15 +127,22 @@ locals {
     : local.as_base_url_resolved
   )
 
-  mcp_env_overlay = !var.jwt_verification.enabled ? {} : {
-    BOND_MCPS_JWT_JWKS_URI = local.jwks_uri_resolved
-    BOND_MCPS_JWT_ISSUER   = local.issuer_resolved
-    BOND_MCPS_AS_BASE_URL  = local.as_base_url_resolved
-    # Disable FastMCP's per-pod session state. With >1 replica behind an ALB,
-    # round-robin breaks the stateful protocol: pod A creates an Mcp-Session-Id
-    # on /mcp `initialize`, then pod B 404s the next request with that ID
-    # because it doesn't know about it. Stateless mode makes each request
-    # self-contained; safe for our usage (no server-pushed events).
-    FASTMCP_STATELESS_HTTP = "1"
-  }
+  mcp_env_overlay = !var.jwt_verification.enabled ? {} : merge(
+    {
+      BOND_MCPS_JWT_JWKS_URI = local.jwks_uri_resolved
+      BOND_MCPS_JWT_ISSUER   = local.issuer_resolved
+      BOND_MCPS_AS_BASE_URL  = local.as_base_url_resolved
+      # Disable FastMCP's per-pod session state. With >1 replica behind an ALB,
+      # round-robin breaks the stateful protocol: pod A creates an Mcp-Session-Id
+      # on /mcp `initialize`, then pod B 404s the next request with that ID
+      # because it doesn't know about it. Stateless mode makes each request
+      # self-contained; safe for our usage (no server-pushed events).
+      FASTMCP_STATELESS_HTTP = "1"
+    },
+    # Browser front-door coordinates for the /connect flow (auth/auth/
+    # connect_routes.py). Injected on every MCP pod. Omitted when unset so
+    # deployments without a front door keep their prior behavior.
+    var.connect_public_url != "" ? { BOND_MCPS_CONNECT_PUBLIC_URL = var.connect_public_url } : {},
+    var.allowed_return_hosts != "" ? { BOND_MCPS_ALLOWED_RETURN_HOSTS = var.allowed_return_hosts } : {},
+  )
 }
