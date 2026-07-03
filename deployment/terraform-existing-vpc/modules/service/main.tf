@@ -92,7 +92,7 @@ locals {
 
     serviceAccount = {
       create      = true
-      annotations = {}
+      annotations = var.service_account_annotations
     }
 
     ingress = {
@@ -100,7 +100,7 @@ locals {
       host           = var.hostname
       className      = "alb"
       certificateArn = var.acm_certificate_arn
-      groupName      = "bond-mcps"
+      groupName      = var.ingress_group_name
       # Stagger group.order so ALB rule eval is deterministic. Auth gets the
       # lowest number so its rule is evaluated first.
       groupOrder      = var.is_auth_proxy ? 1 : 10

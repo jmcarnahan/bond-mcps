@@ -12,7 +12,10 @@ module "eks" {
   # references in encryption_config) gates the cluster equivalently without
   # the cascade.
 
-  name               = "${local.name_prefix}-eks"
+  # Cluster name is pinned by docs/PLATFORM-CONTRACT.md and decoupled from
+  # local.name_prefix so a rename here does NOT churn the bond-mcps-<env>-*
+  # Secrets Manager / ECR / IAM / Aurora resources.
+  name               = var.cluster_name
   kubernetes_version = var.eks_kubernetes_version
 
   vpc_id     = data.aws_vpc.existing.id
@@ -61,7 +64,7 @@ module "eks" {
     }
   }
 
-  tags = { Name = "${local.name_prefix}-eks" }
+  tags = { Name = var.cluster_name }
 }
 
 # Allow Postgres traffic from EKS nodes into the Aurora SG. Lives here (not

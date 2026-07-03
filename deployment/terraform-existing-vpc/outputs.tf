@@ -101,6 +101,11 @@ output "cluster_oidc_issuer_url" {
   value = module.eks.cluster_oidc_issuer_url
 }
 
+output "node_security_group_id" {
+  description = "EKS node security group. bond-ai pins this value in its tfvars (eks_external_node_security_group_id) so co-located pods can reach bond-ai's Aurora — see docs/PLATFORM-CONTRACT.md."
+  value       = module.eks.node_security_group_id
+}
+
 output "kubectl_config_cmd" {
   description = "One-liner to configure kubectl for this cluster."
   value       = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.aws_region}"
@@ -116,8 +121,8 @@ output "shared_alb_dns_name" {
 }
 
 output "shared_alb_group_name" {
-  description = "alb.ingress.kubernetes.io/group.name shared by all bond-mcps ingresses."
-  value       = "bond-mcps"
+  description = "alb.ingress.kubernetes.io/group.name shared by all platform ingresses (bond-mcps + bond-ai). See docs/PLATFORM-CONTRACT.md."
+  value       = var.ingress_group_name
 }
 
 # =========================================================================
