@@ -33,10 +33,27 @@ every step has a verification check.
                                          provider OAuth → provider_tokens row in Aurora
 ```
 
-- 1 Authorization Server + N MCPs share a single ALB (IngressGroup `bond-mcps`).
+- 1 Authorization Server + N MCPs share a single ALB (IngressGroup
+  `bond-platform`, `var.ingress_group_name`). In the shared-platform topology
+  (see `docs/PLATFORM-CONTRACT.md`) bond-ai's Ingress joins the same group on
+  the same cluster (`bond-platform-<env>`), so one ALB serves bond-ai's apex
+  host AND every `*.<base_domain>` MCP host (SNI, two certs).
 - Aurora Postgres Serverless v2 (`bond_mcps` DB) stores encrypted upstream tokens.
 - AWS Secrets Manager + ExternalSecrets Operator inject runtime secrets.
 - All ingress HTTPS via one wildcard ACM cert for `*.<base_domain>`.
+
+**Second caller population — bond-ai delegation (RFC 8693).** Besides Claude
+Code's interactive flow above, the AS supports
+`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
+(`auth/auth_server/token_exchange.py`): bond-ai presents its HS256 bond JWT
+(secret shared ONLY with the AS via `BOND_MCPS_AS_BOND_JWT_SECRET` in the
+as-credentials secret) plus `resource=<mcp url>`, and receives a short-lived
+RS256 token with `sub` resolved to the Cognito sub (`cognito-idp:ListUsers`,
+IRSA-scoped). MCP pods therefore verify exactly ONE population: RS256 via the
+AS JWKS. Browser-facing connect flows ride bond-ai's front door
+(`BOND_MCPS_CONNECT_PUBLIC_URL` on every MCP pod); the discovery manifest's
+`name` must be the provider connect name (see `locals.tf`), not the hostname
+prefix.
 
 ## TL;DR (10 steps)
 
