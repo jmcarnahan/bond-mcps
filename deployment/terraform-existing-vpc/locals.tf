@@ -49,12 +49,18 @@ locals {
   # The on-disk mcps/ scan only exists in a dev checkout, so deployed discovery
   # reads this rendered manifest (mounted as a file, see modules/service +
   # the chart's discovery ConfigMap). Includes the enabled MCP services only
-  # (excludes the AS and the auth proxy). name/display_name use hostname_prefix
-  # so they match the local mcps/<name>/mcp.json identifiers bond-ai expects.
+  # (excludes the AS and the auth proxy).
+  #
+  # name MUST be the service key, NOT hostname_prefix: it is the provider
+  # connect name bond-ai uses for /connect/<name>/ticket|status and for
+  # merging with its static config. hostname_prefix can differ from the key
+  # (microsoft uses "ms-graph" purely because Entra ID rejects trademarked
+  # words in reply-URL hostnames) — using it here 404'd every connect call
+  # for microsoft and prevented the static-entry merge.
   discovery_mcps = [
     for k, v in local.enabled_services : {
-      name         = v.hostname_prefix
-      display_name = v.hostname_prefix
+      name         = k
+      display_name = k
       url          = "https://${local.service_hostnames[k]}/mcp"
     }
     if !v.is_auth_server && !v.is_auth_proxy
