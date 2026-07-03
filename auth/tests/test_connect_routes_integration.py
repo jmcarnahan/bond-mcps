@@ -81,7 +81,13 @@ class TestConnectRoutesLive:
         # No token stored yet for this user.
         resp = client.get("/connect/atlassian/status", headers=_bearer(_token()))
         assert resp.status_code == 200
-        assert resp.json() == {"connected": False, "valid": True, "scopes": None}
+        assert resp.json() == {
+            "connected": False,
+            "valid": True,
+            "scopes": None,
+            "expires_at": None,
+            "has_refresh_token": False,
+        }
 
     def test_status_reflects_stored_token(self, client):
         TokenRepository().save_token(

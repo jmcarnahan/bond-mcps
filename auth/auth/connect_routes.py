@@ -20,9 +20,11 @@ Builds the connect surface from a ``ProviderConnectConfig``:
   ``/connections/`` (plural) — the canonical, already-registered redirect path
   shared with the CLI flow — so delegating needs NO new provider registration.
 
-* ``GET /connect/<name>/status`` -- returns ``{connected, valid, scopes}`` for
-  the authenticated user. ``connected`` = a token row exists; ``valid`` = the
-  access token isn't expired OR a refresh token is present.
+* ``GET /connect/<name>/status`` -- returns ``{connected, valid, scopes,
+  expires_at, has_refresh_token}`` for the authenticated user. ``connected`` =
+  a token row exists; ``valid`` = the access token isn't expired OR a refresh
+  token is present; ``expires_at`` = epoch seconds (null when the provider
+  didn't report an expiry).
 
 * ``DELETE /connect/<name>`` -- deletes the user's stored token; returns
   ``{disconnected: <whether a row existed>}``.
@@ -404,13 +406,30 @@ async def _connect_status(request: Request, config: ProviderConnectConfig) -> Re
 
     data = TokenRepository().get_token(user_key, config.name)
     if data is None:
-        return JSONResponse({"connected": False, "valid": True, "scopes": None})
+        return JSONResponse(
+            {
+                "connected": False,
+                "valid": True,
+                "scopes": None,
+                "expires_at": None,
+                "has_refresh_token": False,
+            }
+        )
 
     expires_at = data.get("expires_at")
     has_refresh = bool(data.get("refresh_token"))
     expired = expires_at is not None and time.time() >= float(expires_at)
     valid = (not expired) or has_refresh
-    return JSONResponse({"connected": True, "valid": valid, "scopes": data.get("scopes")})
+    return JSONResponse(
+        {
+            "connected": True,
+            "valid": valid,
+            "scopes": data.get("scopes"),
+            # Epoch seconds; consumers (bond-ai) render it for the user.
+            "expires_at": float(expires_at) if expires_at is not None else None,
+            "has_refresh_token": has_refresh,
+        }
+    )
 
 
 async def _disconnect(request: Request, config: ProviderConnectConfig) -> Response:

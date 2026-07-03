@@ -10,6 +10,8 @@ import json
 import time
 import types
 
+import pytest
+
 from auth.connect_routes import (
     ProviderConnectConfig,
     _connect_result,
@@ -224,16 +226,23 @@ class TestStatus:
     def test_not_connected(self, repo, monkeypatch):
         _mock_user(monkeypatch)
         resp = _run(_connect_status(FakeRequest(), CFG))
-        assert _body(resp) == {"connected": False, "valid": True, "scopes": None}
+        assert _body(resp) == {
+            "connected": False,
+            "valid": True,
+            "scopes": None,
+            "expires_at": None,
+            "has_refresh_token": False,
+        }
 
     def test_connected_valid(self, repo, monkeypatch):
+        expires_at = time.time() + 3600
         repo.save_token(
             USER,
             "atlassian",
             {
                 "access_token": "t",
                 "scopes": "read write",
-                "expires_at": time.time() + 3600,
+                "expires_at": expires_at,
                 "refresh_token": "r",
             },
         )
@@ -242,6 +251,19 @@ class TestStatus:
         assert data["connected"] is True
         assert data["valid"] is True
         assert data["scopes"] == "read write"
+        assert data["expires_at"] == pytest.approx(expires_at)
+        assert data["has_refresh_token"] is True
+
+    def test_no_expiry_reported(self, repo, monkeypatch):
+        # Providers that don't return expires_in (e.g. GitHub classic tokens)
+        # yield no expires_at; status must report null, not crash.
+        repo.save_token(USER, "atlassian", {"access_token": "t"})
+        _mock_user(monkeypatch)
+        data = _body(_run(_connect_status(FakeRequest(), CFG)))
+        assert data["connected"] is True
+        assert data["valid"] is True
+        assert data["expires_at"] is None
+        assert data["has_refresh_token"] is False
 
     def test_expired_with_refresh_is_valid(self, repo, monkeypatch):
         repo.save_token(
