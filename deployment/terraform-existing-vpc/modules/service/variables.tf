@@ -147,6 +147,12 @@ variable "health" {
   default = { type = "tcp" }
 }
 
+variable "preflight_enabled" {
+  type        = bool
+  default     = true
+  description = "Run the `bond-mcps doctor` preflight init container. Disable for images built outside this repo that lack the bond-mcps CLI."
+}
+
 variable "resources" {
   type = object({
     requests = object({ cpu = string, memory = string })

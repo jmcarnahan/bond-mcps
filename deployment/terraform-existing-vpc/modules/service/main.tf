@@ -136,7 +136,7 @@ locals {
     }
 
     preflight = {
-      enabled = true
+      enabled = var.preflight_enabled
       command = ["bond-mcps", "doctor"]
     }
 

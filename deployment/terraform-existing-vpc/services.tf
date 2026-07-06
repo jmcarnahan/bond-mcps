@@ -59,7 +59,14 @@ module "service" {
   auth_proxy_public_url    = local.auth_proxy_hostname != null ? "https://${local.auth_proxy_hostname}" : ""
 
   encryption_key_secret_name = aws_secretsmanager_secret.encryption_key.name
-  db_credentials_secret_name = aws_secretsmanager_secret.db_credentials.name
+  # Services with their own logical database (db_secret_name) get their
+  # per-service secret; everyone else shares the bondmcps master credentials.
+  db_credentials_secret_name = (
+    each.value.db_secret_name != null && each.value.db_secret_name != ""
+    ? aws_secretsmanager_secret.service_db[each.key].name
+    : aws_secretsmanager_secret.db_credentials.name
+  )
+  preflight_enabled = each.value.preflight_enabled
   # The AS automatically pulls its credentials from the SM secret terraform
   # creates for it (as-credentials). For MCPs, use the operator-specified
   # oauth_secret_name (the per-provider OAuth app credentials).
