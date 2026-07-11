@@ -153,6 +153,49 @@ resource "aws_secretsmanager_secret_version" "as_credentials" {
 }
 
 # -------------------------------------------------------------------------
+# Per-service database credentials (one per service that declared
+# db_secret_name — its own logical database on the shared Aurora cluster).
+# host/port are seeded from the cluster; the operator creates the logical
+# database + role and runs put-secret-value with the real username/password/
+# dbname (lifecycle-pinned like every other secret here).
+# -------------------------------------------------------------------------
+
+resource "aws_secretsmanager_secret" "service_db" {
+  for_each = local.db_secret_services
+
+  name                    = "${local.sm_prefix}${each.value.db_secret_name}"
+  description             = "Aurora credentials for the bond-mcps ${each.key} service's own logical database"
+  kms_key_id              = aws_kms_key.secrets.arn
+  recovery_window_in_days = var.secrets_recovery_window_days
+
+  tags = { Name = "${local.sm_prefix}${each.value.db_secret_name}" }
+}
+
+# Not a secret: seed value replaced post-apply via put-secret-value (and the
+# version is pinned by ignore_changes). A local rather than an inline literal
+# so gitleaks' hashicorp-tf-password rule doesn't flag the placeholder.
+locals {
+  service_db_placeholder = "REPLACE_ME"
+}
+
+resource "aws_secretsmanager_secret_version" "service_db" {
+  for_each = aws_secretsmanager_secret.service_db
+
+  secret_id = each.value.id
+  secret_string = jsonencode({
+    username = local.service_db_placeholder
+    password = local.service_db_placeholder
+    host     = aws_rds_cluster.bond_mcps.endpoint
+    port     = aws_rds_cluster.bond_mcps.port
+    dbname   = local.service_db_placeholder
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# -------------------------------------------------------------------------
 # Per-MCP OAuth secrets (one per service that declared oauth_secret_name)
 # -------------------------------------------------------------------------
 

@@ -92,6 +92,18 @@ variable "services" {
     runs_migrations    = optional(bool, false)
     needs_scaling_work = optional(bool, false)
     oauth_secret_name  = optional(string)
+    # Per-service Aurora credentials secret (name suffix under the
+    # bond-mcps-<env>- prefix). Services whose image is built outside this
+    # repo (e.g. sbel) point at their own logical database on the shared
+    # cluster instead of the bondmcps db. null = shared db-credentials.
+    db_secret_name = optional(string)
+    # The default preflight init container runs `bond-mcps doctor`, which
+    # only exists in images built from this repo. Disable for foreign images.
+    preflight_enabled = optional(bool, true)
+    # Omit from the AS's /connections/discovery manifest. Discovery entries
+    # drive bond-ai's provider /connect flows; data-only MCPs with no
+    # connect routes (e.g. sbel) must not appear there.
+    exclude_from_discovery = optional(bool, false)
     # Override the container entrypoint. Used for the Authorization Server
     # which shares the auth image but runs ``python -m auth.auth_server``.
     # Empty list means use the image's default CMD.

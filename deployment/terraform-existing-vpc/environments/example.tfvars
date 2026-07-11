@@ -162,6 +162,37 @@ services = {
     health = { type = "http", path = "/healthz" }
   }
 
+  # --- Foreign-image data service (OPTIONAL — example: sbel) ---
+  # A service whose image is built OUTSIDE this repo can still ride the
+  # platform. Three per-service fields exist for that case:
+  #   db_secret_name         — the service gets its OWN logical database on
+  #                            the shared Aurora cluster. Terraform creates
+  #                            the SM secret shell `${env-prefix}<name>`
+  #                            (host/port pre-seeded from the cluster);
+  #                            create the DB + role, then put-secret-value
+  #                            with real username/password/dbname.
+  #   preflight_enabled      — set false when the image lacks the
+  #                            `bond-mcps` CLI (the default preflight init
+  #                            container runs `bond-mcps doctor`).
+  #   exclude_from_discovery — set true for services with no OAuth /connect
+  #                            flow, so they don't appear in the AS's
+  #                            /connections/discovery manifest (which drives
+  #                            bond-ai's provider-connect UI).
+  #
+  # sbel = {
+  #   enabled                = true
+  #   image_repo_name        = "bond-mcps-mcp-sbel" # built from the sbel repo
+  #   image_tag              = "0.1.1"
+  #   hostname_prefix        = "sbel"
+  #   container_port         = 8080
+  #   replicas               = 1
+  #   db_secret_name         = "sbel-db"
+  #   oauth_secret_name      = "sbel-admin" # arbitrary env vars via SM (e.g. an admin key)
+  #   preflight_enabled      = false
+  #   exclude_from_discovery = true
+  #   health                 = { type = "http", path = "/healthz" }
+  # }
+
   # --- Legacy auth proxy (OPTIONAL — only needed for laptop/CLI dev flows) ---
   # Uncomment to deploy. In JWT mode the proxy is unused; leaving it out is
   # the recommended path.

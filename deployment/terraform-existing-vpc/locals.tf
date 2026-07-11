@@ -29,6 +29,13 @@ locals {
     if v.oauth_secret_name != null && try(v.oauth_secret_name, "") != ""
   }
 
+  # Services that declared a per-service db_secret_name (own logical database
+  # on the shared Aurora cluster instead of the bondmcps db).
+  db_secret_services = {
+    for k, v in var.services : k => v
+    if v.db_secret_name != null && try(v.db_secret_name, "") != ""
+  }
+
   # Per-service hostname. Always computed (not gated by enabled) so disabling
   # a service doesn't churn the hostname map for other services.
   service_hostnames = {
@@ -63,7 +70,7 @@ locals {
       display_name = k
       url          = "https://${local.service_hostnames[k]}/mcp"
     }
-    if !v.is_auth_server && !v.is_auth_proxy
+    if !v.is_auth_server && !v.is_auth_proxy && !v.exclude_from_discovery
   ]
   discovery_json = jsonencode({ mcps = local.discovery_mcps })
 
