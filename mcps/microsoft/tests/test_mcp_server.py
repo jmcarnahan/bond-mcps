@@ -3627,3 +3627,73 @@ class TestMCPFolderTools:
                     await client.call_tool(
                         "manage_mail_folders", {"action": "delete", "folder_id": "bad-id"}
                     )
+
+
+class TestConnectFlowScopes:
+    """The /connect flow and local MSAL login share ONE scope policy.
+
+    Requesting an admin-gated scope walls the whole consent bundle behind
+    "Approval required", so the org default must be exactly the consented set;
+    the connect flow only adds offline_access, which the code grant needs for
+    its refresh token.
+    """
+
+    def test_org_connect_request_is_consented_set_plus_offline_access(self):
+        import os
+        from unittest.mock import patch as env_patch
+
+        from ms_graph.local_auth import CONSENTED_ORG_SCOPES
+        from ms_graph_mcp import _ms_graph_scopes
+
+        with env_patch.dict(os.environ, {"MS_TENANT_ID": "t"}, clear=True):
+            scopes = _ms_graph_scopes().split()
+        assert scopes == [*CONSENTED_ORG_SCOPES, "offline_access"]
+
+    def test_ms_scopes_override_reaches_the_connect_flow(self):
+        import os
+        from unittest.mock import patch as env_patch
+
+        from ms_graph_mcp import _ms_graph_scopes
+
+        with env_patch.dict(
+            os.environ,
+            {"MS_TENANT_ID": "t", "MS_SCOPES": "Mail.Read Chat.ReadWrite"},
+            clear=True,
+        ):
+            scopes = _ms_graph_scopes().split()
+        assert scopes == ["Mail.Read", "Chat.ReadWrite", "offline_access"]
+
+    def test_offline_access_is_not_duplicated(self):
+        import os
+        from unittest.mock import patch as env_patch
+
+        from ms_graph_mcp import _ms_graph_scopes
+
+        with env_patch.dict(
+            os.environ,
+            {"MS_TENANT_ID": "t", "MS_SCOPES": "Mail.Read offline_access"},
+            clear=True,
+        ):
+            assert _ms_graph_scopes().split() == ["Mail.Read", "offline_access"]
+
+    def test_connect_config_resolves_scopes_at_request_time(self):
+        """The config must carry the policy FUNCTION, not an import-time call.
+
+        MS_TENANT_ID/MS_SCOPES can load after module import (same reason the
+        config's authorize_url/token_url are lambdas over _ms_tenant); a
+        captured string would hand an org tenant the consumer wish-list and
+        rebuild the "Approval required" wall.
+        """
+        import os
+        from unittest.mock import patch as env_patch
+
+        from ms_graph.local_auth import CONSENTED_ORG_SCOPES
+        from ms_graph_mcp import MICROSOFT_CONNECT_CONFIG
+
+        assert callable(MICROSOFT_CONNECT_CONFIG.scopes)
+        with env_patch.dict(os.environ, {"MS_TENANT_ID": "t"}, clear=True):
+            org = MICROSOFT_CONNECT_CONFIG.resolved_scopes().split()
+        with env_patch.dict(os.environ, {"MS_SCOPES": "Mail.Read"}, clear=True):
+            overridden = MICROSOFT_CONNECT_CONFIG.resolved_scopes().split()
+        assert org == [*CONSENTED_ORG_SCOPES, "offline_access"]
+        assert overridden == ["Mail.Read", "offline_access"]

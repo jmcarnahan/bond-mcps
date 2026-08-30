@@ -649,3 +649,42 @@ class TestProxyModeConnectRoutes:
         params = parse_qs(parsed.query)
         assert params["audience"] == ["api.atlassian.com"]
         assert params["prompt"] == ["consent"]
+
+    def test_callable_scopes_resolved_at_request_time(self, repo):
+        """scopes may be a zero-arg callable (env-dependent policy); the
+        authorize redirect must carry the value resolved at request time,
+        not whatever the env said at config-construction time."""
+        from urllib.parse import parse_qs, urlparse
+
+        from starlette.datastructures import QueryParams
+
+        policy = {"value": "Mail.Read"}
+        config = ProviderConnectConfig(
+            name="github",
+            authorize_url="https://example.com/authorize",
+            token_url="https://example.com/token",
+            scopes=lambda: policy["value"],
+            client_id_env="TEST_CLIENT_ID",
+            client_secret_env="TEST_CLIENT_SECRET",
+        )
+        policy["value"] = "Mail.Read Chat.ReadWrite"  # changes after construction
+
+        class FakeRequest:
+            query_params = QueryParams("")
+
+        env_patch = patch.dict(
+            "os.environ",
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "",
+                "BOND_MCPS_JWT_PUBLIC_KEY": "",
+                "TEST_CLIENT_ID": "id",
+                "TEST_CLIENT_SECRET": "secret",
+                "BOND_MCPS_PUBLIC_URL": "http://localhost:18001",
+            },
+        )
+        with env_patch, patch("auth.connect_routes.current_user_key", return_value="alice"):
+            resp = asyncio.run(_start_connect(FakeRequest(), config))
+
+        assert resp.status_code == 302
+        params = parse_qs(urlparse(resp.headers["location"]).query)
+        assert params["scope"] == ["Mail.Read Chat.ReadWrite"]

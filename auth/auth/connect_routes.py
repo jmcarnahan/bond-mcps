@@ -88,11 +88,12 @@ ENV_CONNECT_PUBLIC_URL = "BOND_MCPS_CONNECT_PUBLIC_URL"
 class ProviderConnectConfig:
     """Per-provider OAuth code-grant parameters.
 
-    The ``authorize_url`` and ``token_url`` fields accept either a literal
-    string OR a zero-arg callable returning a string. The callable form is
-    necessary for providers whose URLs include an env-derived value (e.g.
-    Microsoft's tenant ID) that may change between import time and request
-    time — capturing such env values at import time produces stale URLs.
+    The ``authorize_url``, ``token_url``, and ``scopes`` fields accept either
+    a literal string OR a zero-arg callable returning a string. The callable
+    form is necessary when the value depends on env (e.g. Microsoft's tenant
+    ID, or a scope policy branching on MS_TENANT_ID/MS_SCOPES) that may change
+    between import time and request time — capturing such env values at import
+    time produces stale values.
 
     ``post_exchange`` is an optional hook that receives the raw token JSON
     returned by the provider's token endpoint and produces the dict to
@@ -103,7 +104,7 @@ class ProviderConnectConfig:
     name: str
     authorize_url: str | Callable[[], str]
     token_url: str | Callable[[], str]
-    scopes: str
+    scopes: str | Callable[[], str]
     client_id_env: str
     client_secret_env: str
     public_url_env: str = "BOND_MCPS_PUBLIC_URL"
@@ -115,6 +116,9 @@ class ProviderConnectConfig:
 
     def resolved_token_url(self) -> str:
         return self.token_url() if callable(self.token_url) else self.token_url
+
+    def resolved_scopes(self) -> str:
+        return self.scopes() if callable(self.scopes) else self.scopes
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +471,7 @@ async def _start_connect(request: Request, config: ProviderConnectConfig) -> Res
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
-        "scope": config.scopes,
+        "scope": config.resolved_scopes(),
         "state": state,
         "response_type": "code",
         "code_challenge": code_challenge,

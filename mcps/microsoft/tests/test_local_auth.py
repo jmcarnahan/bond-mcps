@@ -223,25 +223,55 @@ class TestCreateMsalApp:
         assert isinstance(app, msal.ConfidentialClientApplication)
 
 
-class TestGetScopes:
+class TestLoginScopes:
     def test_consumer_scopes_without_tenant(self):
-        from ms_graph.local_auth import _get_scopes
+        """No admin consent exists for consumer accounts, so nothing can wall
+        the request — they keep the full mail/files/calendar feature set."""
+        from ms_graph.local_auth import login_scopes
 
         with patch.dict(os.environ, {}, clear=True):
-            scopes = _get_scopes()
+            scopes = login_scopes()
         assert "Mail.Read" in scopes
         assert "Files.ReadWrite.All" in scopes
         assert "Team.ReadBasic.All" not in scopes
         assert "Sites.ReadWrite.All" not in scopes
 
-    def test_org_scopes_with_tenant(self):
-        from ms_graph.local_auth import _get_scopes
+    def test_org_default_is_exactly_the_consented_set(self):
+        """An org request is one consent bundle: a single admin-gated scope in
+        it blocks the WHOLE sign-in, mail included. The default must therefore
+        be exactly what the admin has consented — nothing aspirational."""
+        from ms_graph.local_auth import CONSENTED_ORG_SCOPES, login_scopes
 
-        with patch.dict(os.environ, {"MS_TENANT_ID": "my-tenant"}):
-            scopes = _get_scopes()
-        assert "Mail.Read" in scopes
-        assert "Team.ReadBasic.All" in scopes
-        assert "Sites.ReadWrite.All" in scopes
+        with patch.dict(os.environ, {"MS_TENANT_ID": "my-tenant"}, clear=True):
+            scopes = login_scopes()
+        assert scopes == CONSENTED_ORG_SCOPES
+        for gated in (
+            "Chat.ReadWrite",
+            "ChannelMessage.Read.All",
+            "ChannelMessage.Send",
+            "Channel.ReadBasic.All",
+            "Team.ReadBasic.All",
+            "Sites.ReadWrite.All",
+            "Files.ReadWrite.All",
+            "Calendars.ReadWrite",
+            "MailboxSettings.ReadWrite",
+            "Mail.Read.Shared",
+            "Mail.ReadWrite.Shared",
+            "Mail.Send.Shared",
+        ):
+            assert gated not in scopes, gated
+
+    def test_ms_scopes_env_wins_verbatim(self):
+        """The escape hatch for a tenant whose admin approved more: widening is
+        a config change, never a code change."""
+        from ms_graph.local_auth import login_scopes
+
+        with patch.dict(
+            os.environ,
+            {"MS_TENANT_ID": "my-tenant", "MS_SCOPES": "Mail.Read Chat.ReadWrite"},
+            clear=True,
+        ):
+            assert login_scopes() == ["Mail.Read", "Chat.ReadWrite"]
 
 
 class TestAcquireTokenBrowserProxy:
