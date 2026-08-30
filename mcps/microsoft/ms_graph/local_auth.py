@@ -22,9 +22,12 @@ POWERBI_SCOPES = [
 
 MAIL_SCOPES = [
     "Mail.Read",
+    "Mail.Read.Shared",
     "Mail.ReadWrite",
+    "Mail.ReadWrite.Shared",
     "Mail.Send",
-    "MailboxSettings.Read",
+    "Mail.Send.Shared",
+    "MailboxSettings.ReadWrite",
     "User.Read",
 ]
 

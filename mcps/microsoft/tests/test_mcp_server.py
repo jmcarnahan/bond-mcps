@@ -19,6 +19,7 @@ from auth.exceptions import MissingProviderConnection
 from .conftest import (
     GRAPH_ERROR_400,
     GRAPH_ERROR_403,
+    GRAPH_ERROR_404,
     GRAPH_ERROR_410,
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
@@ -42,11 +43,17 @@ from .conftest import (
     SAMPLE_DRIVE_ITEM_FILE,
     SAMPLE_DRIVE_ITEM_LARGE_TEXT,
     SAMPLE_DRIVE_ITEM_WORD,
+    SAMPLE_MAIL_FOLDER,
+    SAMPLE_MAIL_FOLDERS_RESPONSE,
     SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
     SAMPLE_MESSAGE_2,
     SAMPLE_MESSAGE_DETAIL,
     SAMPLE_MESSAGE_DETAIL_NO_BODY,
+    SAMPLE_MESSAGE_RULE,
+    SAMPLE_MESSAGE_RULES_RESPONSE,
+    SAMPLE_MESSAGES_PAGE1,
+    SAMPLE_MESSAGES_PAGE2,
     SAMPLE_MESSAGES_RESPONSE,
     SAMPLE_PBI_DASHBOARDS_RESPONSE,
     SAMPLE_PBI_DATASETS_RESPONSE,
@@ -65,6 +72,7 @@ from .conftest import (
 
 MONITOR_URL = "https://api.onedrive.com/v1.0/monitor/copy-op-token"
 CONNECT_URL = "https://auth.example.com/connect/microsoft?ticket=t"
+SOURCE_DRIVE_ID = SAMPLE_DRIVE_ITEM_WORD["parentReference"]["driveId"]
 PBI_EXPORT_MONITOR_URL = (
     f"{POWERBI_BASE_URL}/groups/ws-id-001/reports/rpt-id-001/exports/export-id-001"
 )
@@ -152,7 +160,7 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_list_emails_no_query(self, mcp_server):
-        """No query → lists inbox."""
+        """No query → lists inbox as pipe-delimited CSV."""
         respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
             return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
         )
@@ -163,12 +171,14 @@ class TestMCPEmailTools:
                 result = await client.call_tool("list_emails", {"top": 10})
 
         text = _get_text(result)
+        assert "2 message(s) in inbox" in text
+        assert "date|from_name|from_address|to|subject|is_read|body_preview|id" in text
         assert "Weekly Report" in text
-        assert "2 message(s)" in text
+        assert "alice@example.com" in text
 
     @respx.mock
     async def test_list_emails_with_query(self, mcp_server):
-        """query set → search mode."""
+        """query set → search mode, CSV output."""
         respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(
             return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
         )
@@ -179,7 +189,8 @@ class TestMCPEmailTools:
                 result = await client.call_tool("list_emails", {"query": "weekly"})
 
         text = _get_text(result)
-        assert "1 result(s)" in text
+        assert '1 result(s) for "weekly"' in text
+        assert "date|from_name|from_address|to|subject|is_read|body_preview|id" in text
         assert "Weekly Report" in text
 
     @respx.mock
@@ -221,7 +232,238 @@ class TestMCPEmailTools:
             async with Client(mcp_server) as client:
                 result = await client.call_tool("list_emails", {"folder": "sentitems"})
 
-        assert "Weekly Report" in _get_text(result)
+        text = _get_text(result)
+        assert "2 message(s) in sentitems" in text
+        assert "Weekly Report" in text
+
+    @respx.mock
+    async def test_list_emails_custom_display_name_resolves(self, mcp_server):
+        """A custom folder display name resolves to its ID, then lists messages (#54)."""
+        folder_id = SAMPLE_MAIL_FOLDER["id"]  # "AQMkAGfolder-001", displayName "Projects"
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/{folder_id}/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("list_emails", {"folder": "projects"})
+
+        text = _get_text(result)
+        assert "2 message(s) in projects" in text  # header keeps the display name
+        assert "Weekly Report" in text
+
+    @respx.mock
+    async def test_list_emails_unknown_folder_returns_clear_error(self, mcp_server):
+        """An unresolvable folder name returns a human-readable error, not a raw 400 (#54)."""
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("list_emails", {"folder": "ghost"})
+
+        assert _get_text(result) == "Folder 'ghost' not found."
+
+    @respx.mock
+    async def test_list_emails_well_known_skips_folder_lookup(self, mcp_server):
+        """Well-known folders resolve without hitting the mailFolders list endpoint (#54)."""
+        list_route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/sentitems/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                await client.call_tool("list_emails", {"folder": "sentitems"})
+
+        assert not list_route.called
+
+    @respx.mock
+    async def test_list_emails_query_scopes_to_custom_folder(self, mcp_server):
+        """query + explicit custom folder scopes the search to that folder (#54)."""
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        scoped = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/{folder_id}/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "list_emails", {"query": "report", "folder": "projects"}
+                )
+
+        assert scoped.called
+        scoped_url = str(scoped.calls[0].request.url)
+        assert "$search" in scoped_url or "%24search" in scoped_url
+        assert '1 result(s) for "report"' in _get_text(result)
+
+    @respx.mock
+    async def test_list_emails_query_default_inbox_stays_global(self, mcp_server):
+        """query with the default inbox folder searches globally, no folder lookup (#54)."""
+        list_route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        global_route = respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                await client.call_tool("list_emails", {"query": "report"})
+
+        assert global_route.called
+        assert not list_route.called
+
+    @respx.mock
+    async def test_list_emails_pagination(self, mcp_server):
+        """Pagination follows @odata.nextLink to fetch all pages."""
+        responses = iter(
+            [
+                httpx.Response(200, json=SAMPLE_MESSAGES_PAGE1),
+                httpx.Response(200, json=SAMPLE_MESSAGES_PAGE2),
+            ]
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            side_effect=lambda req: next(responses)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("list_emails", {"top": 1000})
+
+        text = _get_text(result)
+        assert "2 message(s) in inbox" in text
+        assert "Weekly Report" in text
+        assert "Re: Project Update" in text
+
+    @respx.mock
+    async def test_list_emails_csv_structure(self, mcp_server):
+        """Verify CSV output is parseable and has correct field values."""
+        import csv
+        import io
+
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("list_emails", {"top": 10})
+
+        text = _get_text(result)
+        # Skip the header comment line and blank line
+        csv_text = text.split("\n\n", 1)[1]
+        reader = csv.reader(io.StringIO(csv_text), delimiter="|")
+        rows = list(reader)
+
+        # Header row
+        assert rows[0] == [
+            "date",
+            "from_name",
+            "from_address",
+            "to",
+            "subject",
+            "is_read",
+            "body_preview",
+            "id",
+        ]
+        # First data row (SAMPLE_MESSAGE)
+        assert rows[1][0] == "2025-12-15T10:30:00Z"  # date
+        assert rows[1][1] == "Alice Smith"  # from_name
+        assert rows[1][2] == "alice@example.com"  # from_address
+        assert rows[1][3] == "bob@example.com"  # to
+        assert rows[1][4] == "Weekly Report"  # subject
+        assert rows[1][5] == "False"  # is_read
+        assert rows[1][6] == "Here is the weekly report. Best, Alice"  # body_preview
+        assert rows[1][7] == "AAMkAGI2TG93AAA="  # id
+        # Second data row (SAMPLE_MESSAGE_2)
+        assert rows[2][4] == "Re: Project Update"
+        assert rows[2][5] == "True"
+
+    @respx.mock
+    async def test_list_emails_pipe_in_subject(self, mcp_server):
+        """Subjects containing pipe characters are properly quoted in CSV."""
+        import csv
+        import io
+
+        msg_with_pipe = {
+            **SAMPLE_MESSAGE,
+            "subject": "Re: Q4 | Budget Review",
+            "bodyPreview": "Preview with | pipe char",
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json={"value": [msg_with_pipe]})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("list_emails", {"top": 10})
+
+        text = _get_text(result)
+        csv_text = text.split("\n\n", 1)[1]
+        reader = csv.reader(io.StringIO(csv_text), delimiter="|")
+        rows = list(reader)
+        assert rows[1][4] == "Re: Q4 | Budget Review"
+        assert rows[1][6] == "Preview with | pipe char"
+
+    @respx.mock
+    async def test_list_emails_with_mark_as_read(self, mcp_server):
+        msg_id = "AAMkAGI2TG93AAA="
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        patch_route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": True})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "list_emails",
+                    {"top": 10, "options": f'{{"mark_as_read": ["{msg_id}"]}}'},
+                )
+
+        text = _get_text(result)
+        assert "Weekly Report" in text
+        assert patch_route.called
+        payload = json.loads(patch_route.calls[0].request.content)
+        assert payload == {"isRead": True}
+        assert "1 message(s) marked as read" in text
+
+    @respx.mock
+    async def test_list_emails_mark_as_read_rejects_non_array(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "list_emails",
+                    {"top": 10, "options": '{"mark_as_read": "single-id"}'},
+                )
+
+        text = _get_text(result)
+        assert "must be a JSON array" in text
 
     @respx.mock
     async def test_read_email_plain_body(self, mcp_server):
@@ -256,6 +498,56 @@ class TestMCPEmailTools:
         text = _get_text(result)
         assert "HTML content" in text
         assert "Charlie Brown" in text
+
+    @respx.mock
+    async def test_read_email_with_mark_as_read(self, mcp_server):
+        msg_id = "AAMkAGI2TG93AAA="
+        respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        patch_route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": True})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "read_email",
+                    {"message_id": msg_id, "options": '{"mark_as_read": true}'},
+                )
+
+        text = _get_text(result)
+        assert "Weekly Report" in text
+        assert patch_route.called
+        payload = json.loads(patch_route.calls[0].request.content)
+        assert payload == {"isRead": True}
+        assert "marked as read" in text.lower()
+
+    @respx.mock
+    async def test_read_email_mark_as_unread(self, mcp_server):
+        msg_id = "AAMkAGI2TG93AAA="
+        respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        patch_route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": False})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "read_email",
+                    {"message_id": msg_id, "options": '{"mark_as_read": false}'},
+                )
+
+        text = _get_text(result)
+        assert "Weekly Report" in text
+        assert patch_route.called
+        payload = json.loads(patch_route.calls[0].request.content)
+        assert payload == {"isRead": False}
+        assert "marked as unread" in text.lower()
 
     @respx.mock
     async def test_send_email_plain_text(self, mcp_server):
@@ -326,7 +618,7 @@ class TestMCPEmailTools:
                         "to": "alice@example.com",
                         "subject": "Hi",
                         "body": "Hello!",
-                        "cc": "bob@example.com",
+                        "options": '{"cc": "bob@example.com"}',
                     },
                 )
 
@@ -334,6 +626,35 @@ class TestMCPEmailTools:
         assert "CC" in text
         payload = json.loads(route.calls[0].request.content)
         assert len(payload["message"]["ccRecipients"]) == 1
+
+    @respx.mock
+    async def test_send_email_with_bcc(self, mcp_server):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "send_email",
+                    {
+                        "to": "alice@example.com",
+                        "subject": "Hi",
+                        "body": "Hello!",
+                        "options": '{"bcc": "hidden@example.com,secret@example.com"}',
+                    },
+                )
+
+        text = _get_text(result)
+        assert "BCC" in text
+        assert "2 recipients" in text
+        # BCC addresses should NOT appear in the return message
+        assert "hidden@example.com" not in text
+        payload = json.loads(route.calls[0].request.content)
+        assert len(payload["message"]["bccRecipients"]) == 2
+        assert (
+            payload["message"]["bccRecipients"][0]["emailAddress"]["address"]
+            == "hidden@example.com"
+        )
 
     @respx.mock
     async def test_send_email_multiple_recipients(self, mcp_server):
@@ -363,7 +684,7 @@ class TestMCPEmailTools:
                         "to": "alice@example.com",
                         "subject": "S",
                         "body": "<p>HTML</p>",
-                        "body_type": "Text",
+                        "options": '{"body_type": "Text"}',
                     },
                 )
 
@@ -398,7 +719,7 @@ class TestMCPEmailTools:
                         "to": "alice@example.com",
                         "subject": "Hi",
                         "body": "Hello!",
-                        "from_address": "mailbox@example.com",
+                        "options": '{"from_address": "mailbox@example.com"}',
                     },
                 )
 
@@ -505,6 +826,46 @@ class TestMCPTeamsTools:
         text = _get_text(result)
         assert "3 chat(s)" in text
         assert "Alice Smith" in text
+        assert "unread|type|name" in text
+        assert "False|oneOnOne" in text
+        assert "True|group" in text
+        assert "True|meeting" in text
+
+    @respx.mock
+    async def test_list_chats_unread_edge_cases(self, mcp_server):
+        """Verifies unread column: no messages = not unread, null read timestamp = unread."""
+        chat_no_messages = {
+            "id": "chat-empty-001",
+            "chatType": "oneOnOne",
+            "topic": None,
+            "members": [{"displayName": "Alice"}],
+            "lastMessagePreview": None,
+            "viewpoint": None,
+        }
+        chat_null_read = {
+            "id": "chat-null-read-001",
+            "chatType": "group",
+            "topic": "Test",
+            "members": [{"displayName": "Bob"}],
+            "lastMessagePreview": {
+                "createdDateTime": "2025-12-15T10:00:00Z",
+                "body": {"content": "hello"},
+                "from": {"user": {"displayName": "Bob"}},
+            },
+            "viewpoint": {"lastMessageReadDateTime": None},
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json={"value": [chat_no_messages, chat_null_read]})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("list_chats", {})
+
+        text = _get_text(result)
+        assert "False|oneOnOne" in text
+        assert "True|group" in text
 
     @respx.mock
     async def test_list_chats_empty(self, mcp_server):
@@ -542,7 +903,7 @@ class TestMCPTeamsTools:
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "read_teams_messages",
-                    {"team_id": team_id, "channel_id": channel_id},
+                    {"team_id": team_id, "channel_id": channel_id, "since": "2025-01-01"},
                 )
 
         text = _get_text(result)
@@ -562,7 +923,7 @@ class TestMCPTeamsTools:
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "read_teams_messages",
-                    {"chat_id": chat_id},
+                    {"chat_id": chat_id, "since": "2025-01-01"},
                 )
 
         text = _get_text(result)
@@ -582,7 +943,12 @@ class TestMCPTeamsTools:
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
                     "read_teams_messages",
-                    {"chat_id": chat_id, "team_id": "team-id-001", "channel_id": "channel-id-001"},
+                    {
+                        "chat_id": chat_id,
+                        "team_id": "team-id-001",
+                        "channel_id": "channel-id-001",
+                        "since": "2025-01-01",
+                    },
                 )
 
         text = _get_text(result)
@@ -607,6 +973,73 @@ class TestMCPTeamsTools:
                 result = await client.call_tool("read_teams_messages", {"team_id": "t1"})
 
         assert "Provide either chat_id" in _get_text(result)
+
+    @respx.mock
+    async def test_read_teams_messages_max_content_length(self, mcp_server):
+        """max_content_length option truncates message bodies."""
+        chat_id = "chat-1on1-001"
+        long_msg = {
+            "id": "msg-long-001",
+            "messageType": "message",
+            "createdDateTime": "2025-12-15T12:00:00Z",
+            "from": {"user": {"displayName": "Tim"}, "application": None},
+            "body": {"contentType": "text", "content": "SELECT " + "x" * 2000},
+            "attachments": [],
+        }
+        respx.get(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(200, json={"value": [long_msg]})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result_full = await client.call_tool(
+                    "read_teams_messages",
+                    {"chat_id": chat_id, "since": "2025-01-01"},
+                )
+                result_truncated = await client.call_tool(
+                    "read_teams_messages",
+                    {
+                        "chat_id": chat_id,
+                        "since": "2025-01-01",
+                        "options": '{"max_content_length": 50}',
+                    },
+                )
+
+        full_text = _get_text(result_full)
+        truncated_text = _get_text(result_truncated)
+        assert "x" * 100 in full_text
+        assert "..." in truncated_text
+        assert "x" * 100 not in truncated_text
+
+    @respx.mock
+    async def test_read_email_max_content_length(self, mcp_server):
+        """max_content_length option truncates email body."""
+        long_email = {
+            **SAMPLE_MESSAGE,
+            "id": "msg-long-email",
+            "body": {"contentType": "text", "content": "Report: " + "z" * 3000},
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/messages/{long_email['id']}").mock(
+            return_value=httpx.Response(200, json=long_email)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result_full = await client.call_tool("read_email", {"message_id": long_email["id"]})
+                result_truncated = await client.call_tool(
+                    "read_email",
+                    {
+                        "message_id": long_email["id"],
+                        "options": '{"max_content_length": 100}',
+                    },
+                )
+
+        full_text = _get_text(result_full)
+        truncated_text = _get_text(result_truncated)
+        assert "z" * 200 in full_text
+        assert "z" * 200 not in truncated_text
 
     @respx.mock
     async def test_send_teams_message_to_channel(self, mcp_server):
@@ -660,6 +1093,140 @@ class TestMCPTeamsTools:
         assert "Provide either chat_id" in _get_text(result)
 
     @respx.mock
+    async def test_send_teams_message_newlines_converted(self, mcp_server):
+        """Auto content_type converts newlines to <br> in plain text."""
+        chat_id = "chat-1on1-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "send_teams_message",
+                    {"message": "Hello\nWorld", "chat_id": chat_id},
+                )
+
+        text = _get_text(result)
+        assert "chat" in text.lower()
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["body"]["contentType"] == "html"
+        assert payload["body"]["content"] == "Hello<br>World"
+
+    @respx.mock
+    async def test_send_teams_message_html_hyperlink(self, mcp_server):
+        """HTML hyperlinks pass through in auto mode."""
+        chat_id = "chat-1on1-001"
+        html_msg = '<a href="https://example.com">Click here</a>'
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "send_teams_message",
+                    {"message": html_msg, "chat_id": chat_id},
+                )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["body"]["contentType"] == "html"
+        assert payload["body"]["content"] == html_msg
+
+    @respx.mock
+    async def test_send_teams_message_with_user_mention(self, mcp_server):
+        """Mentions option builds Graph API mentions payload."""
+        team_id = "team-id-001"
+        channel_id = "channel-id-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "send_teams_message",
+                    {
+                        "message": "Hey check this out",
+                        "team_id": team_id,
+                        "channel_id": channel_id,
+                        "options": '{"mentions": [{"user_id": "aad-123", "name": "Alice"}]}',
+                    },
+                )
+
+        text = _get_text(result)
+        assert "channel" in text.lower()
+        payload = json.loads(route.calls[0].request.content)
+        assert "mentions" in payload
+        assert len(payload["mentions"]) == 1
+        assert payload["mentions"][0]["mentionText"] == "Alice"
+        assert payload["mentions"][0]["mentioned"]["user"]["id"] == "aad-123"
+        body_content = payload["body"]["content"]
+        assert '<at id="0">Alice</at>' in body_content
+        assert "Hey check this out" in body_content
+
+    @respx.mock
+    async def test_send_teams_message_mention_everyone(self, mcp_server):
+        """mention_everyone builds channel-wide mention."""
+        team_id = "team-id-001"
+        channel_id = "channel-id-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "send_teams_message",
+                    {
+                        "message": "Important update",
+                        "team_id": team_id,
+                        "channel_id": channel_id,
+                        "options": '{"mention_everyone": true}',
+                    },
+                )
+
+        text = _get_text(result)
+        assert "channel" in text.lower()
+        payload = json.loads(route.calls[0].request.content)
+        assert "mentions" in payload
+        assert payload["mentions"][0]["mentionText"] == "Everyone"
+        assert (
+            payload["mentions"][0]["mentioned"]["conversation"]["conversationIdentityType"]
+            == "channel"
+        )
+        body_content = payload["body"]["content"]
+        assert '<at id="0">Everyone</at>' in body_content
+        assert "Important update" in body_content
+
+    @respx.mock
+    async def test_send_teams_message_content_type_in_options(self, mcp_server):
+        """content_type in options works like the old positional param."""
+        chat_id = "chat-1on1-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                await client.call_tool(
+                    "send_teams_message",
+                    {
+                        "message": "plain text only",
+                        "chat_id": chat_id,
+                        "options": '{"content_type": "text"}',
+                    },
+                )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["body"]["contentType"] == "text"
+
+    @respx.mock
     async def test_get_teams_activity(self, mcp_server):
         # Wire up all the calls the activity scanner makes
         respx.get(f"{GRAPH_BASE_URL}/me/joinedTeams").mock(
@@ -689,6 +1256,114 @@ class TestMCPTeamsTools:
                 result = await client.call_tool("get_teams_activity", {})
 
         assert "not available" in _get_text(result).lower()
+
+    @respx.mock
+    async def test_list_chats_with_mark_as_read(self, mcp_server):
+        """mark_as_read option triggers POST markChatReadForUser for each ID."""
+        import base64
+
+        payload_data = {"oid": "user-obj-id", "tid": "tenant-id-123"}
+        header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode()
+        payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
+        sig = base64.urlsafe_b64encode(b"s").rstrip(b"=").decode()
+        fake_token = f"{header}.{payload}.{sig}"
+
+        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_RESPONSE)
+        )
+        mark_route = respx.post(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/markChatReadForUser").mock(
+            return_value=httpx.Response(204)
+        )
+
+        with _mock_token(fake_token):
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "list_chats",
+                    {"options": '{"mark_as_read": ["chat-1on1-001"]}'},
+                )
+
+        text = _get_text(result)
+        assert "3 chat(s)" in text
+        assert mark_route.called
+        sent_payload = json.loads(mark_route.calls[0].request.content)
+        assert sent_payload == {"user": {"id": "user-obj-id", "tenantId": "tenant-id-123"}}
+        assert "1 chat(s) marked as read" in text
+
+    @respx.mock
+    async def test_list_chats_mark_as_read_rejects_non_array(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "list_chats",
+                    {"options": '{"mark_as_read": true}'},
+                )
+
+        assert "must be a JSON array" in _get_text(result)
+
+    @respx.mock
+    async def test_read_teams_messages_with_mark_as_read(self, mcp_server):
+        """mark_as_read: true marks the chat as read after reading messages."""
+        import base64
+
+        payload_data = {"oid": "user-obj-id", "tid": "tenant-id-123"}
+        header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode()
+        payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
+        sig = base64.urlsafe_b64encode(b"s").rstrip(b"=").decode()
+        fake_token = f"{header}.{payload}.{sig}"
+
+        chat_id = "chat-1on1-001"
+        respx.get(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_RESPONSE)
+        )
+        mark_route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/markChatReadForUser").mock(
+            return_value=httpx.Response(204)
+        )
+
+        with _mock_token(fake_token):
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "read_teams_messages",
+                    {
+                        "chat_id": chat_id,
+                        "since": "2025-01-01",
+                        "options": '{"mark_as_read": true}',
+                    },
+                )
+
+        text = _get_text(result)
+        assert "1 message(s)" in text
+        assert mark_route.called
+        sent_payload = json.loads(mark_route.calls[0].request.content)
+        assert sent_payload == {"user": {"id": "user-obj-id", "tenantId": "tenant-id-123"}}
+        assert "marked as read" in text.lower()
+
+    @respx.mock
+    async def test_read_teams_messages_mark_as_read_channel_rejected(self, mcp_server):
+        """mark_as_read with team_id+channel_id returns error."""
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "read_teams_messages",
+                    {
+                        "team_id": "team-id-001",
+                        "channel_id": "channel-id-001",
+                        "since": "2025-01-01",
+                        "options": '{"mark_as_read": true}',
+                    },
+                )
+
+        assert "only supported for chats" in _get_text(result)
 
 
 # ---------------------------------------------------------------------------
@@ -881,10 +1556,52 @@ class TestMCPFileTools:
 
     @respx.mock
     async def test_inspect_file_binary_returns_message(self, mcp_server):
-        """Binary files (PPTX, 2.5 MB) report they cannot be shown as text."""
+        """Non-extractable binary files (images) report they cannot be shown as text."""
+        image_item = {
+            "id": "file-id-img-001",
+            "name": "diagram.png",
+            "size": 500_000,
+            "file": {"mimeType": "image/png"},
+            "lastModifiedDateTime": "2025-12-15T10:00:00Z",
+            "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-001"}},
+            "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-img-001",
+            "parentReference": {"driveId": "drive-001", "path": "/drive/root:"},
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-img-001").mock(
+            return_value=httpx.Response(200, json=image_item)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "inspect_file", {"item_id": "file-id-img-001", "read_content": True}
+                )
+
+        text = _get_text(result)
+        assert "diagram.png" in text
+        assert "binary" in text.lower()
+
+    @respx.mock
+    async def test_inspect_file_extracts_pptx(self, mcp_server):
+        """PPTX files are now extracted via document extraction."""
+        import io
+
+        from pptx import Presentation
+
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[0])
+        slide.shapes.title.text = "Test Slide Title"
+        buf = io.BytesIO()
+        prs.save(buf)
+        pptx_bytes = buf.getvalue()
+
         item_id = SAMPLE_DRIVE_ITEM_BINARY["id"]
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_BINARY)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/content").mock(
+            return_value=httpx.Response(200, content=pptx_bytes)
         )
         with _mock_token():
             from fastmcp import Client
@@ -895,9 +1612,8 @@ class TestMCPFileTools:
                 )
 
         text = _get_text(result)
-        # PPTX is 2.5 MB so it hits the "too large" branch (> 512 KB)
         assert "presentation.pptx" in text
-        assert "too large" in text.lower() or "binary" in text.lower()
+        assert "Test Slide Title" in text
 
     @respx.mock
     async def test_inspect_file_too_large(self, mcp_server):
@@ -1034,9 +1750,103 @@ class TestMCPUploadTool:
         assert SAMPLE_UPLOADED_FILE["id"] in text
         assert SAMPLE_UPLOADED_FILE["webUrl"] in text
 
+    @respx.mock
+    async def test_upload_docx_converts_markdown(self, mcp_server):
+        """Uploading a .docx file converts markdown content to Word format."""
+        route = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/Review.docx:/content").mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "upload_file",
+                    {"filename": "Review.docx", "content": "# Title\n\nA paragraph."},
+                )
+
+        text = _get_text(result)
+        assert "uploaded" in text.lower()
+        assert route.called
+        req = route.calls[0].request
+        assert req.headers["Content-Type"] == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        assert req.content[:2] == b"PK"  # ZIP magic bytes = valid .docx
+
+    @respx.mock
+    async def test_upload_base64_binary(self, mcp_server):
+        """Uploading with content_encoding=base64 decodes and uploads binary."""
+        import base64
+
+        raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        encoded = base64.b64encode(raw).decode()
+        route = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/image.png:/content").mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "upload_file",
+                    {
+                        "filename": "image.png",
+                        "content": encoded,
+                        "content_encoding": "base64",
+                    },
+                )
+
+        text = _get_text(result)
+        assert "uploaded" in text.lower()
+        assert route.called
+        assert route.calls[0].request.content == raw
+
+    async def test_upload_base64_invalid_content(self, mcp_server):
+        """Invalid base64 returns a user-friendly error."""
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "upload_file",
+                    {
+                        "filename": "file.bin",
+                        "content": "not-valid-base64!!!",
+                        "content_encoding": "base64",
+                    },
+                )
+
+        text = _get_text(result)
+        assert "Failed to decode" in text
+
+    @respx.mock
+    async def test_upload_docx_to_sharepoint(self, mcp_server):
+        """Docx upload works with SharePoint site_id."""
+        site_id = "site-id-001"
+        route = respx.put(
+            f"{GRAPH_BASE_URL}/sites/{site_id}/drive/root:/Contracts/Review.docx:/content"
+        ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "upload_file",
+                    {
+                        "filename": "Review.docx",
+                        "content": "# Contract\n\n- Clause 1\n- Clause 2",
+                        "folder_path": "Contracts",
+                        "site_id": site_id,
+                    },
+                )
+
+        assert "uploaded" in _get_text(result).lower()
+        assert route.called
+
 
 class TestMCPCopyOrRenameTool:
-    """Tests for the consolidated copy_or_rename_file MCP tool."""
+    """Tests for the consolidated manage_file MCP tool (copy/rename/delete)."""
 
     @pytest.fixture(autouse=True)
     def patch_sleep(self, no_sleep):
@@ -1049,7 +1859,7 @@ class TestMCPCopyOrRenameTool:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
@@ -1058,7 +1868,7 @@ class TestMCPCopyOrRenameTool:
 
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
-                    "copy_or_rename_file",
+                    "manage_file",
                     {"item_id": item_id, "new_name": "template-copy.docx", "action": "copy"},
                 )
 
@@ -1074,21 +1884,21 @@ class TestMCPCopyOrRenameTool:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
-            return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
-        )
+        copy_route = respx.post(
+            f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy"
+        ).mock(return_value=httpx.Response(202, headers={"Location": MONITOR_URL}))
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with _mock_token():
             from fastmcp import Client
 
             async with Client(mcp_server) as client:
                 await client.call_tool(
-                    "copy_or_rename_file",
+                    "manage_file",
                     {
                         "item_id": item_id,
                         "new_name": "archived.docx",
                         "action": "copy",
-                        "destination_folder_id": dest,
+                        "options": f'{{"destination_folder_id": "{dest}"}}',
                     },
                 )
 
@@ -1096,14 +1906,12 @@ class TestMCPCopyOrRenameTool:
         assert copy_body["parentReference"]["id"] == dest
 
     @respx.mock
-    async def test_copy_error_propagates(self, mcp_server):
-        from fastmcp.exceptions import ToolError
-
+    async def test_copy_error_returns_message(self, mcp_server):
         item_id = SAMPLE_DRIVE_ITEM_WORD["id"]
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED))
@@ -1111,11 +1919,14 @@ class TestMCPCopyOrRenameTool:
             from fastmcp import Client
 
             async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="accessDenied"):
-                    await client.call_tool(
-                        "copy_or_rename_file",
-                        {"item_id": item_id, "new_name": "copy.docx", "action": "copy"},
-                    )
+                result = await client.call_tool(
+                    "manage_file",
+                    {"item_id": item_id, "new_name": "copy.docx", "action": "copy"},
+                )
+
+        text = _get_text(result)
+        assert "Error performing copy" in text
+        assert "accessDenied" in text
 
     @respx.mock
     async def test_rename_action(self, mcp_server):
@@ -1130,7 +1941,7 @@ class TestMCPCopyOrRenameTool:
 
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
-                    "copy_or_rename_file",
+                    "manage_file",
                     {"item_id": item_id, "new_name": "final-report.csv"},
                 )
 
@@ -1153,8 +1964,12 @@ class TestMCPCopyOrRenameTool:
 
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
-                    "copy_or_rename_file",
-                    {"item_id": item_id, "new_name": "final-doc.docx", "site_id": site_id},
+                    "manage_file",
+                    {
+                        "item_id": item_id,
+                        "new_name": "final-doc.docx",
+                        "options": f'{{"site_id": "{site_id}"}}',
+                    },
                 )
 
         assert "final-doc.docx" in _get_text(result)
@@ -1165,7 +1980,7 @@ class TestMCPCopyOrRenameTool:
 
             async with Client(mcp_server) as client:
                 result = await client.call_tool(
-                    "copy_or_rename_file",
+                    "manage_file",
                     {"item_id": "x", "new_name": "y", "action": "move"},
                 )
 
@@ -1174,9 +1989,7 @@ class TestMCPCopyOrRenameTool:
         assert "move" in text
 
     @respx.mock
-    async def test_rename_error_propagates(self, mcp_server):
-        from fastmcp.exceptions import ToolError
-
+    async def test_rename_not_found_returns_message(self, mcp_server):
         item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
         respx.patch(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(
@@ -1187,11 +2000,85 @@ class TestMCPCopyOrRenameTool:
             from fastmcp import Client
 
             async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="ResourceNotFound"):
-                    await client.call_tool(
-                        "copy_or_rename_file",
-                        {"item_id": item_id, "new_name": "x.csv"},
-                    )
+                result = await client.call_tool(
+                    "manage_file",
+                    {"item_id": item_id, "new_name": "x.csv"},
+                )
+
+        assert "not found" in _get_text(result).lower()
+
+    @respx.mock
+    async def test_delete_not_found_returns_message(self, mcp_server):
+        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
+        respx.delete(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
+            return_value=httpx.Response(
+                404, json={"error": {"code": "itemNotFound", "message": "Item not found."}}
+            )
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_file",
+                    {"item_id": item_id, "action": "delete"},
+                )
+
+        assert "not found" in _get_text(result).lower()
+
+    @respx.mock
+    async def test_delete_action(self, mcp_server):
+        """action='delete' → DELETE the item (204 No Content)."""
+        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
+        route = respx.delete(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
+            return_value=httpx.Response(204)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_file",
+                    {"item_id": item_id, "action": "delete"},
+                )
+
+        assert route.called
+        assert "Deleted" in _get_text(result)
+
+    @respx.mock
+    async def test_delete_on_sharepoint(self, mcp_server):
+        site_id = "site-id-001"
+        item_id = SAMPLE_DRIVE_ITEM_WORD["id"]
+        route = respx.delete(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}").mock(
+            return_value=httpx.Response(204)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_file",
+                    {
+                        "item_id": item_id,
+                        "action": "delete",
+                        "options": f'{{"site_id": "{site_id}"}}',
+                    },
+                )
+
+        assert route.called
+        assert "Deleted" in _get_text(result)
+
+    async def test_rename_requires_new_name(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_file",
+                    {"item_id": "x", "action": "rename"},
+                )
+
+        assert "new_name is required" in _get_text(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1566,7 +2453,7 @@ class TestMCPAuth:
             ("list_files", {}),
             ("inspect_file", {"item_id": "x"}),
             ("upload_file", {"filename": "x.txt", "content": "y"}),
-            ("copy_or_rename_file", {"item_id": "x", "new_name": "y"}),
+            ("manage_file", {"item_id": "x", "new_name": "y"}),
         ]
         with patch(
             "ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")
@@ -2108,3 +2995,618 @@ class TestMCPConnectionStatus:
         data = _structured(result)
         assert data["connected"] is False
         assert data["connect_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# Inbox rules
+# ---------------------------------------------------------------------------
+
+_RULES_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messageRules"
+
+
+class TestMCPInboxRuleTools:
+    """Test the manage_inbox_rules tool end-to-end via the in-process client."""
+
+    @respx.mock
+    async def test_list_rules(self, mcp_server):
+        respx.get(_RULES_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_RULES_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_inbox_rules", {})
+
+        text = _get_text(result)
+        assert "2 rule(s)" in text
+        assert "id|displayName|sequence|isEnabled|conditions|actions" in text
+        assert "From partner" in text
+        assert SAMPLE_MESSAGE_RULE["id"] in text
+        # condition/action keys summarised
+        assert "senderContains" in text
+        assert "moveToFolder" in text
+
+    @respx.mock
+    async def test_list_rules_empty(self, mcp_server):
+        respx.get(_RULES_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_inbox_rules", {"action": "list"})
+
+        assert "No inbox rules found." in _get_text(result)
+
+    @respx.mock
+    async def test_get_rule(self, mcp_server):
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        respx.get(f"{_RULES_URL}/{rule_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_RULE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_inbox_rules", {"action": "get", "rule_id": rule_id}
+                )
+
+        text = _get_text(result)
+        assert "From partner" in text
+        assert rule_id in text
+        # Full JSON includes condition values, not just keys
+        assert "adele" in text
+        assert "senderContains" in text
+
+    @respx.mock
+    async def test_create_rule(self, mcp_server):
+        rule = {
+            "displayName": "From partner",
+            "sequence": 2,
+            "actions": {"markAsRead": True},
+        }
+        route = respx.post(_RULES_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_MESSAGE_RULE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_inbox_rules",
+                    {"action": "create", "options": json.dumps(rule)},
+                )
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == rule
+        text = _get_text(result)
+        assert SAMPLE_MESSAGE_RULE["id"] in text
+        assert "created" in text.lower()
+
+    @respx.mock
+    async def test_update_rule(self, mcp_server):
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        route = respx.patch(f"{_RULES_URL}/{rule_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE_RULE, "isEnabled": False})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_inbox_rules",
+                    {
+                        "action": "update",
+                        "rule_id": rule_id,
+                        "options": '{"isEnabled": false}',
+                    },
+                )
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"isEnabled": False}
+        text = _get_text(result)
+        assert rule_id in text
+        assert "updated" in text.lower()
+
+    @respx.mock
+    async def test_delete_rule(self, mcp_server):
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        route = respx.delete(f"{_RULES_URL}/{rule_id}").mock(return_value=httpx.Response(204))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_inbox_rules", {"action": "delete", "rule_id": rule_id}
+                )
+
+        assert route.called
+        text = _get_text(result)
+        assert rule_id in text
+        assert "deleted" in text.lower()
+
+    async def test_unknown_action_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_inbox_rules", {"action": "frobnicate"})
+
+        assert "Unknown action" in _get_text(result)
+
+    async def test_missing_rule_id_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                for action in ("get", "update", "delete"):
+                    result = await client.call_tool("manage_inbox_rules", {"action": action})
+                    assert "rule_id" in _get_text(result)
+
+    async def test_create_without_options_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_inbox_rules", {"action": "create"})
+
+        assert "options" in _get_text(result)
+
+    async def test_update_without_options_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_inbox_rules",
+                    {"action": "update", "rule_id": "some-id", "options": "{}"},
+                )
+
+        assert "non-empty options" in _get_text(result)
+
+    @respx.mock
+    async def test_create_missing_readwrite_surfaces_error(self, mcp_server):
+        """403 (ReadWrite scope not granted) surfaces to the caller as a ToolError."""
+        from fastmcp.exceptions import ToolError
+
+        respx.post(_RULES_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                with pytest.raises(ToolError, match="Authorization_RequestDenied"):
+                    await client.call_tool(
+                        "manage_inbox_rules",
+                        {
+                            "action": "create",
+                            "options": '{"displayName": "x", "sequence": 1, "actions": {"markAsRead": true}}',
+                        },
+                    )
+
+
+_FOLDERS_URL = f"{GRAPH_BASE_URL}/me/mailFolders"
+
+
+class TestMCPFolderTools:
+    """Test the manage_mail_folders tool end-to-end via the in-process client."""
+
+    @respx.mock
+    async def test_list_folders(self, mcp_server):
+        respx.get(_FOLDERS_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_mail_folders", {})
+
+        text = _get_text(result)
+        assert "2 folder(s)" in text
+        assert "id|displayName|childFolderCount|totalItemCount|unreadItemCount" in text
+        assert "Projects" in text
+        assert SAMPLE_MAIL_FOLDER["id"] in text
+
+    @respx.mock
+    async def test_list_folders_empty(self, mcp_server):
+        respx.get(_FOLDERS_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_mail_folders", {"action": "list"})
+
+        assert "No folders found." in _get_text(result)
+
+    @respx.mock
+    async def test_list_child_folders(self, mcp_server):
+        parent_id = SAMPLE_MAIL_FOLDER["id"]
+        route = respx.get(f"{_FOLDERS_URL}/{parent_id}/childFolders").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {"action": "list", "options": json.dumps({"parent_id": parent_id})},
+                )
+
+        assert route.called
+        assert "2 folder(s)" in _get_text(result)
+
+    @respx.mock
+    async def test_get_folder(self, mcp_server):
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        respx.get(f"{_FOLDERS_URL}/{folder_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDER)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders", {"action": "get", "folder_id": folder_id}
+                )
+
+        text = _get_text(result)
+        assert "Projects" in text
+        assert folder_id in text
+        assert "totalItemCount" in text
+
+    @respx.mock
+    async def test_create_folder(self, mcp_server):
+        route = respx.post(_FOLDERS_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_MAIL_FOLDER)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {"action": "create", "options": json.dumps({"display_name": "Projects"})},
+                )
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"displayName": "Projects"}
+        text = _get_text(result)
+        assert SAMPLE_MAIL_FOLDER["id"] in text
+        assert "created" in text.lower()
+
+    @respx.mock
+    async def test_create_child_folder(self, mcp_server):
+        parent_id = SAMPLE_MAIL_FOLDER["id"]
+        route = respx.post(f"{_FOLDERS_URL}/{parent_id}/childFolders").mock(
+            return_value=httpx.Response(201, json=SAMPLE_MAIL_FOLDER)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                await client.call_tool(
+                    "manage_mail_folders",
+                    {
+                        "action": "create",
+                        "options": json.dumps({"display_name": "Sub", "parent_id": parent_id}),
+                    },
+                )
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"displayName": "Sub"}
+
+    @respx.mock
+    async def test_rename_folder(self, mcp_server):
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        route = respx.patch(f"{_FOLDERS_URL}/{folder_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MAIL_FOLDER, "displayName": "Renamed"})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {
+                        "action": "rename",
+                        "folder_id": folder_id,
+                        "options": json.dumps({"display_name": "Renamed"}),
+                    },
+                )
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"displayName": "Renamed"}
+        text = _get_text(result)
+        assert folder_id in text
+        assert "renamed" in text.lower()
+
+    @respx.mock
+    async def test_rename_folder_minimal_graph_response_returns_friendly_message(self, mcp_server):
+        """Graph returns the updated folder; if it returns an empty dict the tool still succeeds."""
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        respx.patch(f"{_FOLDERS_URL}/{folder_id}").mock(return_value=httpx.Response(200, json={}))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {
+                        "action": "rename",
+                        "folder_id": folder_id,
+                        "options": json.dumps({"display_name": "Renamed"}),
+                    },
+                )
+
+        text = _get_text(result)
+        assert "renamed" in text.lower()
+
+    @respx.mock
+    async def test_delete_folder(self, mcp_server):
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        route = respx.delete(f"{_FOLDERS_URL}/{folder_id}").mock(return_value=httpx.Response(204))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders", {"action": "delete", "folder_id": folder_id}
+                )
+
+        assert route.called
+        text = _get_text(result)
+        assert folder_id in text
+        assert "deleted" in text.lower()
+
+    async def test_unknown_action_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_mail_folders", {"action": "frobnicate"})
+
+        assert "Unknown action" in _get_text(result)
+
+    async def test_missing_folder_id_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                for action in ("get", "rename", "delete"):
+                    result = await client.call_tool("manage_mail_folders", {"action": action})
+                    assert "folder_id" in _get_text(result)
+
+    async def test_create_without_display_name_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_mail_folders", {"action": "create"})
+
+        assert "display_name" in _get_text(result)
+
+    @respx.mock
+    async def test_create_missing_readwrite_surfaces_error(self, mcp_server):
+        """403 (ReadWrite scope not granted) surfaces to the caller as a ToolError."""
+        from fastmcp.exceptions import ToolError
+
+        respx.post(_FOLDERS_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                with pytest.raises(ToolError, match="Authorization_RequestDenied"):
+                    await client.call_tool(
+                        "manage_mail_folders",
+                        {"action": "create", "options": '{"display_name": "x"}'},
+                    )
+
+    @respx.mock
+    async def test_move_folder(self, mcp_server):
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        dest_id = "AQMkAGfolder-002"
+        route = respx.post(f"{_FOLDERS_URL}/{folder_id}/move").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MAIL_FOLDER, "parentFolderId": dest_id})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {
+                        "action": "move",
+                        "folder_id": folder_id,
+                        "options": json.dumps({"destination_id": dest_id}),
+                    },
+                )
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"destinationId": dest_id}
+        text = _get_text(result)
+        assert folder_id in text
+        assert "moved" in text.lower()
+
+    @respx.mock
+    async def test_move_folder_minimal_graph_response_returns_friendly_message(self, mcp_server):
+        """Graph returns the moved folder; if it returns an empty dict the tool falls back to dest_id."""
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        dest_id = "drafts"
+        respx.post(f"{_FOLDERS_URL}/{folder_id}/move").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {
+                        "action": "move",
+                        "folder_id": folder_id,
+                        "options": json.dumps({"destination_id": dest_id}),
+                    },
+                )
+
+        text = _get_text(result)
+        assert "moved" in text.lower()
+        assert dest_id in text
+
+    async def test_move_missing_folder_id_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("manage_mail_folders", {"action": "move"})
+
+        assert "folder_id" in _get_text(result)
+
+    async def test_move_missing_destination_returns_friendly_message(self, mcp_server):
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {"action": "move", "folder_id": SAMPLE_MAIL_FOLDER["id"]},
+                )
+
+        assert "destination_id" in _get_text(result)
+
+    # --- input coercion / hardening (commit 2) exercised through the tool -----
+
+    @respx.mock
+    async def test_list_non_string_parent_id_is_coerced_not_crashed(self, mcp_server):
+        """A numeric parent_id in JSON options is coerced to a string path, not a TypeError."""
+        route = respx.get(f"{_FOLDERS_URL}/123/childFolders").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {"action": "list", "options": json.dumps({"parent_id": 123})},
+                )
+
+        assert route.called
+        assert "2 folder(s)" in _get_text(result)
+
+    @respx.mock
+    async def test_create_non_string_parent_id_is_coerced_not_crashed(self, mcp_server):
+        """A numeric parent_id on create is coerced to a string path, not a TypeError."""
+        route = respx.post(f"{_FOLDERS_URL}/123/childFolders").mock(
+            return_value=httpx.Response(201, json=SAMPLE_MAIL_FOLDER)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "manage_mail_folders",
+                    {
+                        "action": "create",
+                        "options": json.dumps({"display_name": "Sub", "parent_id": 123}),
+                    },
+                )
+
+        assert route.called
+        assert "created" in _get_text(result).lower()
+
+    @respx.mock
+    async def test_list_top_zero_is_clamped_to_at_least_one(self, mcp_server):
+        """top=0 must not reach Graph as $top=0; the tool clamps it to >= 1."""
+        route = respx.get(_FOLDERS_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                await client.call_tool(
+                    "manage_mail_folders",
+                    {"action": "list", "options": json.dumps({"top": 0})},
+                )
+
+        assert route.called
+        assert int(route.calls[0].request.url.params["$top"]) >= 1
+
+    @respx.mock
+    async def test_list_include_hidden_adds_query_param(self, mcp_server):
+        """include_hidden=true surfaces the Graph includeHiddenFolders query param."""
+        route = respx.get(_FOLDERS_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                await client.call_tool(
+                    "manage_mail_folders",
+                    {"action": "list", "options": json.dumps({"include_hidden": True})},
+                )
+
+        assert route.called
+        assert route.calls[0].request.url.params["includeHiddenFolders"] == "true"
+
+    @respx.mock
+    async def test_list_surfaces_graph_error(self, mcp_server):
+        """A 403 on list surfaces to the caller as a ToolError."""
+        from fastmcp.exceptions import ToolError
+
+        respx.get(_FOLDERS_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                with pytest.raises(ToolError, match="Authorization_RequestDenied"):
+                    await client.call_tool("manage_mail_folders", {"action": "list"})
+
+    @respx.mock
+    async def test_move_surfaces_graph_error(self, mcp_server):
+        """A 404 on move surfaces to the caller as a ToolError."""
+        from fastmcp.exceptions import ToolError
+
+        folder_id = SAMPLE_MAIL_FOLDER["id"]
+        respx.post(f"{_FOLDERS_URL}/{folder_id}/move").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                with pytest.raises(ToolError, match="ResourceNotFound"):
+                    await client.call_tool(
+                        "manage_mail_folders",
+                        {
+                            "action": "move",
+                            "folder_id": folder_id,
+                            "options": json.dumps({"destination_id": "inbox"}),
+                        },
+                    )
+
+    @respx.mock
+    async def test_delete_surfaces_graph_error(self, mcp_server):
+        """A 404 on delete surfaces to the caller as a ToolError."""
+        from fastmcp.exceptions import ToolError
+
+        respx.delete(f"{_FOLDERS_URL}/bad-id").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                with pytest.raises(ToolError, match="ResourceNotFound"):
+                    await client.call_tool(
+                        "manage_mail_folders", {"action": "delete", "folder_id": "bad-id"}
+                    )

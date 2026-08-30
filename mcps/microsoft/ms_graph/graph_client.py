@@ -203,9 +203,14 @@ class AsyncGraphClient:
         _raise_for_graph_error(response)
         return response.json()
 
-    async def patch(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
+    async def patch(
+        self,
+        path: str,
+        json_data: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """PATCH a resource with a JSON payload."""
-        response = await self._client.patch(path, json=json_data)
+        response = await self._client.patch(path, json=json_data, headers=headers)
         _raise_for_graph_error(response)
         return response.json()
 
@@ -214,6 +219,11 @@ class AsyncGraphClient:
         response = await self._client.get(path, params=params, follow_redirects=True)
         _raise_for_graph_error(response)
         return response.content
+
+    async def delete(self, path: str) -> None:
+        """DELETE a resource (Graph replies 204 No Content with an empty body)."""
+        response = await self._client.delete(path)
+        _raise_for_graph_error(response)
 
     async def close(self) -> None:
         await self._client.aclose()

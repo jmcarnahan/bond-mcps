@@ -7,11 +7,12 @@ import pytest
 import respx
 from ms_graph import mail
 from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
-from ms_graph.mail import _detect_body_type
+from ms_graph.mail import _base, _detect_body_type
 
 from .conftest import (
     GRAPH_ERROR_400,
     GRAPH_ERROR_403,
+    GRAPH_ERROR_404,
     GRAPH_ERROR_410,
     SAMPLE_AWKWARD_MESSAGE_ID,
     SAMPLE_DELTA_LINK,
@@ -20,11 +21,16 @@ from .conftest import (
     SAMPLE_DELTA_PAGE_NEXT,
     SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
+    SAMPLE_MESSAGE_2,
     SAMPLE_MESSAGE_DETAIL,
+    SAMPLE_MESSAGE_RULE,
+    SAMPLE_MESSAGE_RULES_RESPONSE,
     SAMPLE_MESSAGES_RESPONSE,
     SAMPLE_REPLY_DRAFT,
     SAMPLE_USER_PROFILE,
 )
+
+_RULES_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messageRules"
 
 
 class TestProfileSync:
@@ -124,6 +130,21 @@ class TestMailSync:
         assert "top=5" in str(route.calls[0].request.url)
 
     @respx.mock
+    def test_list_messages_encodes_real_folder_id(self):
+        """A real folder ID with reserved chars is percent-encoded in the path (#54)."""
+        from urllib.parse import quote
+
+        folder_id = "AQ/folder+001="
+        encoded = quote(folder_id, safe="")
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/{encoded}/messages").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        with GraphClient("tok") as client:
+            mail.list_messages(client, folder=folder_id)
+
+        assert route.called
+
+    @respx.mock
     def test_get_message(self):
         msg_id = "AAMkAGI2TG93AAA="
         respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
@@ -169,6 +190,29 @@ class TestMailSync:
         payload = json.loads(route.calls[0].request.content)
         assert len(payload["message"]["ccRecipients"]) == 1
         assert payload["message"]["ccRecipients"][0]["emailAddress"]["address"] == "bob@example.com"
+
+    @respx.mock
+    def test_send_message_with_bcc(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        with GraphClient("tok") as client:
+            mail.send_message(
+                client,
+                to=["alice@example.com"],
+                subject="Hello",
+                body="Hi!",
+                bcc=["hidden@example.com", "secret@example.com"],
+            )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert len(payload["message"]["bccRecipients"]) == 2
+        assert (
+            payload["message"]["bccRecipients"][0]["emailAddress"]["address"]
+            == "hidden@example.com"
+        )
+        assert (
+            payload["message"]["bccRecipients"][1]["emailAddress"]["address"]
+            == "secret@example.com"
+        )
 
     @respx.mock
     def test_send_message_with_from_address(self):
@@ -224,6 +268,26 @@ class TestMailAsync:
         assert len(messages) == 2
 
     @respx.mock
+    async def test_alist_messages_encodes_real_folder_id(self):
+        """A real folder ID with reserved chars (=, /, +) is percent-encoded (#54).
+
+        Resolved folder IDs are base64 and routinely contain '/', which would
+        otherwise split the URL path segment and 400.
+        """
+        from urllib.parse import quote
+
+        folder_id = "AQ/folder+001="
+        encoded = quote(folder_id, safe="")
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/{encoded}/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            messages = await mail.alist_messages(client, folder=folder_id)
+
+        assert route.called
+        assert len(messages) == 2
+
+    @respx.mock
     async def test_aget_message(self):
         msg_id = "AAMkAGI2TG93AAA="
         respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
@@ -271,6 +335,241 @@ class TestMailAsync:
             results = await mail.asearch_messages(client, "report")
 
         assert len(results) == 1
+
+    @respx.mock
+    async def test_alist_messages_passes_select(self):
+        """Verify $select parameter is forwarded to the Graph API."""
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.alist_messages(client, select="id,subject,bodyPreview")
+
+        request = route.calls[0].request
+        assert "%24select=id%2Csubject%2CbodyPreview" in str(
+            request.url
+        ) or "$select=id,subject,bodyPreview" in str(request.url)
+
+    @respx.mock
+    async def test_asearch_messages_passes_select(self):
+        """Verify $select parameter is forwarded to the Graph API for search."""
+        route = respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.asearch_messages(client, "test", select="id,subject")
+
+        request = route.calls[0].request
+        assert "%24select=id%2Csubject" in str(request.url) or "$select=id,subject" in str(
+            request.url
+        )
+
+    @respx.mock
+    async def test_asearch_messages_global_when_no_folder(self):
+        """With no folder, search hits the global /me/messages endpoint (#54)."""
+        route = respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.asearch_messages(client, "report")
+
+        assert route.called
+        assert "$search" in str(route.calls[0].request.url) or "%24search" in str(
+            route.calls[0].request.url
+        )
+
+    @respx.mock
+    async def test_asearch_messages_scoped_to_folder(self):
+        """With a folder, search is scoped to that folder's messages, with $search (#54)."""
+        folder_id = "AQMkAGfolder-001"
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/{folder_id}/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.asearch_messages(client, "report", folder=folder_id)
+
+        assert route.called
+        url = str(route.calls[0].request.url)
+        assert "$search" in url or "%24search" in url
+        assert "$orderby" not in url and "%24orderby" not in url
+        assert len(results) == 1
+
+    @respx.mock
+    async def test_asearch_messages_scoped_folder_id_is_url_encoded(self):
+        """A folder ID with reserved chars is percent-encoded in the scoped path (#54)."""
+        from urllib.parse import quote
+
+        folder_id = "AQ/folder+001="
+        encoded = quote(folder_id, safe="")
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/{encoded}/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.asearch_messages(client, "report", folder=folder_id)
+
+        assert route.called
+
+
+class TestMarkRead:
+    """Tests for marking a message read/unread via PATCH /me/messages/{id}."""
+
+    @respx.mock
+    async def test_amark_read_defaults_to_read(self):
+        msg_id = "AAMkAGI2TG93AAA="
+        route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": True})
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await mail.amark_read(client, msg_id)
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"isRead": True}
+        assert result["isRead"] is True
+
+    @respx.mock
+    async def test_amark_read_can_mark_unread(self):
+        msg_id = "AAMkAGI2TG93AAA="
+        route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": False})
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await mail.amark_read(client, msg_id, is_read=False)
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"isRead": False}
+        assert result["isRead"] is False
+
+    @respx.mock
+    async def test_amark_read_propagates_graph_error(self):
+        """A failed PATCH (e.g. unknown message ID) surfaces as GraphError."""
+        msg_id = "bad-id"
+        respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(
+                404, json={"error": {"code": "ErrorItemNotFound", "message": "Not found"}}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await mail.amark_read(client, msg_id)
+
+        assert exc_info.value.status_code == 404
+
+
+class TestPagination:
+    """Tests for _apaginate helper and paginated list/search functions."""
+
+    @respx.mock
+    async def test_apaginate_single_page_no_next_link(self):
+        """Single page response (no @odata.nextLink) returns all items."""
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.alist_messages(client, top=100)
+
+        assert len(results) == 2
+        assert results[0]["subject"] == "Weekly Report"
+        assert results[1]["subject"] == "Re: Project Update"
+
+    @respx.mock
+    async def test_apaginate_follows_next_link(self):
+        """Paginator follows @odata.nextLink to fetch subsequent pages."""
+        page1 = {
+            "value": [SAMPLE_MESSAGE],
+            "@odata.nextLink": f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages?$skip=1&$top=999",
+        }
+        page2 = {"value": [SAMPLE_MESSAGE_2]}
+        responses = iter(
+            [
+                httpx.Response(200, json=page1),
+                httpx.Response(200, json=page2),
+            ]
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            side_effect=lambda req: next(responses)
+        )
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.alist_messages(client, top=100)
+
+        assert len(results) == 2
+        assert results[0]["id"] == "AAMkAGI2TG93AAA="
+        assert results[1]["id"] == "AAMkAGI2TG94BBB="
+
+    @respx.mock
+    async def test_apaginate_respects_max_results(self):
+        """Paginator stops and truncates when max_results is reached."""
+        page1 = {
+            "value": [SAMPLE_MESSAGE, SAMPLE_MESSAGE_2],
+            "@odata.nextLink": f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages?$skip=2",
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json=page1)
+        )
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.alist_messages(client, top=1)
+
+        assert len(results) == 1
+        assert results[0]["subject"] == "Weekly Report"
+
+    @respx.mock
+    async def test_apaginate_max_pages_safety_cap(self):
+        """Paginator exits after _MAX_PAGES even if nextLink keeps coming."""
+        from ms_graph.pagination import _MAX_PAGES
+
+        call_count = 0
+
+        def _make_page(req):
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(
+                200,
+                json={
+                    "value": [SAMPLE_MESSAGE],
+                    "@odata.nextLink": f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages?$skip={call_count}",
+                },
+            )
+
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(side_effect=_make_page)
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.alist_messages(client, top=99999)
+
+        assert call_count == _MAX_PAGES
+        assert len(results) == _MAX_PAGES
+
+    @respx.mock
+    async def test_apaginate_empty_first_page(self):
+        """Paginator handles empty first page gracefully."""
+        respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.alist_messages(client, top=100)
+
+        assert results == []
+
+    @respx.mock
+    async def test_asearch_messages_pagination(self):
+        """Search also paginates through @odata.nextLink."""
+        page1 = {
+            "value": [SAMPLE_MESSAGE],
+            "@odata.nextLink": f"{GRAPH_BASE_URL}/me/messages?$skip=1&$top=250",
+        }
+        page2 = {"value": [SAMPLE_MESSAGE_2]}
+        responses = iter(
+            [
+                httpx.Response(200, json=page1),
+                httpx.Response(200, json=page2),
+            ]
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(side_effect=lambda req: next(responses))
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.asearch_messages(client, "test", top=100)
+
+        assert len(results) == 2
+        assert results[0]["subject"] == "Weekly Report"
+        assert results[1]["subject"] == "Re: Project Update"
 
 
 # ---------------------------------------------------------------------------
@@ -951,3 +1250,320 @@ class TestDraftBodyAndSend:
         assert str(route.calls[0].request.url).endswith(
             "/me/messages/AAMkA%2FGI2%2BTG93AAA%3D/send"
         )
+
+
+class TestInboxRules:
+    """Tests for inbox rule (messageRule) CRUD against /me/mailFolders/inbox/messageRules."""
+
+    @respx.mock
+    async def test_list_returns_rules(self):
+        route = respx.get(_RULES_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_RULES_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            rules = await mail.alist_inbox_rules(client)
+
+        assert route.called
+        assert len(rules) == 2
+        assert rules[0]["displayName"] == "From partner"
+
+    @respx.mock
+    async def test_list_empty_returns_empty_list(self):
+        respx.get(_RULES_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+        async with AsyncGraphClient("tok") as client:
+            rules = await mail.alist_inbox_rules(client)
+
+        assert rules == []
+
+    @respx.mock
+    async def test_list_propagates_graph_error(self):
+        respx.get(_RULES_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await mail.alist_inbox_rules(client)
+
+        assert exc_info.value.status_code == 403
+
+    @respx.mock
+    async def test_get_returns_rule(self):
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        route = respx.get(f"{_RULES_URL}/{rule_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_RULE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            rule = await mail.aget_inbox_rule(client, rule_id)
+
+        assert route.called
+        assert rule["id"] == rule_id
+        assert rule["displayName"] == "From partner"
+
+    @respx.mock
+    async def test_get_propagates_graph_error(self):
+        respx.get(f"{_RULES_URL}/bad-id").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await mail.aget_inbox_rule(client, "bad-id")
+
+        assert exc_info.value.status_code == 404
+
+    @respx.mock
+    async def test_create_posts_rule_and_returns_body(self):
+        new_rule = {
+            "displayName": "From partner",
+            "sequence": 2,
+            "actions": {"markAsRead": True},
+        }
+        route = respx.post(_RULES_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_MESSAGE_RULE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            created = await mail.acreate_inbox_rule(client, new_rule)
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == new_rule
+        assert created["id"] == SAMPLE_MESSAGE_RULE["id"]
+
+    @respx.mock
+    async def test_create_propagates_graph_error(self):
+        respx.post(_RULES_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await mail.acreate_inbox_rule(client, {"displayName": "x"})
+
+        assert exc_info.value.status_code == 403
+
+    @respx.mock
+    async def test_update_sends_partial_patch_and_returns_rule(self):
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        changes = {"isEnabled": False}
+        route = respx.patch(f"{_RULES_URL}/{rule_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE_RULE, "isEnabled": False})
+        )
+        async with AsyncGraphClient("tok") as client:
+            updated = await mail.aupdate_inbox_rule(client, rule_id, changes)
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"isEnabled": False}
+        assert updated["isEnabled"] is False
+
+    @respx.mock
+    async def test_update_readonly_rule_surfaces_graph_error(self):
+        """isReadOnly rules can't be modified — Graph returns 403, which surfaces."""
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        respx.patch(f"{_RULES_URL}/{rule_id}").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await mail.aupdate_inbox_rule(client, rule_id, {"isEnabled": False})
+
+        assert exc_info.value.status_code == 403
+
+    @respx.mock
+    async def test_delete_calls_endpoint_and_returns_none(self):
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        route = respx.delete(f"{_RULES_URL}/{rule_id}").mock(return_value=httpx.Response(204))
+        async with AsyncGraphClient("tok") as client:
+            result = await mail.adelete_inbox_rule(client, rule_id)
+
+        assert route.called
+        assert result is None
+
+    @respx.mock
+    async def test_delete_propagates_graph_error(self):
+        respx.delete(f"{_RULES_URL}/bad-id").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await mail.adelete_inbox_rule(client, "bad-id")
+
+        assert exc_info.value.status_code == 404
+
+    @respx.mock
+    async def test_get_url_encodes_special_characters(self):
+        """Rule IDs with reserved chars (/, +) are percent-encoded in the URL."""
+        from urllib.parse import quote
+
+        rule_id = "AQ/rule+001"
+        encoded_id = quote(rule_id, safe="")
+        respx.get(f"{_RULES_URL}/{encoded_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE_RULE, "id": rule_id})
+        )
+        async with AsyncGraphClient("tok") as client:
+            rule = await mail.aget_inbox_rule(client, rule_id)
+
+        assert rule["id"] == rule_id
+
+
+class TestBase:
+    """Tests for _base() path-prefix helper."""
+
+    def test_none_returns_me(self):
+        assert _base(None) == "/me"
+
+    def test_empty_string_returns_me(self):
+        assert _base("") == "/me"
+
+    def test_email_returns_users_path(self):
+        assert _base("shared@example.com") == "/users/shared@example.com"
+
+    def test_plus_in_address_is_encoded(self):
+        assert _base("support+team@example.com") == "/users/support%2Bteam@example.com"
+
+    def test_hash_in_address_is_encoded(self):
+        assert _base("group#1@example.com") == "/users/group%231@example.com"
+
+    def test_at_sign_preserved(self):
+        result = _base("user@domain.com")
+        assert "@" in result
+        assert result == "/users/user@domain.com"
+
+
+SHARED_MAILBOX = "shared@example.com"
+
+
+class TestSharedMailboxSync:
+    """Sync operations targeting a shared mailbox use /users/{mailbox}/ paths."""
+
+    @respx.mock
+    def test_list_messages_shared(self):
+        route = respx.get(
+            f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/mailFolders/inbox/messages"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE))
+        with GraphClient("tok") as client:
+            messages = mail.list_messages(client, mailbox=SHARED_MAILBOX)
+
+        assert route.called
+        assert len(messages) == 2
+
+    @respx.mock
+    def test_get_message_shared(self):
+        msg_id = "AAMkAGI2TG93AAA="
+        route = respx.get(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with GraphClient("tok") as client:
+            msg = mail.get_message(client, msg_id, mailbox=SHARED_MAILBOX)
+
+        assert route.called
+        assert msg["subject"] == "Weekly Report"
+
+    @respx.mock
+    def test_send_message_shared(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        with GraphClient("tok") as client:
+            mail.send_message(
+                client,
+                to=["alice@example.com"],
+                subject="From shared",
+                body="Hello from shared mailbox",
+                mailbox=SHARED_MAILBOX,
+            )
+
+        assert route.called
+
+    @respx.mock
+    def test_search_messages_shared(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        with GraphClient("tok") as client:
+            results = mail.search_messages(client, "report", mailbox=SHARED_MAILBOX)
+
+        assert route.called
+        assert len(results) == 2
+
+    @respx.mock
+    def test_list_messages_no_mailbox_uses_me(self):
+        """Confirm backward compatibility — no mailbox still uses /me/."""
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        with GraphClient("tok") as client:
+            mail.list_messages(client)
+
+        assert route.called
+
+
+class TestSharedMailboxAsync:
+    """Async operations targeting a shared mailbox use /users/{mailbox}/ paths."""
+
+    @respx.mock
+    async def test_alist_messages_shared(self):
+        route = respx.get(
+            f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/mailFolders/inbox/messages"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE))
+        async with AsyncGraphClient("tok") as client:
+            messages = await mail.alist_messages(client, mailbox=SHARED_MAILBOX)
+
+        assert route.called
+        assert len(messages) == 2
+
+    @respx.mock
+    async def test_aget_message_shared(self):
+        msg_id = "AAMkAGI2TG93AAA="
+        route = respx.get(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            msg = await mail.aget_message(client, msg_id, mailbox=SHARED_MAILBOX)
+
+        assert route.called
+        assert msg["subject"] == "Weekly Report"
+
+    @respx.mock
+    async def test_amark_read_shared(self):
+        msg_id = "AAMkAGI2TG93AAA="
+        route = respx.patch(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": True})
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await mail.amark_read(client, msg_id, mailbox=SHARED_MAILBOX)
+
+        assert route.called
+        assert result["isRead"] is True
+
+    @respx.mock
+    async def test_asend_message_shared(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.asend_message(
+                client,
+                to=["alice@example.com"],
+                subject="From shared",
+                body="Hello from shared mailbox",
+                mailbox=SHARED_MAILBOX,
+            )
+
+        assert route.called
+
+    @respx.mock
+    async def test_asearch_messages_shared(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
+        )
+        async with AsyncGraphClient("tok") as client:
+            results = await mail.asearch_messages(client, "report", mailbox=SHARED_MAILBOX)
+
+        assert route.called
+        assert len(results) == 1
+
+    @respx.mock
+    async def test_alist_messages_none_mailbox_uses_me(self):
+        """Confirm backward compatibility — None mailbox still uses /me/."""
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.alist_messages(client, mailbox=None)
+
+        assert route.called

@@ -1,5 +1,7 @@
 """Tests for file/drive operations (sync and async)."""
 
+import base64
+import io
 import json
 from unittest.mock import patch
 
@@ -10,6 +12,8 @@ from ms_graph import files
 from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
 
 from .conftest import (
+    GRAPH_ERROR_403,
+    GRAPH_ERROR_404,
     SAMPLE_COPY_COMPLETED,
     SAMPLE_COPY_FAILED,
     SAMPLE_COPY_IN_PROGRESS,
@@ -21,6 +25,9 @@ from .conftest import (
     SAMPLE_DRIVE_ITEM_WORD,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_EMPTY,
+    SAMPLE_SHARED_DRIVE_ITEM,
+    SAMPLE_SHARED_FOLDER_CHILDREN,
+    SAMPLE_SHARED_TEXT_FILE,
     SAMPLE_SITE,
     SAMPLE_SITES_RESPONSE,
     SAMPLE_UPLOADED_FILE,
@@ -533,6 +540,7 @@ class TestUploadAsync:
 # ---------------------------------------------------------------------------
 
 MONITOR_URL = "https://api.onedrive.com/v1.0/monitor/copy-op-token"
+SOURCE_DRIVE_ID = SAMPLE_DRIVE_ITEM_WORD["parentReference"]["driveId"]
 
 
 class TestCopySync:
@@ -549,7 +557,7 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
@@ -566,7 +574,7 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(303, json=SAMPLE_COPY_COMPLETED))
@@ -583,7 +591,7 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         # First poll → inProgress (200), second poll → completed (303)
@@ -605,7 +613,7 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED))
@@ -620,9 +628,9 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
-            return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
-        )
+        copy_route = respx.post(
+            f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy"
+        ).mock(return_value=httpx.Response(202, headers={"Location": MONITOR_URL}))
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             files.copy_drive_item(
@@ -642,13 +650,35 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             result = files.copy_drive_item(
                 client, item_id=item_id, new_name="sp-copy.docx", site_id=site_id
+            )
+        assert result["status"] == "completed"
+
+    @respx.mock
+    def test_copy_falls_back_when_no_source_drive_id(self):
+        """Falls back to site-based path when source has no driveId in parentReference."""
+        site_id = "site-id-fallback"
+        source_no_drive = {
+            **SAMPLE_DRIVE_ITEM_WORD,
+            "parentReference": {"id": "folder-id-root", "path": "/drive/root:"},
+        }
+        item_id = source_no_drive["id"]
+        respx.get(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}").mock(
+            return_value=httpx.Response(200, json=source_no_drive)
+        )
+        respx.post(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}/copy").mock(
+            return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
+        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
+        with GraphClient("tok") as client:
+            result = files.copy_drive_item(
+                client, item_id=item_id, new_name="fallback-copy.docx", site_id=site_id
             )
         assert result["status"] == "completed"
 
@@ -660,9 +690,9 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
-            return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
-        )
+        copy_route = respx.post(
+            f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy"
+        ).mock(return_value=httpx.Response(202, headers={"Location": MONITOR_URL}))
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with GraphClient("tok") as client:
             files.copy_drive_item(client, item_id=item_id, new_name="copy.docx")
@@ -677,7 +707,7 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202)  # No Location header
         )
         with pytest.raises(GraphError, match="NoLocation"):
@@ -691,7 +721,7 @@ class TestCopySync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_IN_PROGRESS))
@@ -701,6 +731,29 @@ class TestCopySync:
             with pytest.raises(GraphError, match="CopyTimeout"):
                 with GraphClient("tok") as client:
                     files.copy_drive_item(client, item_id=item_id, new_name="copy.docx")
+
+    @respx.mock
+    def test_copy_with_explicit_source_drive_id(self):
+        """source_drive_id routes the initial GET to /drives/{drive_id}/items/..."""
+        item_id = SAMPLE_DRIVE_ITEM_WORD["id"]
+        custom_drive = "drive-custom-source-001"
+        get_route = respx.get(f"{GRAPH_BASE_URL}/drives/{custom_drive}/items/{item_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
+        )
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
+            return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
+        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
+        with GraphClient("tok") as client:
+            result = files.copy_drive_item(
+                client,
+                item_id=item_id,
+                new_name="source-drive-copy.docx",
+                source_drive_id=custom_drive,
+            )
+
+        assert get_route.called
+        assert result["status"] == "completed"
 
 
 class TestCopyAsync:
@@ -716,7 +769,7 @@ class TestCopyAsync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
@@ -735,7 +788,7 @@ class TestCopyAsync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(303, json=SAMPLE_COPY_COMPLETED))
@@ -753,7 +806,7 @@ class TestCopyAsync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED))
@@ -768,9 +821,9 @@ class TestCopyAsync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        copy_route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
-            return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
-        )
+        copy_route = respx.post(
+            f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy"
+        ).mock(return_value=httpx.Response(202, headers={"Location": MONITOR_URL}))
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         async with AsyncGraphClient("tok") as client:
             await files.acopy_drive_item(
@@ -787,7 +840,7 @@ class TestCopyAsync:
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
         )
-        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/copy").mock(
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_IN_PROGRESS))
@@ -797,6 +850,29 @@ class TestCopyAsync:
             with pytest.raises(GraphError, match="CopyTimeout"):
                 async with AsyncGraphClient("tok") as client:
                     await files.acopy_drive_item(client, item_id=item_id, new_name="copy.docx")
+
+    @respx.mock
+    async def test_acopy_with_explicit_source_drive_id(self):
+        """source_drive_id routes the initial GET to /drives/{drive_id}/items/... (async)."""
+        item_id = SAMPLE_DRIVE_ITEM_WORD["id"]
+        custom_drive = "drive-custom-source-001"
+        get_route = respx.get(f"{GRAPH_BASE_URL}/drives/{custom_drive}/items/{item_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
+        )
+        respx.post(f"{GRAPH_BASE_URL}/drives/{SOURCE_DRIVE_ID}/items/{item_id}/copy").mock(
+            return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
+        )
+        respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
+        async with AsyncGraphClient("tok") as client:
+            result = await files.acopy_drive_item(
+                client,
+                item_id=item_id,
+                new_name="source-drive-copy.docx",
+                source_drive_id=custom_drive,
+            )
+
+        assert get_route.called
+        assert result["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -908,3 +984,332 @@ class TestRenameAsync:
         with pytest.raises(GraphError, match="AccessDenied"):
             async with AsyncGraphClient("tok") as client:
                 await files.arename_drive_item(client, item_id=item_id, new_name="x.csv")
+
+
+class TestDeleteAsync:
+    """Asynchronous adelete_drive_item tests."""
+
+    @respx.mock
+    async def test_adelete_file(self):
+        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
+        route = respx.delete(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
+            return_value=httpx.Response(204)
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await files.adelete_drive_item(client, item_id=item_id)
+
+        assert result is None
+        assert route.called
+
+    @respx.mock
+    async def test_adelete_on_sharepoint(self):
+        site_id = "site-id-001"
+        item_id = SAMPLE_DRIVE_ITEM_WORD["id"]
+        route = respx.delete(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}").mock(
+            return_value=httpx.Response(204)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await files.adelete_drive_item(client, item_id=item_id, site_id=site_id)
+
+        assert route.called
+
+    @respx.mock
+    async def test_adelete_propagates_graph_error(self):
+        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
+        respx.delete(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
+            return_value=httpx.Response(
+                404, json={"error": {"code": "itemNotFound", "message": "Not found."}}
+            )
+        )
+        with pytest.raises(GraphError, match="itemNotFound"):
+            async with AsyncGraphClient("tok") as client:
+                await files.adelete_drive_item(client, item_id=item_id)
+
+
+# ---------------------------------------------------------------------------
+# Sharing URL resolution tests
+# ---------------------------------------------------------------------------
+
+SAMPLE_SHARING_URL = "https://mcafee-my.sharepoint.com/:p:/p/sajith_pilakkavil/IQDlH5omr1bEQpRD3GJa7fmqAemTOa6IJ3XnNMgxgAQZPsk"
+
+
+class TestEncodeSharingUrl:
+    """Unit tests for URL detection and encoding helpers."""
+
+    def test_encode_produces_u_bang_prefix(self):
+        token = files._encode_sharing_url(SAMPLE_SHARING_URL)
+        assert token.startswith("u!")
+
+    def test_encode_no_forbidden_chars(self):
+        token = files._encode_sharing_url(SAMPLE_SHARING_URL)
+        payload = token[2:]
+        assert "/" not in payload
+        assert "+" not in payload
+        assert not payload.endswith("=")
+
+    def test_encode_roundtrip(self):
+        url = "https://contoso.sharepoint.com/:w:/s/site/EaB123-xyz"
+        token = files._encode_sharing_url(url)
+        payload = token[2:].replace("_", "/").replace("-", "+")
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += "=" * padding
+        decoded = base64.b64decode(payload).decode("utf-8")
+        assert decoded == url
+
+    def test_is_sharing_url_sharepoint(self):
+        assert files.is_sharing_url("https://contoso-my.sharepoint.com/:p:/p/user/abc")
+        assert files.is_sharing_url("https://contoso.sharepoint.com/:w:/s/site/abc")
+
+    def test_is_sharing_url_onedrive(self):
+        assert files.is_sharing_url("https://1drv.ms/w/s!abc123")
+        assert files.is_sharing_url("https://onedrive.live.com/redir?resid=abc")
+
+    def test_is_sharing_url_negative(self):
+        assert not files.is_sharing_url("file-id-001")
+        assert not files.is_sharing_url("01ABCDEF12345")
+        assert not files.is_sharing_url("https://google.com/doc/123")
+        assert not files.is_sharing_url("")
+
+    def test_is_sharing_url_with_whitespace(self):
+        assert files.is_sharing_url("  https://contoso.sharepoint.com/:w:/s/site/abc  ")
+
+
+class TestResolveSharingLinkSync:
+    """Synchronous sharing link resolution tests."""
+
+    @respx.mock
+    def test_resolve_succeeds(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_DRIVE_ITEM)
+        )
+        with GraphClient("tok") as client:
+            item = files.resolve_sharing_link(client, SAMPLE_SHARING_URL)
+        assert item["name"] == "Q4-Presentation.pptx"
+        assert item["id"] == "shared-file-001"
+
+    @respx.mock
+    def test_resolve_access_denied(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with pytest.raises(GraphError) as exc_info:
+            with GraphClient("tok") as client:
+                files.resolve_sharing_link(client, SAMPLE_SHARING_URL)
+        assert exc_info.value.status_code == 403
+
+    @respx.mock
+    def test_resolve_not_found(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with pytest.raises(GraphError) as exc_info:
+            with GraphClient("tok") as client:
+                files.resolve_sharing_link(client, SAMPLE_SHARING_URL)
+        assert exc_info.value.status_code == 404
+
+    @respx.mock
+    def test_resolve_content_text_file(self):
+        md_content = b"# Hello\n\nThis is a shared note."
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_TEXT_FILE)
+        )
+        respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=md_content)
+        )
+        with GraphClient("tok") as client:
+            item, content = files.resolve_sharing_link_content(client, SAMPLE_SHARING_URL)
+        assert item["name"] == "notes.md"
+        assert content == "# Hello\n\nThis is a shared note."
+
+    @respx.mock
+    def test_resolve_content_binary_file(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_DRIVE_ITEM)
+        )
+        with GraphClient("tok") as client:
+            item, content = files.resolve_sharing_link_content(client, SAMPLE_SHARING_URL)
+        assert item["name"] == "Q4-Presentation.pptx"
+        assert content is None
+
+    @respx.mock
+    def test_list_sharing_link_children(self):
+        respx.get(url__regex=r"/shares/u!.*/root/children").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_FOLDER_CHILDREN)
+        )
+        with GraphClient("tok") as client:
+            items = files.list_sharing_link_children(client, SAMPLE_SHARING_URL)
+        assert len(items) == 2
+        assert items[0]["name"] == "file1.docx"
+        assert items[1]["name"] == "data.csv"
+
+
+class TestResolveSharingLinkAsync:
+    """Asynchronous sharing link resolution tests."""
+
+    @respx.mock
+    async def test_aresolve_succeeds(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_DRIVE_ITEM)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item = await files.aresolve_sharing_link(client, SAMPLE_SHARING_URL)
+        assert item["name"] == "Q4-Presentation.pptx"
+        assert item["id"] == "shared-file-001"
+
+    @respx.mock
+    async def test_aresolve_access_denied(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with pytest.raises(GraphError) as exc_info:
+            async with AsyncGraphClient("tok") as client:
+                await files.aresolve_sharing_link(client, SAMPLE_SHARING_URL)
+        assert exc_info.value.status_code == 403
+
+    @respx.mock
+    async def test_aresolve_not_found(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with pytest.raises(GraphError) as exc_info:
+            async with AsyncGraphClient("tok") as client:
+                await files.aresolve_sharing_link(client, SAMPLE_SHARING_URL)
+        assert exc_info.value.status_code == 404
+
+    @respx.mock
+    async def test_aresolve_content_text_file(self):
+        md_content = b"# Shared doc\n\nContent here."
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_TEXT_FILE)
+        )
+        respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=md_content)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, content = await files.aresolve_sharing_link_content(client, SAMPLE_SHARING_URL)
+        assert item["name"] == "notes.md"
+        assert content == "# Shared doc\n\nContent here."
+
+    @respx.mock
+    async def test_aresolve_content_binary_file(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_DRIVE_ITEM)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, content = await files.aresolve_sharing_link_content(client, SAMPLE_SHARING_URL)
+        assert item["name"] == "Q4-Presentation.pptx"
+        assert content is None
+
+    @respx.mock
+    async def test_alist_sharing_link_children(self):
+        respx.get(url__regex=r"/shares/u!.*/root/children").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_FOLDER_CHILDREN)
+        )
+        async with AsyncGraphClient("tok") as client:
+            items = await files.alist_sharing_link_children(client, SAMPLE_SHARING_URL)
+        assert len(items) == 2
+        assert items[0]["name"] == "file1.docx"
+
+
+# ---------------------------------------------------------------------------
+# Document extraction integration tests
+# ---------------------------------------------------------------------------
+
+SAMPLE_DOCX_ITEM = {
+    "id": "file-id-docx-001",
+    "name": "report.docx",
+    "size": 50_000,
+    "file": {"mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    "lastModifiedDateTime": "2025-12-20T09:00:00Z",
+    "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-001"}},
+    "webUrl": "https://contoso.sharepoint.com/sites/eng/report.docx",
+    "parentReference": {"driveId": "drive-001", "path": "/drive/root:/Documents"},
+}
+
+
+def _make_sample_docx() -> bytes:
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading("Integration Test", level=1)
+    doc.add_paragraph("This is test content for extraction.")
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+class TestDocumentExtractionIntegration:
+    """Integration tests for document content extraction via Graph API."""
+
+    @respx.mock
+    async def test_aget_drive_item_extracted_content_docx(self):
+        docx_bytes = _make_sample_docx()
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-docx-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DOCX_ITEM)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-docx-001/content").mock(
+            return_value=httpx.Response(200, content=docx_bytes)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, content = await files.aget_drive_item_extracted_content(
+                client, "file-id-docx-001"
+            )
+        assert item["name"] == "report.docx"
+        assert content is not None
+        assert "Integration Test" in content
+        assert "This is test content" in content
+
+    @respx.mock
+    async def test_aget_drive_item_extracted_content_image_returns_none(self):
+        """Image files are not extractable — returns None."""
+        image_item = {
+            "id": "file-id-img-001",
+            "name": "photo.png",
+            "size": 500_000,
+            "file": {"mimeType": "image/png"},
+            "lastModifiedDateTime": "2025-12-20T09:00:00Z",
+            "lastModifiedBy": {"user": {"displayName": "Bob", "id": "user-002"}},
+            "webUrl": "https://contoso.sharepoint.com/photo.png",
+            "parentReference": {"driveId": "drive-001"},
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-img-001").mock(
+            return_value=httpx.Response(200, json=image_item)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, content = await files.aget_drive_item_extracted_content(client, "file-id-img-001")
+        assert item["name"] == "photo.png"
+        assert content is None
+
+    @respx.mock
+    async def test_aget_drive_item_extracted_content_too_large(self):
+        """Files exceeding 50 MB return None without downloading."""
+        huge_item = {
+            **SAMPLE_DOCX_ITEM,
+            "id": "file-id-huge",
+            "size": 60_000_000,
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-huge").mock(
+            return_value=httpx.Response(200, json=huge_item)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, content = await files.aget_drive_item_extracted_content(client, "file-id-huge")
+        assert content is None
+
+    @respx.mock
+    async def test_aresolve_sharing_link_extracted_content(self):
+        """Document extraction works through sharing link resolution."""
+        docx_bytes = _make_sample_docx()
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DOCX_ITEM)
+        )
+        respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=docx_bytes)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, content = await files.aresolve_sharing_link_extracted_content(
+                client, SAMPLE_SHARING_URL
+            )
+        assert item["name"] == "report.docx"
+        assert content is not None
+        assert "Integration Test" in content

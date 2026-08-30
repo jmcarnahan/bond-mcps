@@ -235,14 +235,16 @@ If the browser path fails (SSH, headless), MSAL falls back to device code flow �
 poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
-### Available Tools (33)
+### Available Tools (36)
 
 | Tool | Description |
 |------|-------------|
 | `get_user_profile` | Get the authenticated user's profile information |
-| `list_emails` | List recent emails or search email messages |
-| `read_email` | Read a single email message by its ID |
+| `list_emails` | List recent emails or search email messages; optionally mark specific IDs as read |
+| `read_email` | Read a single email message by its ID; optionally mark as read/unread |
 | `send_email` | Send an email message |
+| `manage_inbox_rules` | Manage Outlook inbox rules: list, get, create, update, delete |
+| `manage_mail_folders` | Manage Outlook mail folders: list, get, create, rename, move, delete |
 | `list_calendar_events` | List calendar events in a date range |
 | `get_calendar_event` | Get detailed information about a specific calendar event |
 | `create_calendar_event` | Create a new calendar event |
@@ -256,7 +258,8 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 | `list_files` | List or search files in OneDrive or SharePoint |
 | `inspect_file` | Get metadata and optionally the content of a file from OneDrive or SharePoint |
 | `upload_file` | Create or overwrite a text file in OneDrive or SharePoint |
-| `copy_or_rename_file` | Copy or rename a file or folder |
+| `edit_document` | Edit an existing Word document or Excel workbook in place |
+| `manage_file` | Copy, rename, or delete a file or folder |
 | `list_powerbi_workspaces` | List all Power BI workspaces the user has access to |
 | `list_powerbi_content` | List datasets, reports, and/or dashboards in a Power BI workspace |
 | `query_dataset` | Execute a DAX query against a Power BI dataset and return results as CSV |
@@ -279,7 +282,7 @@ All parameters use simple `str`/`int` types for Bedrock compatibility. Teams too
 
 The last ten tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
 
-The 23 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
+The 26 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
 
 A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
 

@@ -7,12 +7,19 @@ or AsyncGraphClient and return parsed dicts.
 """
 
 import asyncio
+import base64
+import re
 import time
 from typing import Any
 
+from .document_extract import (
+    MAX_DOCUMENT_DOWNLOAD_BYTES,
+    extract_document_text,
+    is_extractable_document,
+)
 from .graph_client import AsyncGraphClient, GraphClient, GraphError
 
-MAX_TEXT_DOWNLOAD_BYTES = 524_288  # 512 KB
+MAX_TEXT_DOWNLOAD_BYTES = 2_000_000  # 2 MB
 MAX_SIMPLE_UPLOAD_BYTES = 4_000_000  # 4 MB (Graph simple upload limit)
 
 # Content-type mapping for upload (by file extension)
@@ -96,12 +103,46 @@ _TEXT_EXTENSIONS = frozenset(
 )
 
 
-def _drive_base(site_id: str | None = None) -> str:
+# Matches SharePoint/OneDrive sharing URLs broadly.
+_SHARING_URL_PATTERN = re.compile(
+    r"^https?://"
+    r"("
+    r"[a-zA-Z0-9\-]+\.sharepoint\.com"
+    r"|1drv\.ms"
+    r"|onedrive\.live\.com"
+    r")"
+    r"/",
+    re.IGNORECASE,
+)
+
+
+def is_sharing_url(value: str) -> bool:
+    """Return True if the value looks like a SharePoint/OneDrive sharing URL."""
+    return bool(_SHARING_URL_PATTERN.match(value.strip()))
+
+
+def _encode_sharing_url(url: str) -> str:
+    """Encode a sharing URL into the share token format for the Graph Shares API.
+
+    Algorithm (from Microsoft docs):
+    1. Base64-encode the URL
+    2. Replace '/' with '_', '+' with '-', remove trailing '='
+    3. Prefix with 'u!'
+    """
+    encoded = base64.b64encode(url.encode("utf-8")).decode("ascii")
+    token = encoded.replace("/", "_").replace("+", "-").rstrip("=")
+    return f"u!{token}"
+
+
+def _drive_base(site_id: str | None = None, drive_id: str | None = None) -> str:
     """Return the Graph API base path for a drive.
 
-    - No site_id (or empty string): user's OneDrive -> ``/me/drive``
-    - With site_id: SharePoint site drive -> ``/sites/{site_id}/drive``
+    - drive_id provided: specific drive -> ``/drives/{drive_id}``
+    - No drive_id, with site_id: SharePoint site drive -> ``/sites/{site_id}/drive``
+    - Neither: user's OneDrive -> ``/me/drive``
     """
+    if drive_id:
+        return f"/drives/{drive_id}"
     if site_id:
         return f"/sites/{site_id}/drive"
     return "/me/drive"
@@ -155,9 +196,10 @@ def get_drive_item(
     client: GraphClient,
     item_id: str,
     site_id: str = "",
+    drive_id: str = "",
 ) -> dict[str, Any]:
     """Get metadata for a single drive item by ID."""
-    base = _drive_base(site_id or None)
+    base = _drive_base(site_id or None, drive_id or None)
     return client.get(f"{base}/items/{item_id}")
 
 
@@ -242,6 +284,57 @@ def list_sites(
 
 
 # ---------------------------------------------------------------------------
+# Sharing link resolution — synchronous
+# ---------------------------------------------------------------------------
+
+
+def resolve_sharing_link(
+    client: GraphClient,
+    url: str,
+) -> dict[str, Any]:
+    """Resolve a sharing URL to its underlying driveItem metadata."""
+    token = _encode_sharing_url(url.strip())
+    return client.get(f"/shares/{token}/driveItem")
+
+
+def resolve_sharing_link_content(
+    client: GraphClient,
+    url: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Resolve a sharing URL and download text content if applicable.
+
+    Returns (item_metadata, text_content_or_None).
+    """
+    token = _encode_sharing_url(url.strip())
+    item = client.get(f"/shares/{token}/driveItem")
+
+    if not _is_text_file(item):
+        return item, None
+
+    size = item.get("size", 0)
+    if size > MAX_TEXT_DOWNLOAD_BYTES:
+        return item, None
+
+    raw = client.get_bytes(f"/shares/{token}/driveItem/content")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    return item, text
+
+
+def list_sharing_link_children(
+    client: GraphClient,
+    url: str,
+    top: int = 20,
+) -> list[dict[str, Any]]:
+    """If the sharing URL points to a folder, list its children."""
+    token = _encode_sharing_url(url.strip())
+    data = client.get(f"/shares/{token}/root/children", params={"$top": top})
+    return data.get("value", [])
+
+
+# ---------------------------------------------------------------------------
 # Asynchronous
 # ---------------------------------------------------------------------------
 
@@ -267,9 +360,10 @@ async def aget_drive_item(
     client: AsyncGraphClient,
     item_id: str,
     site_id: str = "",
+    drive_id: str = "",
 ) -> dict[str, Any]:
     """Get metadata for a single drive item by ID (async)."""
-    base = _drive_base(site_id or None)
+    base = _drive_base(site_id or None, drive_id or None)
     return await client.get(f"{base}/items/{item_id}")
 
 
@@ -353,6 +447,181 @@ async def alist_sites(
 
 
 # ---------------------------------------------------------------------------
+# Sharing link resolution — asynchronous
+# ---------------------------------------------------------------------------
+
+
+async def aresolve_sharing_link(
+    client: AsyncGraphClient,
+    url: str,
+) -> dict[str, Any]:
+    """Resolve a sharing URL to its underlying driveItem metadata (async)."""
+    token = _encode_sharing_url(url.strip())
+    return await client.get(f"/shares/{token}/driveItem")
+
+
+async def aresolve_sharing_link_content(
+    client: AsyncGraphClient,
+    url: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Resolve a sharing URL and download text content if applicable (async).
+
+    Returns (item_metadata, text_content_or_None).
+    """
+    token = _encode_sharing_url(url.strip())
+    item = await client.get(f"/shares/{token}/driveItem")
+
+    if not _is_text_file(item):
+        return item, None
+
+    size = item.get("size", 0)
+    if size > MAX_TEXT_DOWNLOAD_BYTES:
+        return item, None
+
+    raw = await client.get_bytes(f"/shares/{token}/driveItem/content")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    return item, text
+
+
+async def alist_sharing_link_children(
+    client: AsyncGraphClient,
+    url: str,
+    top: int = 20,
+) -> list[dict[str, Any]]:
+    """If the sharing URL points to a folder, list its children (async)."""
+    token = _encode_sharing_url(url.strip())
+    data = await client.get(f"/shares/{token}/root/children", params={"$top": top})
+    return data.get("value", [])
+
+
+# ---------------------------------------------------------------------------
+# Document content extraction — synchronous
+# ---------------------------------------------------------------------------
+
+
+def get_drive_item_extracted_content(
+    client: GraphClient,
+    item_id: str,
+    site_id: str = "",
+    item: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Download an Office document and extract its text content.
+
+    Pass a pre-fetched ``item`` dict to avoid a redundant metadata GET.
+    Returns (item_metadata, extracted_text_or_None).
+    """
+    base = _drive_base(site_id or None)
+    if item is None:
+        item = client.get(f"{base}/items/{item_id}")
+
+    if not is_extractable_document(item):
+        return item, None
+
+    size = item.get("size", 0)
+    if size > MAX_DOCUMENT_DOWNLOAD_BYTES:
+        return item, None
+
+    raw = client.get_bytes(f"{base}/items/{item_id}/content")
+    mime = item.get("file", {}).get("mimeType", "")
+    name = item.get("name", "")
+    text = extract_document_text(raw, mime, name)
+    return item, text
+
+
+def resolve_sharing_link_extracted_content(
+    client: GraphClient,
+    url: str,
+    item: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Resolve a sharing URL and extract document text content.
+
+    Pass a pre-fetched ``item`` dict to avoid a redundant metadata GET.
+    Returns (item_metadata, extracted_text_or_None).
+    """
+    token = _encode_sharing_url(url.strip())
+    if item is None:
+        item = client.get(f"/shares/{token}/driveItem")
+
+    if not is_extractable_document(item):
+        return item, None
+
+    size = item.get("size", 0)
+    if size > MAX_DOCUMENT_DOWNLOAD_BYTES:
+        return item, None
+
+    raw = client.get_bytes(f"/shares/{token}/driveItem/content")
+    mime = item.get("file", {}).get("mimeType", "")
+    name = item.get("name", "")
+    text = extract_document_text(raw, mime, name)
+    return item, text
+
+
+# ---------------------------------------------------------------------------
+# Document content extraction — asynchronous
+# ---------------------------------------------------------------------------
+
+
+async def aget_drive_item_extracted_content(
+    client: AsyncGraphClient,
+    item_id: str,
+    site_id: str = "",
+    item: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Download an Office document and extract its text content (async).
+
+    Pass a pre-fetched ``item`` dict to avoid a redundant metadata GET.
+    Returns (item_metadata, extracted_text_or_None).
+    """
+    base = _drive_base(site_id or None)
+    if item is None:
+        item = await client.get(f"{base}/items/{item_id}")
+
+    if not is_extractable_document(item):
+        return item, None
+
+    size = item.get("size", 0)
+    if size > MAX_DOCUMENT_DOWNLOAD_BYTES:
+        return item, None
+
+    raw = await client.get_bytes(f"{base}/items/{item_id}/content")
+    mime = item.get("file", {}).get("mimeType", "")
+    name = item.get("name", "")
+    text = extract_document_text(raw, mime, name)
+    return item, text
+
+
+async def aresolve_sharing_link_extracted_content(
+    client: AsyncGraphClient,
+    url: str,
+    item: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Resolve a sharing URL and extract document text content (async).
+
+    Pass a pre-fetched ``item`` dict to avoid a redundant metadata GET.
+    Returns (item_metadata, extracted_text_or_None).
+    """
+    token = _encode_sharing_url(url.strip())
+    if item is None:
+        item = await client.get(f"/shares/{token}/driveItem")
+
+    if not is_extractable_document(item):
+        return item, None
+
+    size = item.get("size", 0)
+    if size > MAX_DOCUMENT_DOWNLOAD_BYTES:
+        return item, None
+
+    raw = await client.get_bytes(f"/shares/{token}/driveItem/content")
+    mime = item.get("file", {}).get("mimeType", "")
+    name = item.get("name", "")
+    text = extract_document_text(raw, mime, name)
+    return item, text
+
+
+# ---------------------------------------------------------------------------
 # Write / mutate operations — synchronous
 # ---------------------------------------------------------------------------
 
@@ -393,6 +662,7 @@ def copy_drive_item(
     destination_folder_id: str = "",
     site_id: str = "",
     destination_drive_id: str = "",
+    source_drive_id: str = "",
 ) -> dict[str, Any]:
     """Server-side copy of a drive item to a new name (and optionally a new folder).
 
@@ -400,7 +670,7 @@ def copy_drive_item(
     is asynchronous — this function polls until the operation completes (up to
     _COPY_POLL_TIMEOUT seconds). Returns the completed operation status dict.
     """
-    source = get_drive_item(client, item_id, site_id)
+    source = get_drive_item(client, item_id, site_id, drive_id=source_drive_id)
     drive_id = destination_drive_id or source.get("parentReference", {}).get("driveId", "")
 
     parent_ref: dict[str, Any] = {"driveId": drive_id}
@@ -409,9 +679,13 @@ def copy_drive_item(
     else:
         parent_ref["id"] = source.get("parentReference", {}).get("id", "")
 
-    base = _drive_base(site_id or None)
+    item_drive_id = source.get("parentReference", {}).get("driveId", "")
+    if item_drive_id:
+        copy_path = f"/drives/{item_drive_id}/items/{item_id}/copy"
+    else:
+        copy_path = f"{_drive_base(site_id or None)}/items/{item_id}/copy"
     location = client.post_with_location(
-        f"{base}/items/{item_id}/copy",
+        copy_path,
         json_data={"name": new_name, "parentReference": parent_ref},
     )
 
@@ -490,6 +764,23 @@ async def aupload_bytes(
     return await client.put(url, content=data, content_type=content_type)
 
 
+async def aupload_bytes_by_id(
+    client: AsyncGraphClient,
+    item_id: str,
+    data: bytes,
+    content_type: str = "application/octet-stream",
+    site_id: str = "",
+) -> dict[str, Any]:
+    """Overwrite an existing file's content by item ID (async)."""
+    if len(data) > MAX_SIMPLE_UPLOAD_BYTES:
+        raise ValueError(
+            f"Content is {len(data):,} bytes, which exceeds the 4 MB simple upload limit."
+        )
+    base = _drive_base(site_id or None)
+    url = f"{base}/items/{item_id}/content"
+    return await client.put(url, content=data, content_type=content_type)
+
+
 async def acopy_drive_item(
     client: AsyncGraphClient,
     item_id: str,
@@ -497,9 +788,10 @@ async def acopy_drive_item(
     destination_folder_id: str = "",
     site_id: str = "",
     destination_drive_id: str = "",
+    source_drive_id: str = "",
 ) -> dict[str, Any]:
     """Server-side copy of a drive item (async). Polls until completion."""
-    source = await aget_drive_item(client, item_id, site_id)
+    source = await aget_drive_item(client, item_id, site_id, drive_id=source_drive_id)
     drive_id = destination_drive_id or source.get("parentReference", {}).get("driveId", "")
 
     parent_ref: dict[str, Any] = {"driveId": drive_id}
@@ -508,9 +800,13 @@ async def acopy_drive_item(
     else:
         parent_ref["id"] = source.get("parentReference", {}).get("id", "")
 
-    base = _drive_base(site_id or None)
+    item_drive_id = source.get("parentReference", {}).get("driveId", "")
+    if item_drive_id:
+        copy_path = f"/drives/{item_drive_id}/items/{item_id}/copy"
+    else:
+        copy_path = f"{_drive_base(site_id or None)}/items/{item_id}/copy"
     location = await client.post_with_location(
-        f"{base}/items/{item_id}/copy",
+        copy_path,
         json_data={"name": new_name, "parentReference": parent_ref},
     )
 
@@ -535,6 +831,20 @@ async def arename_drive_item(
     """Rename a file or folder by item ID (async). Returns the updated driveItem."""
     base = _drive_base(site_id or None)
     return await client.patch(f"{base}/items/{item_id}", json_data={"name": new_name})
+
+
+async def adelete_drive_item(
+    client: AsyncGraphClient,
+    item_id: str,
+    site_id: str = "",
+) -> None:
+    """Delete a file or folder by item ID (async). Graph replies 204 No Content.
+
+    The item is moved to the recycle bin, not permanently erased, so this is
+    recoverable from the SharePoint/OneDrive UI.
+    """
+    base = _drive_base(site_id or None)
+    await client.delete(f"{base}/items/{item_id}")
 
 
 # ---------------------------------------------------------------------------

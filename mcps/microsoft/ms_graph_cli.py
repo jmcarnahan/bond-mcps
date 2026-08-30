@@ -36,7 +36,8 @@ Usage:
     # Files
     ms-graph-cli files sites [--query <q>] [--top 10]
     ms-graph-cli files list [--path <folder>] [--site-id <id>] [--query <q>] [--top 20]
-    ms-graph-cli files inspect <item_id> [--site-id <id>] [--content]
+    ms-graph-cli files inspect <item_id_or_url> [--site-id <id>] [--content]
+    ms-graph-cli files resolve <sharing_url> [--content]
     ms-graph-cli files upload <filename> <content> [--folder <path>] [--site-id <id>]
     ms-graph-cli files copy <item_id> <new_name> [--dest-folder <id>] [--site-id <id>] [--dest-drive <id>]
     ms-graph-cli files rename <item_id> <new_name> [--site-id <id>]
@@ -121,6 +122,32 @@ def cmd_whoami(args: argparse.Namespace) -> None:
     print(f"ID:                 {profile.get('id', '?')}")
 
 
+def cmd_powerbi_whoami(args: argparse.Namespace) -> None:
+    import base64
+    import json
+
+    token = get_local_powerbi_token()
+
+    # Decode the JWT payload (no verification — just inspect claims)
+    parts = token.split(".")
+    if len(parts) >= 2:
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        try:
+            claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+            aud = claims.get("aud", "?")
+            scp = claims.get("scp", claims.get("roles", "?"))
+            print(f"Token audience:     {aud}")
+            print(f"Token scopes:       {scp}")
+        except Exception:
+            pass
+
+    with PowerBIClient(token) as client:
+        workspaces = pbi_ops.list_workspaces(client)
+
+    print("Power BI token valid.")
+    print(f"Workspaces accessible: {len(workspaces) + 1} (including My workspace)")
+
+
 # ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
@@ -185,6 +212,108 @@ def cmd_email_send(args: argparse.Namespace) -> None:
         )
     cc_note = f" (CC: {args.cc})" if args.cc else ""
     print(f"Email sent to {args.to}{cc_note}.")
+
+
+# ---------------------------------------------------------------------------
+# Inbox rules
+# ---------------------------------------------------------------------------
+
+
+def _fmt_rule(rule: dict) -> str:
+    conditions = ", ".join(rule.get("conditions", {}).keys()) or "(none)"
+    actions = ", ".join(rule.get("actions", {}).keys()) or "(none)"
+    return (
+        f"  [{rule.get('sequence', '?')}] {rule.get('displayName', '(no name)')}"
+        f"  (enabled={rule.get('isEnabled', '?')}, readOnly={rule.get('isReadOnly', False)})\n"
+        f"      id:         {rule.get('id', '?')}\n"
+        f"      conditions: {conditions}\n"
+        f"      actions:    {actions}"
+    )
+
+
+# The inbox-rule ops are async-only (Graph's messageRules endpoint), so the
+# rules CLI commands wrap them in asyncio.run() rather than using GraphClient.
+def cmd_rules_list(args: argparse.Namespace) -> None:
+    import asyncio
+
+    from ms_graph.graph_client import AsyncGraphClient
+
+    async def _run():
+        token = get_local_token()
+        async with AsyncGraphClient(token) as client:
+            return await mail.alist_inbox_rules(client)
+
+    rules = asyncio.run(_run())
+    if not rules:
+        print("No inbox rules found.")
+        return
+    print(f"Inbox rules ({len(rules)}):\n")
+    for rule in rules:
+        print(_fmt_rule(rule))
+        print()
+
+
+def cmd_rules_get(args: argparse.Namespace) -> None:
+    import asyncio
+
+    from ms_graph.graph_client import AsyncGraphClient
+
+    async def _run():
+        token = get_local_token()
+        async with AsyncGraphClient(token) as client:
+            return await mail.aget_inbox_rule(client, args.rule_id)
+
+    print(_fmt_rule(asyncio.run(_run())))
+
+
+def cmd_rules_create(args: argparse.Namespace) -> None:
+    import asyncio
+    import json
+
+    from ms_graph.graph_client import AsyncGraphClient
+
+    with open(args.file, encoding="utf-8") as f:
+        rule = json.load(f)
+
+    async def _run():
+        token = get_local_token()
+        async with AsyncGraphClient(token) as client:
+            return await mail.acreate_inbox_rule(client, rule)
+
+    created = asyncio.run(_run())
+    print(f"Rule {created.get('id', '?')} ({created.get('displayName', '?')}) created.")
+
+
+def cmd_rules_update(args: argparse.Namespace) -> None:
+    import asyncio
+    import json
+
+    from ms_graph.graph_client import AsyncGraphClient
+
+    with open(args.file, encoding="utf-8") as f:
+        changes = json.load(f)
+
+    async def _run():
+        token = get_local_token()
+        async with AsyncGraphClient(token) as client:
+            return await mail.aupdate_inbox_rule(client, args.rule_id, changes)
+
+    updated = asyncio.run(_run())
+    print(f"Rule {updated.get('id', args.rule_id)} ({updated.get('displayName', '?')}) updated.")
+
+
+def cmd_rules_delete(args: argparse.Namespace) -> None:
+    import asyncio
+
+    from ms_graph.graph_client import AsyncGraphClient
+
+    async def _run():
+        token = get_local_token()
+        async with AsyncGraphClient(token) as client:
+            await mail.adelete_inbox_rule(client, args.rule_id)
+
+    asyncio.run(_run())
+    print(f"Rule {args.rule_id} deleted.")
 
 
 # ---------------------------------------------------------------------------
@@ -531,11 +660,69 @@ def cmd_files_list(args: argparse.Namespace) -> None:
 
 def cmd_files_inspect(args: argparse.Namespace) -> None:
     token = get_local_token()
+    sharing_url = ""
+    item_id = args.item_id
+
+    if files.is_sharing_url(item_id):
+        sharing_url = item_id
+        item_id = ""
+
+    with GraphClient(token) as client:
+        if sharing_url:
+            if args.content:
+                item, content = files.resolve_sharing_link_content(client, sharing_url)
+                if content is None:
+                    item, content = files.resolve_sharing_link_extracted_content(
+                        client, sharing_url, item=item
+                    )
+            else:
+                item = files.resolve_sharing_link(client, sharing_url)
+                content = None
+        else:
+            if args.content:
+                item, content = files.get_drive_item_content(client, item_id, site_id=args.site_id)
+                if content is None:
+                    item, content = files.get_drive_item_extracted_content(
+                        client, item_id, site_id=args.site_id, item=item
+                    )
+            else:
+                item = files.get_drive_item(client, item_id, site_id=args.site_id)
+                content = None
+
+    print(f"Name:     {item.get('name', '?')}")
+    if "folder" in item:
+        print(f"Type:     Folder ({item['folder'].get('childCount', '?')} items)")
+    else:
+        print(f"Type:     {item.get('file', {}).get('mimeType', '?')}")
+        print(f"Size:     {_fmt_size(item.get('size', 0))}")
+    print(
+        f"Modified: {item.get('lastModifiedDateTime', '?')} by {item.get('lastModifiedBy', {}).get('user', {}).get('displayName', '?')}"
+    )
+    print(f"ID:       {item.get('id', '?')}")
+    if item.get("webUrl"):
+        print(f"URL:      {item['webUrl']}")
+
+    if args.content:
+        print()
+        if content is not None:
+            print("--- content ---")
+            print(content)
+        else:
+            print("(binary or too large to display as text)")
+
+
+def cmd_files_resolve(args: argparse.Namespace) -> None:
+    """Resolve a sharing URL and display the underlying driveItem."""
+    token = get_local_token()
     with GraphClient(token) as client:
         if args.content:
-            item, content = files.get_drive_item_content(client, args.item_id, site_id=args.site_id)
+            item, content = files.resolve_sharing_link_content(client, args.url)
+            if content is None:
+                item, content = files.resolve_sharing_link_extracted_content(
+                    client, args.url, item=item
+                )
         else:
-            item = files.get_drive_item(client, args.item_id, site_id=args.site_id)
+            item = files.resolve_sharing_link(client, args.url)
             content = None
 
     print(f"Name:     {item.get('name', '?')}")
@@ -745,6 +932,12 @@ def main() -> None:
     p = sub.add_parser("whoami", help="Show authenticated user profile")
     p.set_defaults(func=cmd_whoami)
 
+    # powerbi-whoami
+    p = sub.add_parser(
+        "powerbi-whoami", help="Verify Power BI token (triggers browser auth if needed)"
+    )
+    p.set_defaults(func=cmd_powerbi_whoami)
+
     # email
     p_email = sub.add_parser("email", help="Email operations")
     email_sub = p_email.add_subparsers(dest="email_command", required=True)
@@ -766,6 +959,30 @@ def main() -> None:
     p.add_argument("--from", dest="from_address", default=None, help="Sender alias address")
     p.add_argument("--cc", default="", help="CC recipients (comma-separated)")
     p.set_defaults(func=cmd_email_send)
+
+    # rules
+    p_rules = sub.add_parser("rules", help="Inbox rule (messageRule) operations")
+    rules_sub = p_rules.add_subparsers(dest="rules_command", required=True)
+
+    p = rules_sub.add_parser("list", help="List inbox rules")
+    p.set_defaults(func=cmd_rules_list)
+
+    p = rules_sub.add_parser("get", help="Get a single inbox rule by ID")
+    p.add_argument("rule_id")
+    p.set_defaults(func=cmd_rules_get)
+
+    p = rules_sub.add_parser("create", help="Create an inbox rule from a JSON file")
+    p.add_argument("--file", required=True, help="Path to a JSON file with the rule definition")
+    p.set_defaults(func=cmd_rules_create)
+
+    p = rules_sub.add_parser("update", help="Update an inbox rule from a JSON file")
+    p.add_argument("rule_id")
+    p.add_argument("--file", required=True, help="Path to a JSON file with the changed fields")
+    p.set_defaults(func=cmd_rules_update)
+
+    p = rules_sub.add_parser("delete", help="Delete an inbox rule by ID")
+    p.add_argument("rule_id")
+    p.set_defaults(func=cmd_rules_delete)
 
     # calendar
     p_cal = sub.add_parser("calendar", help="Calendar operations")
@@ -850,10 +1067,15 @@ def main() -> None:
     p.set_defaults(func=cmd_files_list)
 
     p = files_sub.add_parser("inspect", help="Get file metadata (and optionally content)")
-    p.add_argument("item_id")
+    p.add_argument("item_id", help="Drive item ID or sharing URL")
     p.add_argument("--site-id", dest="site_id", default="")
     p.add_argument("--content", action="store_true", help="Also download and print text content")
     p.set_defaults(func=cmd_files_inspect)
+
+    p = files_sub.add_parser("resolve", help="Resolve a sharing URL to a driveItem")
+    p.add_argument("url", help="SharePoint/OneDrive sharing URL")
+    p.add_argument("--content", action="store_true", help="Also download and print text content")
+    p.set_defaults(func=cmd_files_resolve)
 
     p = files_sub.add_parser("upload", help="Create or overwrite a text file")
     p.add_argument("filename", help="File name with extension (e.g. report.md)")

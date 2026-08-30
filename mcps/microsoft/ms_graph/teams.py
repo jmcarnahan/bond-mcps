@@ -5,6 +5,8 @@ All functions accept a GraphClient or AsyncGraphClient and return parsed dicts.
 """
 
 import asyncio
+import base64
+import html as html_mod
 import json
 import logging
 import re
@@ -13,6 +15,8 @@ from typing import Any
 from urllib.parse import quote
 
 from .graph_client import AsyncGraphClient, GraphClient, GraphError
+from .mail import _detect_body_type
+from .pagination import apaginate, apaginate_until_date
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,53 @@ def _check_teams_access(e: GraphError) -> None:
     if e.status_code == 403:
         raise TeamsNotAvailableError() from e
     raise e
+
+
+def decode_token_claims(token: str) -> dict[str, str]:
+    """Extract oid and tid from a Microsoft Graph access token (JWT).
+
+    Decodes the payload without signature verification — the token is already
+    authenticated by the OAuth flow.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {"oid": "", "tid": ""}
+    payload_b64 = parts[1]
+    padding = "=" * (-len(payload_b64) % 4)
+    try:
+        payload = base64.urlsafe_b64decode(payload_b64 + padding)
+        claims = json.loads(payload.decode("utf-8"))
+        return {"oid": claims.get("oid", ""), "tid": claims.get("tid", "")}
+    except Exception:
+        return {"oid": "", "tid": ""}
+
+
+_VALID_CONTENT_TYPES = frozenset({"html", "text", "auto"})
+
+
+def _prepare_teams_body(content: str, content_type: str = "auto") -> dict[str, str]:
+    """Prepare a Teams message body dict with appropriate contentType.
+
+    In "auto" mode (default), HTML content is detected and newlines are
+    converted to <br>; plain text also has entities escaped before conversion.
+    """
+    content_type = content_type.lower()
+    if content_type not in _VALID_CONTENT_TYPES:
+        raise ValueError(f"content_type must be 'auto', 'html', or 'text'; got {content_type!r}")
+
+    if content_type == "text":
+        return {"contentType": "text", "content": content}
+    if content_type == "html":
+        return {"contentType": "html", "content": content}
+
+    # Normalize CRLF/CR to LF before converting newlines
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Auto: detect HTML or convert plain text
+    if _detect_body_type(content) == "HTML":
+        return {"contentType": "html", "content": content.replace("\n", "<br>")}
+    escaped = html_mod.escape(content, quote=False)
+    return {"contentType": "html", "content": escaped.replace("\n", "<br>")}
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +123,7 @@ def _extract_adaptive_card_text(card_json: str) -> str:
     return " | ".join(texts)
 
 
-def extract_message_text(msg: dict[str, Any], max_length: int = 500) -> str:
+def extract_message_text(msg: dict[str, Any], max_length: int = -1) -> str:
     """Extract readable text from a Teams message.
 
     Handles plain text, HTML (strips tags), and adaptive card attachments.
@@ -96,7 +147,7 @@ def extract_message_text(msg: dict[str, Any], max_length: int = 500) -> str:
     if not content.strip():
         return ""
 
-    if len(content) > max_length:
+    if max_length > 0 and len(content) > max_length:
         content = content[:max_length] + "..."
     return content
 
@@ -137,12 +188,18 @@ def send_channel_message(
     team_id: str,
     channel_id: str,
     content: str,
+    content_type: str = "auto",
+    mentions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a Teams channel."""
+    body = _prepare_teams_body(content, content_type)
+    payload: dict[str, Any] = {"body": body}
+    if mentions:
+        payload["mentions"] = mentions
     try:
         result = client.post(
             f"/teams/{_safe_id(team_id)}/channels/{_safe_id(channel_id)}/messages",
-            json_data={"body": {"content": content}},
+            json_data=payload,
         )
     except GraphError as e:
         _check_teams_access(e)
@@ -169,9 +226,14 @@ def list_channel_messages(
 def list_chats(
     client: GraphClient,
     chat_type: str = "",
-    top: int = 20,
+    top: int = 50,
 ) -> list[dict[str, Any]]:
-    """List the user's recent chats (1:1, group, meeting)."""
+    """List the user's recent chats (1:1, group, meeting).
+
+    Note: top is capped at 50 (the MS Graph per-page max).
+    Use alist_chats for async pagination beyond 50 results.
+    """
+    top = min(top, 50)
     params: dict[str, Any] = {
         "$top": top,
         "$expand": "lastMessagePreview,members",
@@ -207,12 +269,18 @@ def send_chat_message(
     client: GraphClient,
     chat_id: str,
     content: str,
+    content_type: str = "auto",
+    mentions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a chat."""
+    body = _prepare_teams_body(content, content_type)
+    payload: dict[str, Any] = {"body": body}
+    if mentions:
+        payload["mentions"] = mentions
     try:
         result = client.post(
             f"/chats/{_safe_id(chat_id)}/messages",
-            json_data={"body": {"content": content}},
+            json_data=payload,
         )
     except GraphError as e:
         _check_teams_access(e)
@@ -247,12 +315,18 @@ async def asend_channel_message(
     team_id: str,
     channel_id: str,
     content: str,
+    content_type: str = "auto",
+    mentions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a Teams channel (async)."""
+    body = _prepare_teams_body(content, content_type)
+    payload: dict[str, Any] = {"body": body}
+    if mentions:
+        payload["mentions"] = mentions
     try:
         result = await client.post(
             f"/teams/{_safe_id(team_id)}/channels/{_safe_id(channel_id)}/messages",
-            json_data={"body": {"content": content}},
+            json_data=payload,
         )
     except GraphError as e:
         _check_teams_access(e)
@@ -263,27 +337,40 @@ async def alist_channel_messages(
     client: AsyncGraphClient,
     team_id: str,
     channel_id: str,
-    top: int = 20,
+    since: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List recent messages in a Teams channel (async)."""
+    """List messages in a Teams channel (async), paginating back to `since` date.
+
+    Args:
+        since: ISO 8601 date string. Fetches all messages from this date forward.
+               Defaults to 7 days ago if not provided.
+    """
+    if not since:
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params: dict[str, Any] = {}
     try:
-        data = await client.get(
+        return await apaginate_until_date(
+            client,
             f"/teams/{_safe_id(team_id)}/channels/{_safe_id(channel_id)}/messages",
-            params={"$top": top},
+            params,
+            since=since,
+            page_size=50,
         )
     except GraphError as e:
         _check_teams_access(e)
-    return data.get("value", [])
+    return []
+
+
+_CHATS_PAGE_SIZE = 50
 
 
 async def alist_chats(
     client: AsyncGraphClient,
     chat_type: str = "",
-    top: int = 20,
+    top: int = 50,
 ) -> list[dict[str, Any]]:
-    """List the user's recent chats (async)."""
+    """List the user's recent chats (async), paginating internally if top > 50."""
     params: dict[str, Any] = {
-        "$top": top,
         "$expand": "lastMessagePreview,members",
         "$orderby": "lastMessagePreview/createdDateTime desc",
     }
@@ -291,38 +378,82 @@ async def alist_chats(
         escaped = chat_type.replace("'", "''")
         params["$filter"] = f"chatType eq '{escaped}'"
     try:
-        data = await client.get("/me/chats", params=params)
+        return await apaginate(
+            client,
+            "/me/chats",
+            params,
+            max_results=top,
+            page_size=_CHATS_PAGE_SIZE,
+            max_pages=40,
+        )
     except GraphError as e:
         _check_teams_access(e)
-    return data.get("value", [])
+    return []
 
 
 async def alist_chat_messages(
     client: AsyncGraphClient,
     chat_id: str,
-    top: int = 20,
+    since: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List recent messages in a chat (async)."""
+    """List messages in a chat (async), paginating back to `since` date.
+
+    Args:
+        since: ISO 8601 date string. Fetches all messages from this date forward.
+               Defaults to 7 days ago if not provided.
+    """
+    if not since:
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params: dict[str, Any] = {"$orderby": "createdDateTime desc"}
     try:
-        data = await client.get(
+        return await apaginate_until_date(
+            client,
             f"/chats/{_safe_id(chat_id)}/messages",
-            params={"$top": top},
+            params,
+            since=since,
+            page_size=50,
         )
     except GraphError as e:
         _check_teams_access(e)
-    return data.get("value", [])
+    return []
+
+
+async def amark_chat_read(
+    client: AsyncGraphClient,
+    chat_id: str,
+    user_id: str,
+    tenant_id: str,
+) -> None:
+    """Mark a chat as read for the specified user.
+
+    Calls POST /chats/{chatId}/markChatReadForUser.
+    Requires Chat.ReadWrite scope.
+    """
+    try:
+        await client.post(
+            f"/chats/{_safe_id(chat_id)}/markChatReadForUser",
+            json_data={"user": {"id": user_id, "tenantId": tenant_id}},
+        )
+    except GraphError as e:
+        _check_teams_access(e)
 
 
 async def asend_chat_message(
     client: AsyncGraphClient,
     chat_id: str,
     content: str,
+    content_type: str = "auto",
+    mentions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a chat (async)."""
+    body = _prepare_teams_body(content, content_type)
+    payload: dict[str, Any] = {"body": body}
+    if mentions:
+        payload["mentions"] = mentions
     try:
         result = await client.post(
             f"/chats/{_safe_id(chat_id)}/messages",
-            json_data={"body": {"content": content}},
+            json_data=payload,
         )
     except GraphError as e:
         _check_teams_access(e)
@@ -393,9 +524,10 @@ async def aget_teams_activity(
     channel_pairs = channel_pairs[:max_channels]
 
     # Step 3: Fetch latest message from each channel in parallel
+    cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
     msg_results = await asyncio.gather(
         *[
-            _safe(alist_channel_messages(client, team_id, ch["id"], top=1))
+            _safe(alist_channel_messages(client, team_id, ch["id"], since=cutoff_str))
             for _, team_id, ch in channel_pairs
         ],
         return_exceptions=True,
