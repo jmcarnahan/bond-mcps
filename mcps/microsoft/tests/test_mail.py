@@ -6,13 +6,23 @@ import httpx
 import pytest
 import respx
 from ms_graph import mail
-from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient
+from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
 from ms_graph.mail import _detect_body_type
 
 from .conftest import (
+    GRAPH_ERROR_400,
+    GRAPH_ERROR_403,
+    GRAPH_ERROR_410,
+    SAMPLE_AWKWARD_MESSAGE_ID,
+    SAMPLE_DELTA_LINK,
+    SAMPLE_DELTA_NEXT_LINK,
+    SAMPLE_DELTA_PAGE_FINAL,
+    SAMPLE_DELTA_PAGE_NEXT,
     SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
+    SAMPLE_MESSAGE_DETAIL,
     SAMPLE_MESSAGES_RESPONSE,
+    SAMPLE_REPLY_DRAFT,
     SAMPLE_USER_PROFILE,
 )
 
@@ -593,3 +603,351 @@ class TestBodyTypeParameterAsync:
                     body="body",
                     body_type="text",  # lowercase — invalid
                 )
+
+
+# ---------------------------------------------------------------------------
+# Desktop JSON operations
+# ---------------------------------------------------------------------------
+
+# The exact query string the fresh-start delta must produce. Spelled out
+# literally rather than derived from mail.DELTA_SELECT so that a change to the
+# select list has to be made deliberately in two places.
+EXPECTED_DELTA_SELECT = (
+    "id%2CinternetMessageId%2CconversationId%2Csubject%2Cfrom%2CtoRecipients"
+    "%2CreceivedDateTime%2CisRead%2CisDraft%2CbodyPreview"
+)
+
+DELTA_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta"
+
+
+class TestDeltaPageSync:
+    """Synchronous mail delta tests."""
+
+    @respx.mock
+    def test_fresh_start_sends_exact_select(self):
+        route = respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        with GraphClient("tok") as client:
+            data = mail.delta_page(client, folder="inbox")
+
+        assert data == SAMPLE_DELTA_PAGE_NEXT
+        url = str(route.calls[0].request.url)
+        assert f"$select={EXPECTED_DELTA_SELECT}" in url
+        assert "$filter" not in url
+
+    @respx.mock
+    def test_min_received_filter_uses_percent_20_not_plus(self):
+        """Graph's OData parser rejects '+' as a space in $filter."""
+        route = respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        with GraphClient("tok") as client:
+            mail.delta_page(client, folder="inbox", min_received="2026-01-01T00:00:00Z")
+
+        url = str(route.calls[0].request.url)
+        assert "$filter=receivedDateTime%20ge%202026-01-01T00%3A00%3A00Z" in url
+        assert "+" not in url
+
+    @respx.mock
+    def test_folder_is_url_encoded(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL)
+        )
+        with GraphClient("tok") as client:
+            mail.delta_page(client, folder="AQMkA/DE+F=")
+
+        assert "/me/mailFolders/AQMkA%2FDE%2BF%3D/messages/delta" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_cursor_is_fetched_verbatim(self):
+        """nextLink/deltaLink are absolute URLs with opaque tokens — never rebuild them."""
+        route = respx.get(SAMPLE_DELTA_NEXT_LINK).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL)
+        )
+        with GraphClient("tok") as client:
+            data = mail.delta_page(client, folder="inbox", cursor=SAMPLE_DELTA_NEXT_LINK)
+
+        assert data == SAMPLE_DELTA_PAGE_FINAL
+        assert str(route.calls[0].request.url) == SAMPLE_DELTA_NEXT_LINK
+
+    @respx.mock
+    def test_cursor_wins_over_folder_and_min_received(self):
+        route = respx.get(SAMPLE_DELTA_NEXT_LINK).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL)
+        )
+        with GraphClient("tok") as client:
+            mail.delta_page(
+                client,
+                folder="archive",
+                cursor=SAMPLE_DELTA_NEXT_LINK,
+                min_received="2026-01-01T00:00:00Z",
+            )
+
+        assert route.call_count == 1
+        assert str(route.calls[0].request.url) == SAMPLE_DELTA_NEXT_LINK
+
+    @respx.mock
+    def test_fetches_one_page_only(self):
+        """A nextLink in the response must NOT be followed by the op itself."""
+        route = respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        with GraphClient("tok") as client:
+            mail.delta_page(client, folder="inbox")
+
+        assert route.call_count == 1
+
+
+class TestDeltaPageAsync:
+    """Async mail delta tests."""
+
+    @respx.mock
+    async def test_fresh_start_sends_exact_select(self):
+        route = respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.adelta_page(client, folder="inbox")
+
+        assert data == SAMPLE_DELTA_PAGE_NEXT
+        assert f"$select={EXPECTED_DELTA_SELECT}" in str(route.calls[0].request.url)
+
+    @respx.mock
+    async def test_min_received_filter_uses_percent_20_not_plus(self):
+        route = respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.adelta_page(client, folder="inbox", min_received="2026-01-01T00:00:00Z")
+
+        url = str(route.calls[0].request.url)
+        assert "%20ge%20" in url
+        assert "+" not in url
+
+    @respx.mock
+    async def test_cursor_is_fetched_verbatim(self):
+        route = respx.get(SAMPLE_DELTA_LINK).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.adelta_page(client, cursor=SAMPLE_DELTA_LINK)
+
+        assert data == SAMPLE_DELTA_PAGE_FINAL
+        assert str(route.calls[0].request.url) == SAMPLE_DELTA_LINK
+
+    @respx.mock
+    async def test_410_propagates_to_caller(self):
+        """The op does not swallow a stale cursor — the tool layer maps it to resync."""
+        respx.get(SAMPLE_DELTA_LINK).mock(return_value=httpx.Response(410, json=GRAPH_ERROR_410))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await mail.adelta_page(client, cursor=SAMPLE_DELTA_LINK)
+
+        assert exc.value.status_code == 410
+
+
+class TestGetMessageDetailSync:
+    """Synchronous message detail tests."""
+
+    @respx.mock
+    def test_sends_prefer_text_body_header(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        with GraphClient("tok") as client:
+            data = mail.get_message_detail(client, SAMPLE_MESSAGE["id"])
+
+        assert data == SAMPLE_MESSAGE_DETAIL
+        req = route.calls[0].request
+        assert req.headers["prefer"] == 'outlook.body-content-type="text"'
+        assert "$select=id%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments" in str(req.url)
+
+    @respx.mock
+    def test_message_id_is_url_encoded(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        with GraphClient("tok") as client:
+            mail.get_message_detail(client, SAMPLE_AWKWARD_MESSAGE_ID)
+
+        assert "/me/messages/AAMkA%2FGI2%2BTG93AAA%3D?" in str(route.calls[0].request.url)
+
+
+class TestGetMessageDetailAsync:
+    """Async message detail tests."""
+
+    @respx.mock
+    async def test_sends_prefer_text_body_header(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.aget_message_detail(client, SAMPLE_MESSAGE["id"])
+
+        assert data == SAMPLE_MESSAGE_DETAIL
+        assert route.calls[0].request.headers["prefer"] == 'outlook.body-content-type="text"'
+
+
+class TestCreateReplyDraftSync:
+    """Synchronous reply-draft tests."""
+
+    @respx.mock
+    def test_no_timezone_sends_no_prefer_header(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(201, json=SAMPLE_REPLY_DRAFT)
+        )
+        with GraphClient("tok") as client:
+            draft = mail.create_reply_draft(client, SAMPLE_MESSAGE["id"])
+
+        assert draft == SAMPLE_REPLY_DRAFT
+        assert route.call_count == 1
+        assert "prefer" not in route.calls[0].request.headers
+
+    @respx.mock
+    def test_timezone_sends_prefer_header(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(201, json=SAMPLE_REPLY_DRAFT)
+        )
+        with GraphClient("tok") as client:
+            mail.create_reply_draft(client, SAMPLE_MESSAGE["id"], timezone="America/New_York")
+
+        assert route.call_count == 1
+        assert route.calls[0].request.headers["prefer"] == 'outlook.timezone="America/New_York"'
+
+    @respx.mock
+    def test_400_retries_once_without_prefer_header(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            side_effect=[
+                httpx.Response(400, json=GRAPH_ERROR_400),
+                httpx.Response(201, json=SAMPLE_REPLY_DRAFT),
+            ]
+        )
+        with GraphClient("tok") as client:
+            draft = mail.create_reply_draft(client, SAMPLE_MESSAGE["id"], timezone="Bad/Zone")
+
+        assert draft == SAMPLE_REPLY_DRAFT
+        assert route.call_count == 2
+        assert route.calls[0].request.headers["prefer"] == 'outlook.timezone="Bad/Zone"'
+        assert "prefer" not in route.calls[1].request.headers
+
+    @respx.mock
+    def test_400_without_timezone_propagates(self):
+        """No Prefer header was sent, so there is nothing to retry without."""
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(400, json=GRAPH_ERROR_400)
+        )
+        with GraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                mail.create_reply_draft(client, SAMPLE_MESSAGE["id"])
+
+        assert exc.value.status_code == 400
+        assert route.call_count == 1
+
+    @respx.mock
+    def test_non_400_error_is_not_retried(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with GraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                mail.create_reply_draft(client, SAMPLE_MESSAGE["id"], timezone="UTC")
+
+        assert exc.value.status_code == 403
+        assert route.call_count == 1
+
+
+class TestCreateReplyDraftAsync:
+    """Async reply-draft tests."""
+
+    @respx.mock
+    async def test_timezone_sends_prefer_header(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(201, json=SAMPLE_REPLY_DRAFT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            draft = await mail.acreate_reply_draft(
+                client, SAMPLE_MESSAGE["id"], timezone="Europe/London"
+            )
+
+        assert draft == SAMPLE_REPLY_DRAFT
+        assert route.calls[0].request.headers["prefer"] == 'outlook.timezone="Europe/London"'
+
+    @respx.mock
+    async def test_400_retries_once_without_prefer_header(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            side_effect=[
+                httpx.Response(400, json=GRAPH_ERROR_400),
+                httpx.Response(201, json=SAMPLE_REPLY_DRAFT),
+            ]
+        )
+        async with AsyncGraphClient("tok") as client:
+            draft = await mail.acreate_reply_draft(
+                client, SAMPLE_MESSAGE["id"], timezone="Bad/Zone"
+            )
+
+        assert draft == SAMPLE_REPLY_DRAFT
+        assert route.call_count == 2
+        assert "prefer" not in route.calls[1].request.headers
+
+    @respx.mock
+    async def test_message_id_is_url_encoded(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(201, json=SAMPLE_REPLY_DRAFT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.acreate_reply_draft(client, SAMPLE_AWKWARD_MESSAGE_ID)
+
+        assert "/me/messages/AAMkA%2FGI2%2BTG93AAA%3D/createReply" in str(
+            route.calls[0].request.url
+        )
+
+
+class TestDraftBodyAndSend:
+    """Draft update and send tests (sync and async)."""
+
+    @respx.mock
+    def test_update_draft_body_patch_shape(self):
+        route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/AAMkAGI2draft001%3D").mock(
+            return_value=httpx.Response(200, json=SAMPLE_REPLY_DRAFT)
+        )
+        with GraphClient("tok") as client:
+            mail.update_draft_body(client, "AAMkAGI2draft001=", "Thanks, will review.")
+
+        payload = json.loads(route.calls[0].request.content)
+        assert payload == {"body": {"contentType": "text", "content": "Thanks, will review."}}
+
+    @respx.mock
+    async def test_aupdate_draft_body_patch_shape(self):
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_REPLY_DRAFT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.aupdate_draft_body(client, SAMPLE_AWKWARD_MESSAGE_ID, "Reply text")
+
+        assert str(route.calls[0].request.url).endswith("/me/messages/AAMkA%2FGI2%2BTG93AAA%3D")
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["body"]["contentType"] == "text"
+        assert payload["body"]["content"] == "Reply text"
+
+    @respx.mock
+    def test_send_draft_accepts_202_with_no_body(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/messages/AAMkAGI2draft001%3D/send").mock(
+            return_value=httpx.Response(202)
+        )
+        with GraphClient("tok") as client:
+            assert mail.send_draft(client, "AAMkAGI2draft001=") is None
+
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_asend_draft_accepts_202_with_no_body(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(202)
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert await mail.asend_draft(client, SAMPLE_AWKWARD_MESSAGE_ID) is None
+
+        assert str(route.calls[0].request.url).endswith(
+            "/me/messages/AAMkA%2FGI2%2BTG93AAA%3D/send"
+        )

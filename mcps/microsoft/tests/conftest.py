@@ -629,3 +629,162 @@ SAMPLE_PBI_EXPORT_FAILED = {
         "message": "Report not found.",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Desktop JSON sample payloads
+# ---------------------------------------------------------------------------
+
+# Graph nextLink/deltaLink values are absolute URLs carrying an opaque token.
+# They must be fetched verbatim, which is what makes them worth pinning here.
+SAMPLE_DELTA_NEXT_LINK = (
+    "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta"
+    "?$skiptoken=skip%2Btoken%2Fvalue"
+)
+SAMPLE_DELTA_LINK = (
+    "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta"
+    "?$deltatoken=delta%2Btoken%2Fvalue"
+)
+
+SAMPLE_DELTA_MESSAGE = {
+    "id": "AAMkAGI2delta001=",
+    "internetMessageId": "<abc123@example.com>",
+    "conversationId": "conv-001",
+    "subject": "Budget question",
+    "from": {"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}},
+    "toRecipients": [{"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}}],
+    "receivedDateTime": "2026-01-05T09:00:00Z",
+    "isRead": False,
+    "isDraft": False,
+    "bodyPreview": "Quick question about the Q1 budget",
+}
+
+# A tombstone: Graph reports deletions as a bare id plus @removed.
+SAMPLE_DELTA_TOMBSTONE = {
+    "id": "AAMkAGI2delta002=",
+    "@removed": {"reason": "deleted"},
+}
+
+SAMPLE_DELTA_PAGE_NEXT = {
+    "@odata.nextLink": SAMPLE_DELTA_NEXT_LINK,
+    "value": [SAMPLE_DELTA_MESSAGE],
+}
+
+SAMPLE_DELTA_PAGE_FINAL = {
+    "@odata.deltaLink": SAMPLE_DELTA_LINK,
+    "value": [SAMPLE_DELTA_TOMBSTONE],
+}
+
+GRAPH_ERROR_410 = {
+    "error": {
+        "code": "resyncRequired",
+        "message": "Resync required. Replace local state with the server state.",
+    }
+}
+
+GRAPH_ERROR_400 = {
+    "error": {
+        "code": "ErrorInvalidParameter",
+        "message": "The Prefer header value is not supported.",
+    }
+}
+
+# Graph message IDs routinely contain '/' and '+', which is why the new mail
+# ops percent-encode them into the path.
+SAMPLE_AWKWARD_MESSAGE_ID = "AAMkA/GI2+TG93AAA="
+
+SAMPLE_MESSAGE_DETAIL = {
+    "id": SAMPLE_MESSAGE["id"],
+    "hasAttachments": True,
+    "uniqueBody": {
+        "contentType": "text",
+        "content": "Here is the weekly report.\n\nBest,\nAlice",
+    },
+    "internetMessageHeaders": [
+        {"name": "Message-ID", "value": "<abc123@example.com>"},
+        {"name": "In-Reply-To", "value": "<parent@example.com>"},
+        {"name": "Received", "value": "from mx1.example.com"},
+        # Duplicate header — the first occurrence is the one that wins.
+        {"name": "received", "value": "from mx2.example.com"},
+    ],
+}
+
+SAMPLE_MESSAGE_DETAIL_NO_BODY = {
+    "id": SAMPLE_MESSAGE["id"],
+    "hasAttachments": False,
+    "internetMessageHeaders": [],
+}
+
+SAMPLE_REPLY_DRAFT = {
+    "id": "AAMkAGI2draft001=",
+    "isDraft": True,
+    "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft001",
+}
+
+SAMPLE_CHATS_PAGE_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/chats?$skiptoken=chat%2Bskip"
+
+# lastMessagePreview is null on a chat that has never carried a message.
+SAMPLE_CHAT_NO_PREVIEW = {
+    "id": "chat-empty-001",
+    "chatType": "group",
+    "topic": "Newly Created",
+    "lastMessagePreview": None,
+}
+
+SAMPLE_CHATS_PAGE = {
+    "@odata.nextLink": SAMPLE_CHATS_PAGE_NEXT_LINK,
+    "value": [SAMPLE_CHAT_ONEONONE, SAMPLE_CHAT_GROUP, SAMPLE_CHAT_NO_PREVIEW],
+}
+
+SAMPLE_CHAT_MEMBERS_RESPONSE = {
+    "value": [
+        {
+            "id": "member-001",
+            "userId": "user-id-001",
+            "displayName": "Test User",
+            "email": "user@example.com",
+        },
+        {
+            "id": "member-002",
+            "userId": "user-id-002",
+            "displayName": "Alice Smith",
+            "email": "alice@example.com",
+        },
+    ]
+}
+
+SAMPLE_CHAT_MESSAGE_FULL = {
+    "id": "chat-msg-001",
+    "messageType": "message",
+    "createdDateTime": "2026-01-05T14:00:00Z",
+    "lastModifiedDateTime": "2026-01-05T14:05:00Z",
+    "from": {"user": {"id": "user-id-002", "displayName": "Alice Smith"}, "application": None},
+    "body": {"contentType": "html", "content": "<p>Sounds good!</p>"},
+}
+
+SAMPLE_CHAT_MESSAGE_FROM_APP = {
+    "id": "chat-msg-002",
+    "messageType": "message",
+    "createdDateTime": "2026-01-05T13:00:00Z",
+    "lastModifiedDateTime": "2026-01-05T13:00:00Z",
+    "from": {"user": None, "application": {"id": "app-id-001", "displayName": "Power Automate"}},
+    "body": {"contentType": "text", "content": "Build finished"},
+}
+
+# System events (member added, chat renamed) have no sender at all.
+SAMPLE_CHAT_MESSAGE_SYSTEM = {
+    "id": "chat-msg-003",
+    "messageType": "systemEventMessage",
+    "createdDateTime": "2026-01-05T12:00:00Z",
+    "lastModifiedDateTime": "2026-01-05T12:00:00Z",
+    "from": None,
+    "body": None,
+}
+
+SAMPLE_CHAT_MESSAGES_PAGE = {
+    "value": [
+        SAMPLE_CHAT_MESSAGE_FULL,
+        SAMPLE_CHAT_MESSAGE_FROM_APP,
+        SAMPLE_CHAT_MESSAGE_SYSTEM,
+    ]
+}

@@ -7,11 +7,21 @@ All functions accept a GraphClient or AsyncGraphClient and return parsed dicts.
 import logging
 import re
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from .graph_client import AsyncGraphClient, GraphClient, GraphError
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_id(value: str) -> str:
+    """URL-encode an ID to prevent path traversal in Graph API URLs.
+
+    Graph message IDs are base64url-ish and routinely contain ``/`` and ``+``,
+    both of which change the meaning of a path segment if interpolated raw.
+    """
+    return quote(value, safe="")
+
 
 # Whitelist of standard HTML element names. Using a whitelist (rather than
 # matching any word after <) prevents false positives on patterns like
@@ -305,3 +315,142 @@ async def asearch_messages(
         params={"$search": f'"{query}"', "$top": top},
     )
     return data.get("value", [])
+
+
+# ---------------------------------------------------------------------------
+# Desktop JSON operations (delta sync, plain-text detail, reply-draft flow)
+#
+# These return RAW Graph response dicts; the MCP tool layer owns the mapping
+# into the structured shapes the desktop client consumes. Query strings are
+# built by hand rather than via ``params=`` because Graph's OData parser
+# rejects ``+`` as a space in $filter/$orderby — urlencode would emit ``+``.
+# ---------------------------------------------------------------------------
+
+# Exactly the fields the desktop list view needs. One constant so the fresh
+# start and any future callers cannot drift apart.
+DELTA_SELECT = (
+    "id,internetMessageId,conversationId,subject,from,toRecipients,"
+    "receivedDateTime,isRead,isDraft,bodyPreview"
+)
+
+DETAIL_SELECT = "id,uniqueBody,internetMessageHeaders,hasAttachments"
+
+# Ask Exchange to convert the body server-side so the client never parses HTML.
+_PREFER_TEXT_BODY = 'outlook.body-content-type="text"'
+
+
+def _delta_path(folder: str, min_received: str) -> str:
+    """Build the fresh-start delta URL for a folder."""
+    path = f"/me/mailFolders/{_safe_id(folder)}/messages/delta?$select={quote(DELTA_SELECT)}"
+    if min_received:
+        path += f"&$filter={quote(f'receivedDateTime ge {min_received}')}"
+    return path
+
+
+def delta_page(
+    client: GraphClient,
+    folder: str = "inbox",
+    cursor: str = "",
+    min_received: str = "",
+) -> dict[str, Any]:
+    """Fetch ONE page of the folder delta feed.
+
+    An empty cursor starts a fresh enumeration. A non-empty cursor is a Graph
+    nextLink/deltaLink — an absolute URL that must be fetched verbatim.
+    """
+    if cursor:
+        return client.get(cursor)
+    return client.get(_delta_path(folder, min_received))
+
+
+def get_message_detail(client: GraphClient, message_id: str) -> dict[str, Any]:
+    """Fetch a message's plain-text body, internet headers, and attachment flag."""
+    return client.get(
+        f"/me/messages/{_safe_id(message_id)}?$select={quote(DETAIL_SELECT)}",
+        headers={"Prefer": _PREFER_TEXT_BODY},
+    )
+
+
+def create_reply_draft(client: GraphClient, message_id: str, timezone: str = "") -> dict[str, Any]:
+    """Create a reply draft for a message.
+
+    A timezone is sent as a ``Prefer: outlook.timezone`` header so the quoted
+    original carries local timestamps. Some mailboxes reject the header with a
+    400 — retry once without it, because a draft with UTC-quoted timestamps
+    beats no draft at all.
+    """
+    path = f"/me/messages/{_safe_id(message_id)}/createReply"
+    if timezone:
+        try:
+            return client.post(path, headers={"Prefer": f'outlook.timezone="{timezone}"'}) or {}
+        except GraphError as e:
+            if e.status_code != 400:
+                raise
+            logger.debug("createReply rejected Prefer: outlook.timezone; retrying without it")
+    return client.post(path) or {}
+
+
+def update_draft_body(client: GraphClient, draft_id: str, text: str) -> dict[str, Any]:
+    """Replace a draft's body with plain text."""
+    return client.patch(
+        f"/me/messages/{_safe_id(draft_id)}",
+        {"body": {"contentType": "text", "content": text}},
+    )
+
+
+def send_draft(client: GraphClient, draft_id: str) -> None:
+    """Send an existing draft. Graph answers 202 with no body."""
+    client.post(f"/me/messages/{_safe_id(draft_id)}/send")
+
+
+async def adelta_page(
+    client: AsyncGraphClient,
+    folder: str = "inbox",
+    cursor: str = "",
+    min_received: str = "",
+) -> dict[str, Any]:
+    """Fetch ONE page of the folder delta feed (async)."""
+    if cursor:
+        return await client.get(cursor)
+    return await client.get(_delta_path(folder, min_received))
+
+
+async def aget_message_detail(client: AsyncGraphClient, message_id: str) -> dict[str, Any]:
+    """Fetch a message's plain-text body, internet headers, and attachment flag (async)."""
+    return await client.get(
+        f"/me/messages/{_safe_id(message_id)}?$select={quote(DETAIL_SELECT)}",
+        headers={"Prefer": _PREFER_TEXT_BODY},
+    )
+
+
+async def acreate_reply_draft(
+    client: AsyncGraphClient, message_id: str, timezone: str = ""
+) -> dict[str, Any]:
+    """Create a reply draft for a message (async).
+
+    See :func:`create_reply_draft` for the Prefer-header retry rationale.
+    """
+    path = f"/me/messages/{_safe_id(message_id)}/createReply"
+    if timezone:
+        try:
+            return (
+                await client.post(path, headers={"Prefer": f'outlook.timezone="{timezone}"'})
+            ) or {}
+        except GraphError as e:
+            if e.status_code != 400:
+                raise
+            logger.debug("createReply rejected Prefer: outlook.timezone; retrying without it")
+    return (await client.post(path)) or {}
+
+
+async def aupdate_draft_body(client: AsyncGraphClient, draft_id: str, text: str) -> dict[str, Any]:
+    """Replace a draft's body with plain text (async)."""
+    return await client.patch(
+        f"/me/messages/{_safe_id(draft_id)}",
+        {"body": {"contentType": "text", "content": text}},
+    )
+
+
+async def asend_draft(client: AsyncGraphClient, draft_id: str) -> None:
+    """Send an existing draft (async). Graph answers 202 with no body."""
+    await client.post(f"/me/messages/{_safe_id(draft_id)}/send")
