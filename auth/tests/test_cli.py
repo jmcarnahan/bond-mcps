@@ -32,15 +32,28 @@ def test_generate_key_no_warning_when_env_var_unset(monkeypatch, capsys):
 
 
 def test_clear_rejects_unknown_provider():
-    """argparse choices must enforce {github, atlassian, microsoft}."""
+    """argparse choices must enforce the known-provider list."""
     parser = build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["clear", "--provider", "typo"])
 
 
 def test_clear_accepts_each_known_provider():
+    """Every provider with a TokenStore must be clearable — figma/omnea were
+    missing from choices, which silently broke their `make logout-*` targets."""
     parser = build_parser()
-    for provider in ("github", "atlassian", "microsoft"):
+    for provider in (
+        "github",
+        "atlassian",
+        "microsoft",
+        "microsoft_powerbi",
+        "databricks",
+        "workday",
+        "figma",
+        "omnea",
+        "aws",
+        "bond_ai",
+    ):
         args = parser.parse_args(["clear", "--provider", provider])
         assert args.provider == provider
 

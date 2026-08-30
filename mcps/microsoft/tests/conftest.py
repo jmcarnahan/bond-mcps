@@ -42,6 +42,7 @@ SAMPLE_MESSAGE = {
     "subject": "Weekly Report",
     "receivedDateTime": "2025-12-15T10:30:00Z",
     "isRead": False,
+    "bodyPreview": "Here is the weekly report. Best, Alice",
     "from": {
         "emailAddress": {
             "name": "Alice Smith",
@@ -60,6 +61,7 @@ SAMPLE_MESSAGE_2 = {
     "subject": "Re: Project Update",
     "receivedDateTime": "2025-12-14T08:00:00Z",
     "isRead": True,
+    "bodyPreview": "Looks good!",
     "from": {
         "emailAddress": {
             "name": "Charlie Brown",
@@ -74,6 +76,60 @@ SAMPLE_MESSAGE_2 = {
 }
 
 SAMPLE_MESSAGES_RESPONSE = {"value": [SAMPLE_MESSAGE, SAMPLE_MESSAGE_2]}
+
+# Inbox rule (messageRule) payloads — mirror the verified Graph doc shapes.
+SAMPLE_MESSAGE_RULE = {
+    "id": "AQABBQ==-rule-001",
+    "displayName": "From partner",
+    "sequence": 2,
+    "isEnabled": True,
+    "hasError": False,
+    "isReadOnly": False,
+    "conditions": {"senderContains": ["adele"]},
+    "actions": {"moveToFolder": "AQMkAGfolder", "stopProcessingRules": True},
+}
+
+SAMPLE_MESSAGE_RULE_2 = {
+    "id": "AQABBQ==-rule-002",
+    "displayName": "Newsletters to read later",
+    "sequence": 3,
+    "isEnabled": False,
+    "hasError": False,
+    "isReadOnly": False,
+    "conditions": {"subjectContains": ["newsletter"]},
+    "actions": {"markAsRead": True},
+}
+
+SAMPLE_MESSAGE_RULES_RESPONSE = {"value": [SAMPLE_MESSAGE_RULE, SAMPLE_MESSAGE_RULE_2]}
+
+SAMPLE_MAIL_FOLDER = {
+    "id": "AQMkAGfolder-001",
+    "displayName": "Projects",
+    "parentFolderId": "AQMkAGroot",
+    "childFolderCount": 2,
+    "totalItemCount": 42,
+    "unreadItemCount": 3,
+}
+
+SAMPLE_MAIL_FOLDER_2 = {
+    "id": "AQMkAGfolder-002",
+    "displayName": "Receipts",
+    "parentFolderId": "AQMkAGroot",
+    "childFolderCount": 0,
+    "totalItemCount": 10,
+    "unreadItemCount": 0,
+}
+
+SAMPLE_MAIL_FOLDERS_RESPONSE = {"value": [SAMPLE_MAIL_FOLDER, SAMPLE_MAIL_FOLDER_2]}
+
+SAMPLE_MESSAGES_PAGE1 = {
+    "value": [SAMPLE_MESSAGE],
+    "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skip=1&$top=999",
+}
+
+SAMPLE_MESSAGES_PAGE2 = {
+    "value": [SAMPLE_MESSAGE_2],
+}
 
 SAMPLE_TEAM = {
     "id": "team-id-001",
@@ -173,7 +229,7 @@ SAMPLE_DRIVE_ITEM_BINARY = {
 SAMPLE_DRIVE_ITEM_LARGE_TEXT = {
     "id": "file-id-003",
     "name": "huge-log.txt",
-    "size": 600_000,  # Exceeds 512 KB cap
+    "size": 3_000_000,  # Exceeds 2 MB cap
     "file": {"mimeType": "text/plain"},
     "lastModifiedDateTime": "2025-12-12T09:00:00Z",
     "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-001"}},
@@ -312,6 +368,7 @@ SAMPLE_CHAT_ONEONONE = {
         "body": {"content": "Sounds good!"},
         "from": {"user": {"displayName": "Alice Smith"}},
     },
+    "viewpoint": {"lastMessageReadDateTime": "2025-12-15T14:00:00Z"},
 }
 
 SAMPLE_CHAT_GROUP = {
@@ -329,6 +386,7 @@ SAMPLE_CHAT_GROUP = {
         "body": {"content": "Meeting at 3pm"},
         "from": {"user": {"displayName": "Bob Jones"}},
     },
+    "viewpoint": {"lastMessageReadDateTime": "2025-12-15T12:00:00Z"},
 }
 
 SAMPLE_CHAT_MEETING = {
@@ -345,6 +403,7 @@ SAMPLE_CHAT_MEETING = {
         "body": {"content": "Notes attached"},
         "from": {"user": {"displayName": "Alice Smith"}},
     },
+    "viewpoint": None,
 }
 
 SAMPLE_CHATS_RESPONSE = {"value": [SAMPLE_CHAT_ONEONONE, SAMPLE_CHAT_GROUP, SAMPLE_CHAT_MEETING]}
@@ -385,6 +444,55 @@ SAMPLE_UPLOADED_FILE = {
     "lastModifiedBy": {"user": {"displayName": "Bob Jones", "id": "user-002"}},
     "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-uploaded-001",
     "parentReference": {"driveId": "drive-001", "id": "folder-id-001"},
+}
+
+SAMPLE_SHARED_DRIVE_ITEM = {
+    "id": "shared-file-001",
+    "name": "Q4-Presentation.pptx",
+    "size": 3_500_000,
+    "file": {
+        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    },
+    "lastModifiedDateTime": "2025-12-20T09:30:00Z",
+    "lastModifiedBy": {"user": {"displayName": "Sajith P", "id": "user-ext-001"}},
+    "webUrl": "https://mcafee-my.sharepoint.com/personal/sajith_pilakkavil/Documents/Q4-Presentation.pptx",
+    "parentReference": {"driveId": "drive-ext-001", "id": "folder-shared-root"},
+}
+
+SAMPLE_SHARED_TEXT_FILE = {
+    "id": "shared-file-002",
+    "name": "notes.md",
+    "size": 256,
+    "file": {"mimeType": "text/markdown"},
+    "lastModifiedDateTime": "2025-12-21T14:00:00Z",
+    "lastModifiedBy": {"user": {"displayName": "Sajith P", "id": "user-ext-001"}},
+    "webUrl": "https://mcafee-my.sharepoint.com/personal/sajith_pilakkavil/Documents/notes.md",
+    "parentReference": {"driveId": "drive-ext-001", "id": "folder-shared-root"},
+}
+
+SAMPLE_SHARED_FOLDER_CHILDREN = {
+    "value": [
+        {
+            "id": "shared-child-001",
+            "name": "file1.docx",
+            "size": 12000,
+            "file": {
+                "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            },
+            "lastModifiedDateTime": "2025-12-22T08:00:00Z",
+            "lastModifiedBy": {"user": {"displayName": "Sajith P"}},
+            "webUrl": "https://mcafee-my.sharepoint.com/personal/sajith_pilakkavil/Documents/file1.docx",
+        },
+        {
+            "id": "shared-child-002",
+            "name": "data.csv",
+            "size": 2048,
+            "file": {"mimeType": "text/csv"},
+            "lastModifiedDateTime": "2025-12-22T09:00:00Z",
+            "lastModifiedBy": {"user": {"displayName": "Sajith P"}},
+            "webUrl": "https://mcafee-my.sharepoint.com/personal/sajith_pilakkavil/Documents/data.csv",
+        },
+    ]
 }
 
 SAMPLE_COPY_IN_PROGRESS = {

@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from .graph_client import AsyncGraphClient, GraphClient, GraphError
+from .pagination import apaginate
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,13 @@ _HTML_TAG_RE = re.compile(
 _VALID_BODY_TYPES = frozenset({"HTML", "Text", "auto"})
 
 
+def _base(mailbox: str | None) -> str:
+    """Graph API path prefix: /users/{mailbox} for shared, /me for own."""
+    if mailbox:
+        return f"/users/{quote(mailbox, safe='@')}"
+    return "/me"
+
+
 def _detect_body_type(body: str) -> str:
     """Detect whether a body string is HTML or plain text.
 
@@ -190,18 +198,23 @@ def list_messages(
     client: GraphClient,
     folder: str = "inbox",
     top: int = 10,
+    mailbox: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List recent messages in a mail folder."""
+    """List recent messages in a mail folder.
+
+    ``folder`` may be a well-known name or a real folder ID; real IDs contain
+    reserved characters (=, /, +) and must be percent-encoded.
+    """
     data = client.get(
-        f"/me/mailFolders/{folder}/messages",
+        f"{_base(mailbox)}/mailFolders/{quote(folder, safe='')}/messages",
         params={"$top": top, "$orderby": "receivedDateTime desc"},
     )
     return data.get("value", [])
 
 
-def get_message(client: GraphClient, message_id: str) -> dict[str, Any]:
+def get_message(client: GraphClient, message_id: str, mailbox: str | None = None) -> dict[str, Any]:
     """Get a single message by ID."""
-    return client.get(f"/me/messages/{message_id}")
+    return client.get(f"{_base(mailbox)}/messages/{message_id}")
 
 
 def send_message(
@@ -210,14 +223,17 @@ def send_message(
     subject: str,
     body: str,
     cc: list[str] | None = None,
+    bcc: list[str] | None = None,
     from_address: str | None = None,
     body_type: str = "auto",
+    mailbox: str | None = None,
 ) -> None:
     """Send an email message."""
     if body_type not in _VALID_BODY_TYPES:
         raise ValueError(f"body_type must be 'HTML', 'Text', or 'auto'; got {body_type!r}")
     to_recipients = [{"emailAddress": {"address": addr}} for addr in to]
     cc_recipients = [{"emailAddress": {"address": addr}} for addr in (cc or [])]
+    bcc_recipients = [{"emailAddress": {"address": addr}} for addr in (bcc or [])]
     effective_type = _detect_body_type(body) if body_type == "auto" else body_type
 
     payload: dict[str, Any] = {
@@ -230,20 +246,23 @@ def send_message(
     }
     if cc_recipients:
         payload["message"]["ccRecipients"] = cc_recipients
+    if bcc_recipients:
+        payload["message"]["bccRecipients"] = bcc_recipients
     if from_address:
         payload["message"]["from"] = {"emailAddress": {"address": from_address}}
 
-    client.post("/me/sendMail", json_data=payload)
+    client.post(f"{_base(mailbox)}/sendMail", json_data=payload)
 
 
 def search_messages(
     client: GraphClient,
     query: str,
     top: int = 10,
+    mailbox: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search messages using KQL query syntax."""
     data = client.get(
-        "/me/messages",
+        f"{_base(mailbox)}/messages",
         params={"$search": f'"{query}"', "$top": top},
     )
     return data.get("value", [])
@@ -258,18 +277,73 @@ async def alist_messages(
     client: AsyncGraphClient,
     folder: str = "inbox",
     top: int = 10,
+    select: str | None = None,
+    mailbox: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List recent messages in a mail folder (async)."""
-    data = await client.get(
-        f"/me/mailFolders/{folder}/messages",
-        params={"$top": top, "$orderby": "receivedDateTime desc"},
+    """List recent messages in a mail folder (async), paginating if needed.
+
+    ``folder`` may be a well-known name (inbox, ...) or a real folder ID; real
+    IDs contain reserved characters (=, /, +) and must be percent-encoded.
+    """
+    params: dict[str, Any] = {"$orderby": "receivedDateTime desc"}
+    if select:
+        params["$select"] = select
+    path = f"{_base(mailbox)}/mailFolders/{quote(folder, safe='')}/messages"
+    return await apaginate(client, path, params, top, page_size=999)
+
+
+async def aget_message(
+    client: AsyncGraphClient, message_id: str, mailbox: str | None = None
+) -> dict[str, Any]:
+    """Get a single message by ID (async)."""
+    return await client.get(f"{_base(mailbox)}/messages/{message_id}")
+
+
+async def amark_read(
+    client: AsyncGraphClient, message_id: str, is_read: bool = True, mailbox: str | None = None
+) -> dict[str, Any]:
+    """Mark a message as read (or unread) and return the updated message (async)."""
+    return await client.patch(
+        f"{_base(mailbox)}/messages/{message_id}", json_data={"isRead": is_read}
     )
+
+
+# ---------------------------------------------------------------------------
+# Inbox rules (messageRules)
+# ---------------------------------------------------------------------------
+
+_RULES_PATH = "/me/mailFolders/inbox/messageRules"
+
+
+async def alist_inbox_rules(client: AsyncGraphClient) -> list[dict[str, Any]]:
+    """List the inbox rules (messageRules) for the mailbox (async)."""
+    data = await client.get(_RULES_PATH)
     return data.get("value", [])
 
 
-async def aget_message(client: AsyncGraphClient, message_id: str) -> dict[str, Any]:
-    """Get a single message by ID (async)."""
-    return await client.get(f"/me/messages/{message_id}")
+async def aget_inbox_rule(client: AsyncGraphClient, rule_id: str) -> dict[str, Any]:
+    """Get a single inbox rule by ID (async)."""
+    return await client.get(f"{_RULES_PATH}/{quote(rule_id, safe='')}")
+
+
+async def acreate_inbox_rule(client: AsyncGraphClient, rule: dict[str, Any]) -> dict[str, Any]:
+    """Create an inbox rule and return the created rule (async).
+
+    The Graph-shaped ``rule`` must include displayName, sequence, and actions.
+    """
+    return await client.post(_RULES_PATH, json_data=rule)
+
+
+async def aupdate_inbox_rule(
+    client: AsyncGraphClient, rule_id: str, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply a partial update to an inbox rule and return the updated rule (async)."""
+    return await client.patch(f"{_RULES_PATH}/{quote(rule_id, safe='')}", json_data=changes)
+
+
+async def adelete_inbox_rule(client: AsyncGraphClient, rule_id: str) -> None:
+    """Delete an inbox rule by ID (async)."""
+    await client.delete(f"{_RULES_PATH}/{quote(rule_id, safe='')}")
 
 
 async def asend_message(
@@ -278,14 +352,17 @@ async def asend_message(
     subject: str,
     body: str,
     cc: list[str] | None = None,
+    bcc: list[str] | None = None,
     from_address: str | None = None,
     body_type: str = "auto",
+    mailbox: str | None = None,
 ) -> None:
     """Send an email message (async)."""
     if body_type not in _VALID_BODY_TYPES:
         raise ValueError(f"body_type must be 'HTML', 'Text', or 'auto'; got {body_type!r}")
     to_recipients = [{"emailAddress": {"address": addr}} for addr in to]
     cc_recipients = [{"emailAddress": {"address": addr}} for addr in (cc or [])]
+    bcc_recipients = [{"emailAddress": {"address": addr}} for addr in (bcc or [])]
     effective_type = _detect_body_type(body) if body_type == "auto" else body_type
 
     payload: dict[str, Any] = {
@@ -298,23 +375,36 @@ async def asend_message(
     }
     if cc_recipients:
         payload["message"]["ccRecipients"] = cc_recipients
+    if bcc_recipients:
+        payload["message"]["bccRecipients"] = bcc_recipients
     if from_address:
         payload["message"]["from"] = {"emailAddress": {"address": from_address}}
 
-    await client.post("/me/sendMail", json_data=payload)
+    await client.post(f"{_base(mailbox)}/sendMail", json_data=payload)
 
 
 async def asearch_messages(
     client: AsyncGraphClient,
     query: str,
     top: int = 10,
+    select: str | None = None,
+    mailbox: str | None = None,
+    folder: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search messages using KQL query syntax (async)."""
-    data = await client.get(
-        "/me/messages",
-        params={"$search": f'"{query}"', "$top": top},
-    )
-    return data.get("value", [])
+    """Search messages using KQL query syntax (async), paginating if needed.
+
+    When ``folder`` (a real folder ID or well-known name) is given, the search is
+    scoped to that folder; otherwise it runs across all folders. Graph forbids
+    combining ``$search`` with ``$orderby``, so no ordering is requested here.
+    """
+    params: dict[str, Any] = {"$search": f'"{query}"'}
+    if select:
+        params["$select"] = select
+    if folder:
+        path = f"{_base(mailbox)}/mailFolders/{quote(folder, safe='')}/messages"
+    else:
+        path = f"{_base(mailbox)}/messages"
+    return await apaginate(client, path, params, top, page_size=250)
 
 
 # ---------------------------------------------------------------------------

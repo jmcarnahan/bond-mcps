@@ -445,6 +445,16 @@ class LockedToken:
         prior_extras = dict(self._row.extra_metadata or {}) if self._row else {}
         merged = {**prior_extras, **new_data}
 
+        # RFC 6749 §6: a refresh response MAY omit refresh_token (the existing
+        # one stays valid) and MAY omit scope (identical to what was granted).
+        # Figma omits both. Without this, the first refresh writes NULL over the
+        # stored refresh_token and every later refresh fails. Providers that
+        # rotate still win, since their response supplies the key.
+        prior = self._data or {}
+        for field in ("refresh_token", "scopes"):
+            if not merged.get(field) and prior.get(field):
+                merged[field] = prior[field]
+
         values = self._repo._encode_provider_token_values(self._user_key, self._provider, merged)
         self._repo._upsert_provider_token(self._session, self._user_key, self._provider, values)
         # The upsert bypasses the ORM, so the session's identity map still

@@ -291,6 +291,31 @@ class TestAsyncGraphClient:
 
         assert exc_info.value.status_code == 404
 
+    @respx.mock
+    async def test_async_delete_returns_none_on_204(self):
+        path = "/me/mailFolders/inbox/messageRules/rule-001"
+        route = respx.delete(f"{GRAPH_BASE_URL}{path}").mock(return_value=httpx.Response(204))
+        async with AsyncGraphClient("del-token") as client:
+            result = await client.delete(path)
+
+        assert result is None
+        assert route.called
+        assert route.calls[0].request.headers["authorization"] == "Bearer del-token"
+
+    @respx.mock
+    async def test_async_delete_error_raises(self):
+        path = "/me/mailFolders/inbox/messageRules/bad-id"
+        respx.delete(f"{GRAPH_BASE_URL}{path}").mock(
+            return_value=httpx.Response(
+                404, json={"error": {"code": "ErrorItemNotFound", "message": "Not found"}}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await client.delete(path)
+
+        assert exc_info.value.status_code == 404
+
 
 class TestExtraHeaders:
     """Per-request header merging on get/post (used by the Desktop JSON ops)."""

@@ -29,8 +29,10 @@ RUN useradd --create-home --uid 1000 app && \
     chown -R app:app /app /auth
 USER app
 
+ARG BUILD_VERSION=dev
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8000
+    PORT=8000 \
+    BUILD_VERSION=$BUILD_VERSION
 
 EXPOSE 8000
 

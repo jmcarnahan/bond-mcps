@@ -40,6 +40,18 @@ CFG = ProviderConnectConfig(
 USER = "alice@example.com"
 
 
+@pytest.fixture(autouse=True)
+def _jwt_mode(monkeypatch):
+    """Force JWT mode for this module.
+
+    These tests exercise the multi-tenant delegation contract (mocked
+    get_access_token, canonical /connections redirect_uri); since the fork
+    merge, the handlers branch on _is_jwt_mode() and would otherwise take the
+    local-identity path.
+    """
+    monkeypatch.setenv("BOND_MCPS_JWT_PUBLIC_KEY", "test-key-for-jwt-mode")
+
+
 class FakeRequest:
     def __init__(self, query=None, body=None):
         self.query_params = query or {}
@@ -232,6 +244,10 @@ class TestStatus:
             "scopes": None,
             "expires_at": None,
             "has_refresh_token": False,
+            # Fork-lineage diagnostics carried by the merged superset shape.
+            "provider": "atlassian",
+            "token": None,
+            "reason": "not_connected",
         }
 
     def test_connected_valid(self, repo, monkeypatch):

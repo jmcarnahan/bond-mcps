@@ -15,6 +15,10 @@ authlib = ">=1.7.1"
 pyjwt = {version = ">=2.12.0", extras = ["crypto"]}
 pygments = ">=2.20.0"
 bond-auth = {path = "../../auth", develop = true}
+python-docx = ">=1.1.0"
+python-pptx = ">=1.0.0"
+openpyxl = ">=3.1.0"
+pypdf = ">=4.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"

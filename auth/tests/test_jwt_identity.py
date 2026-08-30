@@ -16,6 +16,7 @@ import pytest
 from auth.jwt_identity import (
     DEFAULT_ALGORITHM,
     DEFAULT_SUB_CLAIM,
+    CompositeTokenVerifier,
     JWTConfigError,
     build_remote_auth_provider,
     build_verifier,
@@ -30,6 +31,8 @@ JWT_ENV_KEYS = (
     "BOND_MCPS_JWT_AUDIENCE",
     "BOND_MCPS_JWT_ALGORITHM",
     "BOND_MCPS_JWT_SUB_CLAIM",
+    "BOND_MCPS_JWT_SHARED_SECRET",
+    "BOND_MCPS_JWT_SHARED_SECRET_ISSUER",
     "BOND_MCPS_AS_BASE_URL",
     "BOND_MCPS_PUBLIC_URL",
 )
@@ -215,3 +218,175 @@ class TestBuildRemoteAuthProvider:
 
             provider = build_remote_auth_provider("github")
             assert isinstance(provider, RemoteAuthProvider)
+
+
+# ---------------------------------------------------------------------------
+# Composite JWT verification (JWKS + shared secret)
+# ---------------------------------------------------------------------------
+
+
+class TestCompositeVerifier:
+    """Test composite JWT verification for bond-ai integration."""
+
+    def test_composite_mode_enabled_when_both_set(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_SHARED_SECRET": "test-shared-secret-key",
+                "BOND_MCPS_JWT_ISSUER": "https://auth.example.com,bond-ai",
+            },
+        ):
+            verifier = build_verifier()
+            assert isinstance(verifier, CompositeTokenVerifier)
+
+    def test_composite_rejects_public_key_conflict(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_SHARED_SECRET": "test-secret",
+                "BOND_MCPS_JWT_PUBLIC_KEY": "some-key",
+            },
+        ):
+            with pytest.raises(JWTConfigError, match="Cannot set"):
+                build_verifier()
+
+    def test_composite_default_secondary_issuer(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_SHARED_SECRET": "test-secret",
+            },
+        ):
+            verifier = build_verifier()
+            assert isinstance(verifier, CompositeTokenVerifier)
+            assert verifier.secondary_issuer == "bond-ai"
+
+    def test_composite_custom_secondary_issuer(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_SHARED_SECRET": "test-secret",
+                "BOND_MCPS_JWT_SHARED_SECRET_ISSUER": "my-custom-issuer",
+            },
+        ):
+            verifier = build_verifier()
+            assert verifier.secondary_issuer == "my-custom-issuer"
+
+    def test_hs256_token_routed_to_secondary(self):
+        import asyncio
+
+        import jwt as pyjwt
+
+        secret = "test-shared-secret-32bytes-long!!"
+        token = pyjwt.encode(
+            {"sub": "user@example.com", "iss": "bond-ai", "aud": "mcp-server", "exp": 9999999999},
+            secret,
+            algorithm="HS256",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_SHARED_SECRET": secret,
+                "BOND_MCPS_JWT_ISSUER": "https://auth.example.com,bond-ai",
+                "BOND_MCPS_JWT_AUDIENCE": "mcp-server",
+            },
+        ):
+            verifier = build_verifier()
+            result = asyncio.run(verifier.verify_token(token))
+            assert result is not None
+            assert result.claims["sub"] == "user@example.com"
+            assert result.claims["iss"] == "bond-ai"
+
+    def test_hs256_token_wrong_issuer_rejected(self):
+        import asyncio
+
+        import jwt as pyjwt
+
+        secret = "test-shared-secret-32bytes-long!!"
+        token = pyjwt.encode(
+            {
+                "sub": "attacker@evil.com",
+                "iss": "evil-issuer",
+                "aud": "mcp-server",
+                "exp": 9999999999,
+            },
+            secret,
+            algorithm="HS256",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_SHARED_SECRET": secret,
+                "BOND_MCPS_JWT_ISSUER": "https://auth.example.com,bond-ai",
+                "BOND_MCPS_JWT_AUDIENCE": "mcp-server",
+            },
+        ):
+            verifier = build_verifier()
+            result = asyncio.run(verifier.verify_token(token))
+            assert result is None
+
+    def test_rs256_token_routed_to_primary(self):
+        """RS256 tokens are forwarded to the primary (JWKS) verifier."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        import jwt as pyjwt
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        token = pyjwt.encode(
+            {
+                "sub": "user@example.com",
+                "iss": "https://auth.example.com",
+                "aud": "mcp-server",
+                "exp": 9999999999,
+            },
+            pem,
+            algorithm="RS256",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_SHARED_SECRET": "test-secret",
+                "BOND_MCPS_JWT_ISSUER": "https://auth.example.com,bond-ai",
+                "BOND_MCPS_JWT_AUDIENCE": "mcp-server",
+            },
+        ):
+            verifier = build_verifier()
+            mock_result = AsyncMock()
+            mock_result.claims = {"sub": "user@example.com"}
+            verifier.primary.verify_token = AsyncMock(return_value=mock_result)
+
+            result = asyncio.run(verifier.verify_token(token))
+            verifier.primary.verify_token.assert_called_once_with(token)
+            assert result == mock_result
+
+    def test_existing_single_jwks_mode_unchanged(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BOND_MCPS_JWT_JWKS_URI": "https://auth.example.com/.well-known/jwks.json",
+                "BOND_MCPS_JWT_ISSUER": "https://auth.example.com",
+            },
+        ):
+            from fastmcp.server.auth.providers.jwt import JWTVerifier
+
+            verifier = build_verifier()
+            assert isinstance(verifier, JWTVerifier)
+            assert not isinstance(verifier, CompositeTokenVerifier)

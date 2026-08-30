@@ -38,7 +38,11 @@ class TestGetGraphToken:
     def test_raises_on_missing_header(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, return_value={}), patch.dict(os.environ, {}, clear=True):
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_graph_token()
 
@@ -47,6 +51,7 @@ class TestGetGraphToken:
 
         with (
             patch(_HEADERS_PATCH, return_value={"authorization": ""}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
             patch.dict(os.environ, {}, clear=True),
         ):
             with pytest.raises(PermissionError, match="authorization required"):
@@ -57,6 +62,7 @@ class TestGetGraphToken:
 
         with (
             patch(_HEADERS_PATCH, return_value={"authorization": f"Basic {FAKE_BASIC_AUTH}"}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
             patch.dict(os.environ, {}, clear=True),
         ):
             with pytest.raises(PermissionError, match="authorization required"):
@@ -80,6 +86,7 @@ class TestGetGraphTokenFallback:
 
         with (
             patch(_HEADERS_PATCH, return_value={}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
             patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}),
             patch("ms_graph.local_auth.get_local_token", return_value="local-tok"),
         ):
@@ -89,7 +96,11 @@ class TestGetGraphTokenFallback:
     def test_raises_when_no_header_and_no_client_id(self):
         from ms_graph.auth import get_graph_token
 
-        with patch(_HEADERS_PATCH, return_value={}), patch.dict(os.environ, {}, clear=True):
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             with pytest.raises(PermissionError, match="authorization required"):
                 get_graph_token()
 
@@ -110,7 +121,65 @@ class TestGetGraphTokenFallback:
         with (
             patch(_HEADERS_PATCH, side_effect=RuntimeError("no context")),
             patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
             patch("ms_graph.local_auth.get_local_token", return_value="local-tok"),
         ):
             token = get_graph_token()
         assert token == "local-tok"
+
+
+class TestProviderTokensFallback:
+    """Test provider_tokens check inserted before MSAL fallback."""
+
+    def test_uses_provider_token_when_available(self):
+        from ms_graph.auth import get_graph_token
+
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch("ms_graph.auth._check_provider_tokens", return_value="connect-flow-token"),
+        ):
+            token = get_graph_token()
+        assert token == "connect-flow-token"
+
+    def test_falls_to_msal_when_no_provider_token(self):
+        from ms_graph.auth import get_graph_token
+
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
+            patch.dict(os.environ, {"MS_CLIENT_ID": "test-id"}),
+            patch("ms_graph.local_auth.get_local_token", return_value="msal-token"),
+        ):
+            token = get_graph_token()
+        assert token == "msal-token"
+
+    def test_bearer_header_takes_priority_over_provider_tokens(self):
+        from ms_graph.auth import get_graph_token
+
+        with (
+            patch(_HEADERS_PATCH, return_value={"authorization": "Bearer header-tok"}),
+            patch("ms_graph.auth._check_provider_tokens", return_value="connect-tok"),
+        ):
+            token = get_graph_token()
+        assert token == "header-tok"
+
+    def test_powerbi_uses_provider_token(self):
+        from ms_graph.auth import get_powerbi_token
+
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch("ms_graph.auth._check_provider_tokens", return_value="pbi-connect-token"),
+        ):
+            token = get_powerbi_token()
+        assert token == "pbi-connect-token"
+
+    def test_raises_when_no_provider_token_and_no_client_id(self):
+        from ms_graph.auth import get_graph_token
+
+        with (
+            patch(_HEADERS_PATCH, return_value={}),
+            patch("ms_graph.auth._check_provider_tokens", return_value=None),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            with pytest.raises(PermissionError, match="authorization required"):
+                get_graph_token()

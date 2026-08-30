@@ -8,7 +8,8 @@ Two distinct flows:
   the incoming Authorization JWT, and per-user provider tokens are looked up
   from the encrypted ``tokens.db`` keyed by the JWT's ``sub`` claim. Missing
   rows raise ``MissingProviderConnection`` which the agent surfaces as a
-  structured error pointing at ``/connect/microsoft``.
+  structured error pointing at ``/connect/microsoft`` (Graph) or
+  ``/connect/microsoft_powerbi`` (Power BI).
 
 * **Single-tenant fallback (laptop).** JWT mode is disabled. The historical
   resolution applies: Bearer header (legacy Bond AI backend path), then
@@ -75,13 +76,12 @@ def _resolve_jwt_mode_token(*, provider: str) -> str:
 
 def _build_connect_url(*, provider: str, user_key: str) -> str | None:
     """Mint a ticket bound to the JWT-identified user and embed it in the
-    MCP's public /connect/microsoft URL. The agent surfaces this URL so the
-    user can complete Microsoft OAuth in a browser.
+    MCP's public /connect/<provider> URL. The agent surfaces this URL so the
+    user can complete OAuth in a browser.
 
-    Power BI shares the same /connect/microsoft endpoint — both store under
-    different provider keys but bootstrap via the same OAuth app + flow.
-    The ticket binds to the requesting JWT's sub, so cross-provider reuse
-    is gated by user identity, not by which tool surfaced the error.
+    Graph and Power BI each have their own /connect route registered in
+    ms_graph_mcp.py (microsoft and microsoft_powerbi respectively), so the
+    provider name maps 1:1 to the route.
     """
     public_url = (os.environ.get("BOND_MCPS_PUBLIC_URL") or "").strip().rstrip("/")
     if not public_url:
@@ -89,14 +89,10 @@ def _build_connect_url(*, provider: str, user_key: str) -> str | None:
     try:
         from auth.connect_tickets import mint_ticket
 
-        # Use the same ticket-provider name as the /connect route so it
-        # matches the registration in ms_graph_mcp.py.
-        ticket_provider = "microsoft" if provider == "microsoft_powerbi" else provider
-        ticket = mint_ticket(user_key=user_key, provider=ticket_provider)
+        ticket = mint_ticket(user_key=user_key, provider=provider)
     except Exception:  # nosec B110 — best-effort; fall back to a path-only URL
         return f"{public_url}/connect/{provider}"
-    ticket_provider = "microsoft" if provider == "microsoft_powerbi" else provider
-    return f"{public_url}/connect/{ticket_provider}?ticket={ticket}"
+    return f"{public_url}/connect/{provider}?ticket={ticket}"
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +104,10 @@ def _resolve_legacy_graph_token() -> str:
     bearer = _read_bearer_header()
     if bearer is not None:
         return bearer
+
+    token = _check_provider_tokens("microsoft")
+    if token is not None:
+        return token
 
     if os.environ.get("MS_CLIENT_ID"):
         from ms_graph.local_auth import get_local_token
@@ -127,6 +127,10 @@ def _resolve_legacy_powerbi_token() -> str:
     if bearer is not None:
         return bearer
 
+    token = _check_provider_tokens("microsoft_powerbi")
+    if token is not None:
+        return token
+
     if os.environ.get("MS_CLIENT_ID"):
         from ms_graph.local_auth import get_local_powerbi_token
 
@@ -134,9 +138,9 @@ def _resolve_legacy_powerbi_token() -> str:
 
     raise PermissionError(
         "Power BI authorization required. For standalone use, set MS_CLIENT_ID "
-        "(plus MS_CLIENT_SECRET if confidential) and run `make login-microsoft` — "
-        "Power BI uses a separate PBI-scoped token from Graph. For backend mode, "
-        "ensure the backend forwards an Authorization: Bearer header with a PBI token."
+        "(plus MS_CLIENT_SECRET if confidential) and run `make login-powerbi`. "
+        "For backend mode, ensure the backend forwards an Authorization: Bearer "
+        "header with a PBI-scoped token."
     )
 
 
@@ -150,6 +154,31 @@ def _read_bearer_header() -> str | None:
     auth = headers.get("authorization") if headers else None
     if auth and auth.startswith("Bearer "):
         return auth[7:]
+    return None
+
+
+def _check_provider_tokens(provider: str) -> str | None:
+    """Return access_token from provider_tokens if valid (with refresh)."""
+    try:
+        from auth import TokenStore
+        from auth.token_store import current_user_key
+
+        store = TokenStore(provider, user_key=current_user_key())
+
+        client_id = (os.environ.get("MS_CLIENT_ID") or "").strip()
+        client_secret = (os.environ.get("MS_CLIENT_SECRET") or "").strip()
+        if client_id:
+            tenant = (os.environ.get("MS_TENANT_ID") or "").strip() or "consumers"
+            token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+            token = store.refresh_if_needed(client_id, client_secret, token_url)
+            if token:
+                return token
+
+        data = store.get_token()
+        if data and data.get("access_token"):
+            return data["access_token"]
+    except Exception:
+        pass
     return None
 
 

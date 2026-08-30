@@ -157,6 +157,7 @@ class OIDCUpstreamIdP:
             "state": state,
             "code_challenge": code_challenge,
             "code_challenge_method": code_challenge_method,
+            "prompt": "login",
         }
         return f"{meta['authorization_endpoint']}?{urlencode(params)}"
 
@@ -166,12 +167,13 @@ class OIDCUpstreamIdP:
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": self._redirect_uri,
-            "client_id": self._client_id,
             "code_verifier": code_verifier,
         }
-        # Confidential clients send client_secret via HTTP Basic auth.
-        # Public clients (no secret) prove identity via PKCE only.
-        auth = (self._client_id, self._client_secret) if self._client_secret else None
+        if self._client_secret:
+            auth = (self._client_id, self._client_secret)
+        else:
+            auth = None
+            data["client_id"] = self._client_id
         with httpx.Client(timeout=15.0) as http:
             resp = http.post(meta["token_endpoint"], data=data, auth=auth)
         if resp.status_code != 200:

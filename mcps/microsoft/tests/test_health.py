@@ -15,4 +15,5 @@ def test_healthz_returns_ok_json():
     response = asyncio.run(healthz(None))
     assert response.status_code == 200
     body = json.loads(response.body)
-    assert body == {"status": "ok"}
+    assert body["status"] == "ok"
+    assert "version" in body

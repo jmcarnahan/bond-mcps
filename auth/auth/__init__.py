@@ -6,6 +6,7 @@
 # isn't a supported usage pattern here.
 from auth import log_discipline, startup  # noqa: F401
 from auth.exceptions import MissingProviderConnection
+from auth.options_parser import opt_bool, opt_int, parse_options
 from auth.proxy_client import AuthStateExpiredError, OAuthProxyClient
 from auth.token_store import (
     TokenStore,
@@ -19,5 +20,8 @@ __all__ = [
     "OAuthProxyClient",
     "TokenStore",
     "current_user_key",
+    "opt_bool",
+    "opt_int",
+    "parse_options",
     "resolve_user_key_for_request",
 ]
