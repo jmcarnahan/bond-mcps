@@ -468,3 +468,80 @@ async def aget_teams_activity(
     # Sort by timestamp descending
     activity.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return activity
+
+
+# ---------------------------------------------------------------------------
+# Desktop JSON operations (paged chat reads)
+#
+# These return RAW Graph response dicts and deliberately do NOT translate 403
+# into TeamsNotAvailableError — the desktop client distinguishes "not granted"
+# from "transient" itself. Query strings are built by hand because Graph's
+# OData parser rejects ``+`` as a space in $filter/$orderby.
+# ---------------------------------------------------------------------------
+
+# ONE property drives both $orderby and $filter on /chats/{id}/messages.
+# Graph SILENTLY ignores a $filter whose property differs from the $orderby
+# property — you get an unfiltered page and no error — so the pairing must be
+# structurally impossible to break.
+CHAT_MESSAGE_SORT_PROP = "lastModifiedDateTime"
+
+# lastUpdatedDateTime is NOT sortable on /me/chats; the preview timestamp is.
+_CHATS_ORDERBY = "lastMessagePreview/createdDateTime desc"
+
+
+def _chats_page_path(top: int) -> str:
+    """Build the fresh-start /me/chats page URL."""
+    return f"/me/chats?$top={top}&$expand=lastMessagePreview&$orderby={quote(_CHATS_ORDERBY)}"
+
+
+def _chat_messages_page_path(chat_id: str, since: str) -> str:
+    """Build the fresh-start chat messages page URL."""
+    path = (
+        f"/chats/{_safe_id(chat_id)}/messages"
+        f"?$top=50&$orderby={quote(f'{CHAT_MESSAGE_SORT_PROP} desc')}"
+    )
+    if since:
+        path += f"&$filter={quote(f'{CHAT_MESSAGE_SORT_PROP} gt {since}')}"
+    return path
+
+
+def chats_page(client: GraphClient, cursor: str = "", top: int = 50) -> dict[str, Any]:
+    """Fetch ONE page of the user's chats. A non-empty cursor is fetched verbatim."""
+    if cursor:
+        return client.get(cursor)
+    return client.get(_chats_page_path(top))
+
+
+def chat_members(client: GraphClient, chat_id: str) -> dict[str, Any]:
+    """Fetch ONE page of a chat's members."""
+    return client.get(f"/chats/{_safe_id(chat_id)}/members?$top=50")
+
+
+def chat_messages_page(
+    client: GraphClient, chat_id: str, since: str = "", cursor: str = ""
+) -> dict[str, Any]:
+    """Fetch ONE page of a chat's messages. A non-empty cursor is fetched verbatim."""
+    if cursor:
+        return client.get(cursor)
+    return client.get(_chat_messages_page_path(chat_id, since))
+
+
+async def achats_page(client: AsyncGraphClient, cursor: str = "", top: int = 50) -> dict[str, Any]:
+    """Fetch ONE page of the user's chats (async)."""
+    if cursor:
+        return await client.get(cursor)
+    return await client.get(_chats_page_path(top))
+
+
+async def achat_members(client: AsyncGraphClient, chat_id: str) -> dict[str, Any]:
+    """Fetch ONE page of a chat's members (async)."""
+    return await client.get(f"/chats/{_safe_id(chat_id)}/members?$top=50")
+
+
+async def achat_messages_page(
+    client: AsyncGraphClient, chat_id: str, since: str = "", cursor: str = ""
+) -> dict[str, Any]:
+    """Fetch ONE page of a chat's messages (async)."""
+    if cursor:
+        return await client.get(cursor)
+    return await client.get(_chat_messages_page_path(chat_id, since))

@@ -1,5 +1,7 @@
 """Tests for Teams operations (sync and async)."""
 
+from urllib.parse import parse_qs, urlparse
+
 import httpx
 import pytest
 import respx
@@ -18,8 +20,12 @@ from .conftest import (
     SAMPLE_CHANNEL_MESSAGE_USER,
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
+    SAMPLE_CHAT_MEMBERS_RESPONSE,
     SAMPLE_CHAT_MESSAGE_SENT,
+    SAMPLE_CHAT_MESSAGES_PAGE,
     SAMPLE_CHAT_MESSAGES_RESPONSE,
+    SAMPLE_CHATS_PAGE,
+    SAMPLE_CHATS_PAGE_NEXT_LINK,
     SAMPLE_CHATS_RESPONSE,
     SAMPLE_TEAMS_RESPONSE,
 )
@@ -546,3 +552,214 @@ class TestTeamsActivity:
         async with AsyncGraphClient("tok") as client:
             with pytest.raises(teams.TeamsNotAvailableError):
                 await teams.aget_teams_activity(client, hours=24)
+
+
+# ---------------------------------------------------------------------------
+# Desktop JSON operations
+# ---------------------------------------------------------------------------
+
+
+def _query_property(url: str, param: str) -> str:
+    """Pull the leading OData property name out of a $orderby/$filter clause.
+
+    Reads it back off the wire rather than off the module constant, so the test
+    would still notice if the two clauses were built from different sources.
+    """
+    value = parse_qs(urlparse(url).query)[param][0]
+    return value.split(" ")[0]
+
+
+class TestChatsPageSync:
+    """Synchronous chats-page tests."""
+
+    @respx.mock
+    def test_orderby_uses_last_message_preview(self):
+        """lastUpdatedDateTime is not sortable on /me/chats; the preview timestamp is."""
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
+        )
+        with GraphClient("tok") as client:
+            data = teams.chats_page(client)
+
+        assert data == SAMPLE_CHATS_PAGE
+        url = str(route.calls[0].request.url)
+        assert "$orderby=lastMessagePreview/createdDateTime%20desc" in url
+        assert "$expand=lastMessagePreview" in url
+        assert "$top=50" in url
+        assert "lastUpdatedDateTime" not in url
+        assert "+" not in url
+
+    @respx.mock
+    def test_top_is_honoured(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
+        )
+        with GraphClient("tok") as client:
+            teams.chats_page(client, top=10)
+
+        assert "$top=10" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_cursor_is_fetched_verbatim(self):
+        route = respx.get(SAMPLE_CHATS_PAGE_NEXT_LINK).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        with GraphClient("tok") as client:
+            teams.chats_page(client, cursor=SAMPLE_CHATS_PAGE_NEXT_LINK, top=10)
+
+        assert route.call_count == 1
+        assert str(route.calls[0].request.url) == SAMPLE_CHATS_PAGE_NEXT_LINK
+
+    @respx.mock
+    def test_403_is_not_translated(self):
+        """The desktop ops leave TeamsNotAvailableError to the markdown tools."""
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with GraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                teams.chats_page(client)
+
+        assert exc.value.status_code == 403
+
+
+class TestChatsPageAsync:
+    """Async chats-page tests."""
+
+    @respx.mock
+    async def test_orderby_uses_last_message_preview(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await teams.achats_page(client)
+
+        assert data == SAMPLE_CHATS_PAGE
+        assert "$orderby=lastMessagePreview/createdDateTime%20desc" in str(
+            route.calls[0].request.url
+        )
+
+    @respx.mock
+    async def test_cursor_is_fetched_verbatim(self):
+        route = respx.get(SAMPLE_CHATS_PAGE_NEXT_LINK).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        async with AsyncGraphClient("tok") as client:
+            await teams.achats_page(client, cursor=SAMPLE_CHATS_PAGE_NEXT_LINK)
+
+        assert str(route.calls[0].request.url) == SAMPLE_CHATS_PAGE_NEXT_LINK
+
+
+class TestChatMembers:
+    """Chat members tests (sync and async)."""
+
+    @respx.mock
+    def test_requests_one_page_of_fifty(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MEMBERS_RESPONSE)
+        )
+        with GraphClient("tok") as client:
+            data = teams.chat_members(client, "chat-1on1-001")
+
+        assert data == SAMPLE_CHAT_MEMBERS_RESPONSE
+        assert str(route.calls[0].request.url).endswith("/chats/chat-1on1-001/members?$top=50")
+
+    @respx.mock
+    async def test_achat_members_encodes_chat_id(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MEMBERS_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await teams.achat_members(client, "19:a/b+c@thread.v2")
+
+        assert data == SAMPLE_CHAT_MEMBERS_RESPONSE
+        assert "/chats/19%3Aa%2Fb%2Bc%40thread.v2/members" in str(route.calls[0].request.url)
+
+
+class TestChatMessagesPageSync:
+    """Synchronous chat-messages-page tests."""
+
+    @respx.mock
+    def test_filter_and_orderby_share_one_property(self):
+        """Graph silently ignores a $filter whose property differs from $orderby's."""
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE)
+        )
+        with GraphClient("tok") as client:
+            teams.chat_messages_page(client, "chat-1on1-001", since="2026-01-05T00:00:00Z")
+
+        url = str(route.calls[0].request.url)
+        assert _query_property(url, "$filter") == _query_property(url, "$orderby")
+        assert _query_property(url, "$orderby") == teams.CHAT_MESSAGE_SORT_PROP
+
+    @respx.mock
+    def test_since_uses_percent_20_not_plus(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE)
+        )
+        with GraphClient("tok") as client:
+            teams.chat_messages_page(client, "chat-1on1-001", since="2026-01-05T00:00:00Z")
+
+        url = str(route.calls[0].request.url)
+        assert "$filter=lastModifiedDateTime%20gt%202026-01-05T00%3A00%3A00Z" in url
+        assert "$orderby=lastModifiedDateTime%20desc" in url
+        assert "+" not in url
+
+    @respx.mock
+    def test_empty_since_sends_no_filter(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE)
+        )
+        with GraphClient("tok") as client:
+            data = teams.chat_messages_page(client, "chat-1on1-001")
+
+        assert data == SAMPLE_CHAT_MESSAGES_PAGE
+        url = str(route.calls[0].request.url)
+        assert "$filter" not in url
+        assert "$top=50" in url
+
+    @respx.mock
+    def test_cursor_is_fetched_verbatim(self):
+        cursor = "https://graph.microsoft.com/v1.0/chats/c1/messages?$skiptoken=a%2Bb%2Fc"
+        route = respx.get(cursor).mock(return_value=httpx.Response(200, json={"value": []}))
+        with GraphClient("tok") as client:
+            teams.chat_messages_page(
+                client, "chat-1on1-001", since="2026-01-05T00:00:00Z", cursor=cursor
+            )
+
+        assert route.call_count == 1
+        assert str(route.calls[0].request.url) == cursor
+
+
+class TestChatMessagesPageAsync:
+    """Async chat-messages-page tests."""
+
+    @respx.mock
+    async def test_filter_and_orderby_share_one_property(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await teams.achat_messages_page(client, "chat-1on1-001", since="2026-01-05T00:00:00Z")
+
+        url = str(route.calls[0].request.url)
+        assert _query_property(url, "$filter") == _query_property(url, "$orderby")
+
+    @respx.mock
+    async def test_chat_id_is_url_encoded(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await teams.achat_messages_page(client, "19:a/b+c@thread.v2")
+
+        assert "/chats/19%3Aa%2Fb%2Bc%40thread.v2/messages" in str(route.calls[0].request.url)
+
+    @respx.mock
+    async def test_cursor_is_fetched_verbatim(self):
+        cursor = "https://graph.microsoft.com/v1.0/chats/c1/messages?$skiptoken=a%2Bb%2Fc"
+        route = respx.get(cursor).mock(return_value=httpx.Response(200, json={"value": []}))
+        async with AsyncGraphClient("tok") as client:
+            await teams.achat_messages_page(client, "chat-1on1-001", cursor=cursor)
+
+        assert str(route.calls[0].request.url) == cursor

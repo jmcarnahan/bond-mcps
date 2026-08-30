@@ -51,13 +51,23 @@ class GraphClient:
             timeout=30.0,
         )
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self._client.get(path, params=params)
+    def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        response = self._client.get(path, params=params, headers=headers)
         _raise_for_graph_error(response)
         return response.json()
 
-    def post(self, path: str, json_data: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        response = self._client.post(path, json=json_data)
+    def post(
+        self,
+        path: str,
+        json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
+        response = self._client.post(path, json=json_data, headers=headers)
         _raise_for_graph_error(response)
         if response.status_code == 202 or not response.content:
             return None
@@ -132,15 +142,23 @@ class AsyncGraphClient:
             timeout=30.0,
         )
 
-    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = await self._client.get(path, params=params)
+    async def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        response = await self._client.get(path, params=params, headers=headers)
         _raise_for_graph_error(response)
         return response.json()
 
     async def post(
-        self, path: str, json_data: dict[str, Any] | None = None
+        self,
+        path: str,
+        json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
-        response = await self._client.post(path, json=json_data)
+        response = await self._client.post(path, json=json_data, headers=headers)
         _raise_for_graph_error(response)
         if response.status_code == 202 or not response.content:
             return None

@@ -290,3 +290,89 @@ class TestAsyncGraphClient:
                 await client.get_bytes("/me/drive/items/bad/content")
 
         assert exc_info.value.status_code == 404
+
+
+class TestExtraHeaders:
+    """Per-request header merging on get/post (used by the Desktop JSON ops)."""
+
+    @respx.mock
+    def test_get_merges_extra_headers(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/me/messages/id").mock(
+            return_value=httpx.Response(200, json={"id": "id"})
+        )
+        with GraphClient("tok") as client:
+            client.get("/me/messages/id", headers={"Prefer": 'outlook.body-content-type="text"'})
+
+        req = route.calls[0].request
+        assert req.headers["prefer"] == 'outlook.body-content-type="text"'
+        # Client-level defaults survive the merge.
+        assert req.headers["authorization"] == "Bearer tok"
+
+    @respx.mock
+    def test_get_without_headers_is_unchanged(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json={"id": "u"})
+        )
+        with GraphClient("tok") as client:
+            client.get("/me")
+
+        req = route.calls[0].request
+        assert "prefer" not in req.headers
+        assert req.headers["authorization"] == "Bearer tok"
+
+    @respx.mock
+    def test_post_merges_extra_headers(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/messages/id/createReply").mock(
+            return_value=httpx.Response(201, json={"id": "draft"})
+        )
+        with GraphClient("tok") as client:
+            client.post(
+                "/me/messages/id/createReply",
+                headers={"Prefer": 'outlook.timezone="UTC"'},
+            )
+
+        req = route.calls[0].request
+        assert req.headers["prefer"] == 'outlook.timezone="UTC"'
+        assert req.headers["authorization"] == "Bearer tok"
+
+    @respx.mock
+    def test_post_without_headers_is_unchanged(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        with GraphClient("tok") as client:
+            assert client.post("/me/sendMail", json_data={"a": 1}) is None
+
+        assert "prefer" not in route.calls[0].request.headers
+
+    @respx.mock
+    async def test_async_get_merges_extra_headers(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/me/messages/id").mock(
+            return_value=httpx.Response(200, json={"id": "id"})
+        )
+        async with AsyncGraphClient("tok") as client:
+            await client.get("/me/messages/id", headers={"Prefer": "outlook.body-content-type"})
+
+        req = route.calls[0].request
+        assert req.headers["prefer"] == "outlook.body-content-type"
+        assert req.headers["authorization"] == "Bearer tok"
+
+    @respx.mock
+    async def test_async_post_merges_extra_headers(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/messages/id/createReply").mock(
+            return_value=httpx.Response(201, json={"id": "draft"})
+        )
+        async with AsyncGraphClient("tok") as client:
+            await client.post(
+                "/me/messages/id/createReply", headers={"Prefer": 'outlook.timezone="UTC"'}
+            )
+
+        assert route.calls[0].request.headers["prefer"] == 'outlook.timezone="UTC"'
+
+    @respx.mock
+    async def test_async_get_without_headers_is_unchanged(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json={"id": "u"})
+        )
+        async with AsyncGraphClient("tok") as client:
+            await client.get("/me")
+
+        assert "prefer" not in route.calls[0].request.headers

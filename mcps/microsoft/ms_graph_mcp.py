@@ -13,12 +13,21 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (23 tools):
+Tool summary (33 tools):
   Email     : get_user_profile, list_emails, read_email, send_email
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
   Teams     : list_teams, list_chats, read_teams_messages, send_teams_message, get_teams_activity
   Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, copy_or_rename_file
   Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
+  Desktop JSON : get_profile_json, list_mail_delta, get_mail_detail, create_reply_draft_json,
+                 update_draft_body, send_draft, list_chats_page, get_chat_members_json,
+                 list_chat_messages_page, connection_status
+
+The 23 markdown tools above render prose for an LLM to read. The Desktop JSON
+namespace is for programmatic clients (the desktop mail app) and follows a
+different convention: every tool returns a ``dict``, which FastMCP surfaces as
+structuredContent. Parameters stay ``str``/``int`` only (empty string = absent)
+for Bedrock compatibility, as everywhere else in this server.
 """
 
 import logging
@@ -38,7 +47,7 @@ from ms_graph import mail as mail_ops
 from ms_graph import power_bi as pbi_ops
 from ms_graph import teams as teams_ops
 from ms_graph.auth import get_graph_token, get_powerbi_token
-from ms_graph.graph_client import AsyncGraphClient
+from ms_graph.graph_client import AsyncGraphClient, GraphError
 from ms_graph.power_bi import AsyncPowerBIClient
 from ms_graph.teams import TeamsNotAvailableError, extract_message_sender, extract_message_text
 
@@ -49,7 +58,15 @@ from auth.jwt_identity import build_remote_auth_provider
 def _microsoft_post_exchange(token_response: dict) -> dict:
     """Microsoft returns access_token + refresh_token + expires_in in a
     standard OAuth response. The default shape works for us — we just
-    normalize the fields TokenStore expects."""
+    normalize the fields TokenStore expects.
+
+    The granted scopes arrive as ``scope`` and must be persisted under the
+    storage key ``scopes`` — the key TokenRepository.save_token reads (see
+    auth/auth/connect_routes.py ``_default_token_shape``). Rows written before
+    this was corrected have NULL scopes; ``connection_status`` reports
+    ``scopes: []`` for them, and clients treat empty as "unknown: assume mail
+    granted, chat not".
+    """
     import time
 
     out = {"access_token": token_response.get("access_token")}
@@ -61,7 +78,7 @@ def _microsoft_post_exchange(token_response: dict) -> dict:
         except (TypeError, ValueError):
             pass
     if scope := token_response.get("scope"):
-        out["scope"] = scope
+        out["scopes"] = scope
     return out
 
 
@@ -95,6 +112,16 @@ from auth import log_discipline  # noqa: E402
 
 log_discipline.apply()
 logger = logging.getLogger(__name__)
+
+
+def _not_connected(e: PermissionError) -> dict:
+    """Build the Desktop JSON "no Microsoft connection" payload.
+
+    ``MissingProviderConnection`` (JWT mode) carries the per-user connect URL
+    as an attribute; legacy laptop mode raises a plain PermissionError with no
+    URL, which becomes None.
+    """
+    return {"error": "not_connected", "connect_url": getattr(e, "connect_url", None)}
 
 
 @asynccontextmanager
@@ -1239,6 +1266,360 @@ async def export_report(
             f"in Bond AI Settings → Connections (backend mode) to enable OneDrive upload."
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Desktop JSON tools
+#
+# A separate namespace for programmatic clients (the desktop mail app). Unlike
+# the 23 markdown tools above, these return dicts — FastMCP renders them as
+# structuredContent. Parameters remain str/int only.
+#
+# Error contract: a missing Microsoft connection returns the not_connected
+# payload (with a connect URL when one exists). Everything else — Graph 5xx,
+# throttling, unexpected shapes — propagates so FastMCP raises a tool error,
+# which is the client's "transient, retry later" signal.
+# ---------------------------------------------------------------------------
+
+
+def _profile_json(profile: dict) -> dict:
+    """Map a Graph /me payload to the desktop profile shape."""
+    return {
+        "id": profile.get("id"),
+        "display_name": profile.get("displayName"),
+        "mail": profile.get("mail"),
+        "user_principal_name": profile.get("userPrincipalName"),
+    }
+
+
+def _chat_message_json(msg: dict) -> dict:
+    """Flatten a Graph chatMessage. Every nested object can be null on system
+    events, so each level is read defensively."""
+    sender = msg.get("from") or {}
+    user = sender.get("user") or {}
+    application = sender.get("application") or {}
+    body = msg.get("body") or {}
+    return {
+        "id": msg.get("id"),
+        "message_type": msg.get("messageType"),
+        "from_user_id": user.get("id"),
+        "from_user_display": user.get("displayName"),
+        "from_application_id": application.get("id"),
+        "body_content": body.get("content"),
+        "body_content_type": body.get("contentType"),
+        "created": msg.get("createdDateTime"),
+        "last_modified": msg.get("lastModifiedDateTime"),
+    }
+
+
+def _stored_graph_scopes() -> list[str]:
+    """Read the granted scopes off the stored Microsoft token row.
+
+    Best-effort by design: laptop (MSAL) mode has no DB row at all, and a
+    status probe must never be the thing that crashes. Any failure — no row,
+    no DB, unexpected value type — reports as "unknown" (empty list).
+    """
+    try:
+        from auth import resolve_user_key_for_request
+        from auth.db.repository import TokenRepository
+
+        data = TokenRepository().get_token(resolve_user_key_for_request(), "microsoft")
+        raw = data.get("scopes") if data else None
+        if not raw:
+            return []
+        # Graph echoes scopes fully qualified (https://graph.microsoft.com/Mail.Read);
+        # the desktop client matches on the bare name.
+        return [scope.rsplit("/", 1)[-1].lower() for scope in raw.split()]
+    except Exception:
+        logger.debug("Could not read stored Microsoft scopes", exc_info=True)
+        return []
+
+
+@mcp.tool()
+async def get_profile_json() -> dict:
+    """
+    Get the signed-in user's identity as structured JSON.
+
+    For programmatic clients. Returns id, display_name, mail, and
+    user_principal_name. The id is the Graph user object ID — Teams messages
+    carry the same ID, so clients use it to tell their own messages apart from
+    everyone else's.
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            profile = await mail_ops.aget_profile(client)
+    except PermissionError as e:
+        return _not_connected(e)
+    return _profile_json(profile)
+
+
+@mcp.tool()
+async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received: str = "") -> dict:
+    """
+    Fetch ONE page of a mail folder's delta feed as structured JSON.
+
+    For programmatic clients doing incremental sync. Returns messages (raw
+    Graph message objects, including `@removed` tombstones for deletions),
+    next_cursor (more pages in this run), delta_cursor (this run is done —
+    save it and pass it back next time), and resync.
+
+    Args:
+        folder: Mail folder to sync (default: inbox).
+        cursor: A next_cursor or delta_cursor from a previous call. Empty
+            starts a fresh enumeration.
+        min_received: ISO 8601 timestamp bounding a fresh enumeration
+            (e.g. "2026-01-01T00:00:00Z"). Ignored when cursor is set.
+
+    A resync of true means the saved cursor has expired: discard local state
+    for the folder and call again with an empty cursor.
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            data = await mail_ops.adelta_page(
+                client, folder=folder, cursor=cursor, min_received=min_received
+            )
+    except PermissionError as e:
+        return _not_connected(e)
+    except GraphError as e:
+        if e.status_code == 410:
+            return {"messages": [], "next_cursor": "", "delta_cursor": "", "resync": True}
+        raise
+
+    return {
+        "messages": data.get("value", []),
+        "next_cursor": data.get("@odata.nextLink", ""),
+        "delta_cursor": data.get("@odata.deltaLink", ""),
+        "resync": False,
+    }
+
+
+@mcp.tool()
+async def get_mail_detail(message_id: str) -> dict:
+    """
+    Get a message's plain-text body and internet headers as structured JSON.
+
+    For programmatic clients. Exchange converts the body to text server-side,
+    so the client never parses HTML. Returns body_text (the reply-relevant
+    part only, without the quoted thread), headers (lowercased name → value;
+    where a header repeats, the first occurrence wins), and has_attachments.
+
+    Args:
+        message_id: The Graph message ID.
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            msg = await mail_ops.aget_message_detail(client, message_id)
+    except PermissionError as e:
+        return _not_connected(e)
+
+    headers: dict[str, str] = {}
+    for header in msg.get("internetMessageHeaders") or []:
+        name = (header.get("name") or "").lower()
+        if name and name not in headers:
+            headers[name] = header.get("value")
+
+    return {
+        "body_text": (msg.get("uniqueBody") or {}).get("content") or "",
+        "headers": headers,
+        "has_attachments": bool(msg.get("hasAttachments")),
+    }
+
+
+@mcp.tool()
+async def create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
+    """
+    Create a reply draft for a message and return its ID as structured JSON.
+
+    For programmatic clients. Graph builds the draft with recipients and the
+    quoted original already filled in; use update_draft_body to set the reply
+    text, then send_draft. Returns id and web_link.
+
+    Args:
+        message_id: The Graph message ID to reply to.
+        timezone: IANA or Windows timezone for the quoted original's
+            timestamps (e.g. "America/New_York"). Empty leaves them in UTC.
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            draft = await mail_ops.acreate_reply_draft(client, message_id, timezone=timezone)
+    except PermissionError as e:
+        return _not_connected(e)
+    return {"id": draft.get("id", ""), "web_link": draft.get("webLink", "")}
+
+
+@mcp.tool()
+async def update_draft_body(draft_id: str, text: str) -> dict:
+    """
+    Replace a draft's body with plain text. Returns structured JSON.
+
+    For programmatic clients. Overwrites the whole body, including anything
+    Graph pre-filled — quote the original yourself if you want it kept.
+
+    Args:
+        draft_id: The draft message ID (from create_reply_draft_json).
+        text: The plain-text body to write.
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            await mail_ops.aupdate_draft_body(client, draft_id, text)
+    except PermissionError as e:
+        return _not_connected(e)
+    return {"ok": True}
+
+
+@mcp.tool()
+async def send_draft(draft_id: str) -> dict:
+    """
+    Send an existing draft. Returns structured JSON.
+
+    For programmatic clients. Graph accepts the send asynchronously, so a
+    successful return means "queued", not "delivered".
+
+    Args:
+        draft_id: The draft message ID (from create_reply_draft_json).
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            await mail_ops.asend_draft(client, draft_id)
+    except PermissionError as e:
+        return _not_connected(e)
+    return {"ok": True}
+
+
+@mcp.tool()
+async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
+    """
+    Fetch ONE page of the user's Teams chats as structured JSON.
+
+    For programmatic clients. Chats come back newest-activity-first. Each entry
+    has id, topic (null for 1:1 chats — resolve a name via
+    get_chat_members_json), and last_preview_at. Returns next_cursor for the
+    next page, empty when the listing is complete.
+
+    Args:
+        cursor: A next_cursor from a previous call. Empty starts at page one.
+        top: Page size (default: 50). Ignored when cursor is set.
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            data = await teams_ops.achats_page(client, cursor=cursor, top=top)
+    except PermissionError as e:
+        return _not_connected(e)
+
+    chats = []
+    for chat in data.get("value", []):
+        preview = chat.get("lastMessagePreview") or {}
+        chats.append(
+            {
+                "id": chat.get("id"),
+                "topic": chat.get("topic"),
+                "last_preview_at": preview.get("createdDateTime"),
+            }
+        )
+    return {"chats": chats, "next_cursor": data.get("@odata.nextLink", "")}
+
+
+@mcp.tool()
+async def get_chat_members_json(chat_id: str) -> dict:
+    """
+    List a chat's members as structured JSON.
+
+    For programmatic clients. Returns one page of up to 50 members, each with
+    user_id and display_name. Use it to label 1:1 chats, which have no topic.
+
+    Args:
+        chat_id: The chat ID (from list_chats_page).
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            data = await teams_ops.achat_members(client, chat_id)
+    except PermissionError as e:
+        return _not_connected(e)
+
+    members = [
+        {"user_id": m.get("userId"), "display_name": m.get("displayName")}
+        for m in data.get("value", [])
+    ]
+    return {"members": members}
+
+
+@mcp.tool()
+async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "") -> dict:
+    """
+    Fetch ONE page of a chat's messages as structured JSON.
+
+    For programmatic clients. Messages come back newest-first and flattened:
+    id, message_type, from_user_id, from_user_display, from_application_id,
+    body_content, body_content_type, created, last_modified. System events have
+    no sender, so the from_* fields are null. Returns next_cursor for the next
+    page, empty when there are no more.
+
+    Args:
+        chat_id: The chat ID (from list_chats_page).
+        since: ISO 8601 timestamp; returns only messages modified after it.
+            Compare against the last_modified you stored, not created — an
+            edited message resurfaces. Ignored when cursor is set.
+        cursor: A next_cursor from a previous call. Empty starts at page one.
+    """
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            data = await teams_ops.achat_messages_page(client, chat_id, since=since, cursor=cursor)
+    except PermissionError as e:
+        return _not_connected(e)
+
+    return {
+        "messages": [_chat_message_json(m) for m in data.get("value", [])],
+        "next_cursor": data.get("@odata.nextLink", ""),
+    }
+
+
+@mcp.tool()
+async def connection_status() -> dict:
+    """
+    Report whether Microsoft is connected, and with which scopes.
+
+    For programmatic clients deciding what to show before any real call.
+    Returns connected, scopes (bare lowercased names, e.g. "mail.read"),
+    connect_url (set only when disconnected), and account (the same shape as
+    get_profile_json, or null if the profile could not be fetched).
+
+    An empty scopes list on a connected account means "unknown", not "none":
+    token rows persisted before the scopes key was corrected have no scopes
+    recorded. Clients should read empty as "assume mail is granted, chat is
+    not" rather than as a hard denial.
+    """
+    try:
+        token = get_graph_token()
+    except PermissionError as e:
+        return {
+            "connected": False,
+            "scopes": [],
+            "connect_url": getattr(e, "connect_url", None),
+            "account": None,
+        }
+
+    account = None
+    try:
+        async with AsyncGraphClient(token) as client:
+            account = _profile_json(await mail_ops.aget_profile(client))
+    except Exception:
+        logger.debug("connection_status could not fetch the profile", exc_info=True)
+
+    return {
+        "connected": True,
+        "scopes": _stored_graph_scopes(),
+        "connect_url": None,
+        "account": account,
+    }
 
 
 if __name__ == "__main__":
