@@ -32,6 +32,9 @@ module "eks" {
   }
 
   enabled_log_types = ["api", "audit", "authenticator"]
+  # 30 days is plenty of forensic window for dev; the module default (90) had
+  # the audit stream holding 10+ GB in CloudWatch.
+  cloudwatch_log_group_retention_in_days = 30
 
   addons = {
     coredns = {}
