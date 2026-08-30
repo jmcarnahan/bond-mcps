@@ -202,6 +202,16 @@ class TokenStore:
         return time.time() >= (expires_at - 60)
 
 
+# Some provider token endpoints sit behind Cloudflare configurations that
+# reject default Python client signatures (Python-urllib / python-httpx get
+# HTTP 403 error 1010 "browser_signature_banned" — observed on WorkOS AuthKit
+# tenants). A browser-like UA passes; other providers ignore it.
+OUTBOUND_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
 def _do_refresh(
     client_id: str, client_secret: str, token_url: str, refresh_token: str
 ) -> dict | None:
@@ -225,6 +235,7 @@ def _do_refresh(
         headers={
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
+            "User-Agent": OUTBOUND_USER_AGENT,
         },
         method="POST",
     )

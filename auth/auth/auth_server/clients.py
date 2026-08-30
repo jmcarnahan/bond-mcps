@@ -104,9 +104,38 @@ def get_client(client_id: str) -> ClientRecord | None:
         return _row_to_record(row)
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 def is_redirect_uri_allowed(client: ClientRecord, redirect_uri: str) -> bool:
-    """Exact-match check, OAuth 2.1 §1.5: registered URIs only."""
-    return redirect_uri in client.redirect_uris
+    """Exact-match check, OAuth 2.1 §1.5: registered URIs only.
+
+    One carve-out, RFC 8252 §7.3: native apps bind their callback listener to
+    whatever loopback port is free at auth time, so for a loopback redirect the
+    port MUST be allowed to differ from the registered one. Scheme, host, and
+    path still have to match a registered loopback URI exactly.
+    """
+    presented = urlparse(redirect_uri)
+    # Rejected before the exact-match check, so a row registered before _ensure_allowed_redirect
+    # validated these (or seeded via BOND_MCPS_STATIC_CLIENTS) still cannot be used: the AS
+    # appends its own ?code=..., and a pre-existing query would fold `code` into it.
+    if presented.query or presented.fragment or presented.username or presented.password:
+        return False
+    if redirect_uri in client.redirect_uris:
+        return True
+    if presented.scheme != "http" or presented.hostname not in _LOOPBACK_HOSTS:
+        return False
+    try:
+        presented.port  # raises ValueError on a non-numeric port
+    except ValueError:
+        return False
+    return any(
+        reg.scheme == "http"
+        and reg.hostname == presented.hostname
+        and reg.path == presented.path
+        and not (reg.query or reg.fragment)
+        for reg in map(urlparse, client.redirect_uris)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +247,18 @@ def _ensure_allowed_redirect(uri: str) -> None:
       * Anything else is **rejected**, including non-loopback HTTP and
         HTTPS to hosts not in the allowlist. When the env is unset, ONLY
         loopback is permitted — fail-closed posture.
+      * A query or fragment is **rejected**: the AS appends its own
+        ``?code=...`` to this URI, so a pre-existing query would corrupt the
+        response (``?evil=1?code=...`` parses ``code`` into ``evil``), and
+        RFC 6749 §3.1.2 forbids a fragment outright.
     """
     parsed = urlparse(uri)
     if not parsed.scheme or not parsed.netloc:
         raise ClientRegistrationError(f"Malformed redirect_uri: {uri}")
+    if parsed.query or parsed.fragment:
+        raise ClientRegistrationError(f"redirect_uri must have no query or fragment: {uri}")
+    if parsed.username or parsed.password:
+        raise ClientRegistrationError(f"redirect_uri must not contain userinfo: {uri}")
     host = (parsed.hostname or "").lower()
     if parsed.scheme == "http":
         if host in {"localhost", "127.0.0.1", "::1"}:

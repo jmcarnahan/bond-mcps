@@ -1,4 +1,4 @@
-"""Per-MCP ``/connect/<provider>`` Starlette routes (JWT-mode only).
+"""Per-MCP ``/connect/<provider>`` Starlette routes.
 
 Builds the connect surface from a ``ProviderConnectConfig``:
 
@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from urllib.parse import quote, urlencode, urlparse
 
+import anyio
 import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
@@ -56,6 +57,11 @@ from auth.db.session import get_session
 from auth.oauth_utils import (
     generate_pkce_pair,
     generate_state,
+)
+from auth.token_store import (
+    OUTBOUND_USER_AGENT,
+    current_user_key,
+    resolve_user_key_for_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +108,7 @@ class ProviderConnectConfig:
     client_secret_env: str
     public_url_env: str = "BOND_MCPS_PUBLIC_URL"
     post_exchange: Callable[[dict], dict] | None = None
+    extra_authorize_params: dict[str, str] | None = None
 
     def resolved_authorize_url(self) -> str:
         return self.authorize_url() if callable(self.authorize_url) else self.authorize_url
@@ -118,24 +125,25 @@ class ProviderConnectConfig:
 def register_connect_routes(mcp, config: ProviderConnectConfig) -> None:
     """Register the connect routes on a FastMCP instance.
 
-    Skips registration when JWT mode is off — the connect routes are only
-    meaningful in multi-tenant / delegation deployments. The decorator pattern
-    matches what each MCP already does for /healthz.
+    Routes are registered in both JWT mode (multi-tenant deployment) and
+    proxy/local mode. In local mode the ticket endpoint returns 404 (tickets
+    are unnecessary), the start endpoint uses the local user identity
+    directly, and the provider callback is additionally served from
+    ``/connect/<name>/callback`` for the auth-proxy relay.
     """
-    jwt_enabled = bool(
-        os.environ.get("BOND_MCPS_JWT_JWKS_URI", "").strip()
-        or os.environ.get("BOND_MCPS_JWT_PUBLIC_KEY", "").strip()
-    )
-    if not jwt_enabled:
-        logger.debug("JWT mode off; skipping /connect/%s routes.", config.name)
-        return
+    # Status + token-management routes are shared with register_status_routes
+    # (callers may also invoke it directly); registering here first means
+    # existing register_connect_routes call sites need no edits, and the
+    # guard inside register_status_routes makes a second explicit call a no-op.
+    register_status_routes(mcp, config)
 
-    # Loud misconfiguration guard: without the front-door origin, _redirect_uri
-    # falls back to this MCP's own BOND_MCPS_PUBLIC_URL, producing a per-MCP
-    # redirect_uri that no provider console has registered. Nothing fails
-    # server-side — the provider rejects the redirect at authorize time and the
-    # user sees an opaque provider error. Warn at startup, where operators look.
-    if not os.environ.get(ENV_CONNECT_PUBLIC_URL, "").strip():
+    # Loud misconfiguration guard (JWT mode only): without the front-door
+    # origin, _redirect_uri falls back to this MCP's own BOND_MCPS_PUBLIC_URL,
+    # producing a per-MCP redirect_uri that no provider console has registered.
+    # Nothing fails server-side — the provider rejects the redirect at
+    # authorize time and the user sees an opaque provider error. Warn at
+    # startup, where operators look.
+    if _is_jwt_mode() and not os.environ.get(ENV_CONNECT_PUBLIC_URL, "").strip():
         logger.warning(
             "%s is not set; /connect/%s will build provider redirect_uris from "
             "%s (this MCP's own origin), which is almost certainly NOT a "
@@ -166,9 +174,14 @@ def register_connect_routes(mcp, config: ProviderConnectConfig) -> None:
     async def _callback(request: Request) -> Response:
         return await _finish_connect(request, config)
 
-    @mcp.custom_route(f"{base}/status", methods=["GET"])
-    async def _status(request: Request) -> Response:  # pragma: no cover (integration)
-        return await _connect_status(request, config)
+    if not _is_jwt_mode():
+        # Local mode only: the auth proxy relays the provider callback to
+        # /connect/<name>/callback (see _register_with_proxy). JWT mode
+        # deliberately does NOT serve this path — the canonical
+        # /connections/<name>/callback above is the only registered redirect.
+        @mcp.custom_route(f"{base}/callback", methods=["GET"])
+        async def _local_callback(request: Request) -> Response:
+            return await _finish_connect(request, config)
 
     @mcp.custom_route(base, methods=["DELETE"])
     async def _delete(request: Request) -> Response:  # pragma: no cover (integration)
@@ -213,6 +226,156 @@ def _authenticated_user_key() -> tuple[str | None, Response | None]:
     return user_key.strip(), None
 
 
+def register_status_routes(mcp, config: ProviderConnectConfig) -> None:
+    """Register status and token management routes (always active, both modes).
+
+    Idempotent per (mcp, provider): register_connect_routes calls this first,
+    and callers that also invoke it explicitly get a no-op the second time.
+    The guard is an attribute on the mcp object itself — NOT keyed by id(mcp),
+    which CPython recycles across short-lived objects.
+    """
+    registered = getattr(mcp, "_bond_status_routes_registered", None)
+    if registered is None:
+        registered = set()
+        mcp._bond_status_routes_registered = registered
+    if config.name in registered:
+        return
+    registered.add(config.name)
+
+    base = f"/connect/{config.name}"
+
+    @mcp.custom_route(f"{base}/status", methods=["GET"])
+    async def _status(request: Request) -> Response:
+        return await _connect_status(request, config)
+
+    @mcp.custom_route(f"{base}/token", methods=["DELETE"])
+    async def _delete_token(request: Request) -> Response:
+        return await _clear_token(request, config)
+
+
+async def _clear_token(request: Request, config: ProviderConnectConfig) -> Response:
+    user_key, err = _request_user_key()
+    if err is not None:
+        return err
+
+    store = TokenStore(config.name, user_key=user_key)
+    store.clear()
+    _clear_msal_cache(config, user_key)
+
+    logger.info("Cleared %s token for user_key=%s via DELETE.", config.name, user_key)
+    return JSONResponse({"cleared": True, "provider": config.name})
+
+
+def _clear_msal_cache(config: ProviderConnectConfig, user_key: str) -> None:
+    """Drop the user's MSAL token cache for MSAL-managed providers.
+
+    Without this, a disconnect leaves the msal_token_caches row alive and the
+    provider silently reconnects itself on the next tool call.
+    """
+    if config.name not in _MSAL_PROVIDERS:
+        return
+    try:
+        from auth.db.repository import TokenRepository
+
+        TokenRepository().clear_msal_cache(user_key)
+    except Exception:
+        logger.debug("MSAL cache clear failed for user_key=%s", user_key, exc_info=True)
+
+
+def _resolve_or_401() -> str | Response:
+    """Resolve user identity, returning a 401 Response on auth failure.
+
+    Re-raises DeploymentConfigError (server misconfiguration) rather than
+    masking it as a client auth error.
+    """
+    from auth.db.session import DeploymentConfigError
+
+    try:
+        return resolve_user_key_for_request()
+    except DeploymentConfigError:
+        raise
+    except RuntimeError:
+        return JSONResponse(
+            {"error": "unauthorized", "error_description": "Valid authentication required."},
+            status_code=401,
+        )
+
+
+def _request_user_key() -> tuple[str | None, Response | None]:
+    """Resolve the caller's identity per deployment mode.
+
+    JWT mode: the validated JWT's sub claim (middleware has enforced it) —
+    never the local-identity fallback, which in a deployment would answer for
+    whatever BOND_MCPS_USER_ID names. Local mode: the proxy/local resolution.
+    """
+    if _is_jwt_mode():
+        return _authenticated_user_key()
+    resolved = _resolve_or_401()
+    if isinstance(resolved, Response):
+        return None, resolved
+    return resolved, None
+
+
+# Providers whose tokens are managed via MSAL (stored in msal_token_caches
+# rather than provider_tokens).
+_MSAL_PROVIDERS = frozenset({"microsoft", "microsoft_powerbi"})
+
+
+def _has_msal_connection(user_key: str) -> bool:
+    """Check whether the MSAL cache has usable tokens for the given user.
+
+    Non-destructive: decrypts and inspects the cache JSON but never calls
+    Microsoft or attempts token acquisition.
+    """
+    import json
+
+    from auth.db.repository import TokenRepository
+
+    try:
+        repo = TokenRepository()
+        cache_json = repo.get_msal_cache(user_key)
+    except Exception:
+        logger.debug("MSAL cache lookup failed for user_key=%s", user_key, exc_info=True)
+        return False
+
+    if not cache_json:
+        return False
+
+    try:
+        cache_data = json.loads(cache_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+    refresh_tokens = cache_data.get("RefreshToken")
+    if refresh_tokens and isinstance(refresh_tokens, dict) and len(refresh_tokens) > 0:
+        return True
+
+    access_tokens = cache_data.get("AccessToken")
+    if access_tokens and isinstance(access_tokens, dict):
+        import time
+
+        now = time.time()
+        for _key, token_entry in access_tokens.items():
+            expires_on = token_entry.get("expires_on")
+            if expires_on:
+                try:
+                    if float(expires_on) > now:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+    return False
+
+
+def _is_jwt_mode() -> bool:
+    """Return True when JWT verification is enabled (multi-tenant deployment)."""
+    import os
+
+    return bool(
+        os.environ.get("BOND_MCPS_JWT_JWKS_URI", "").strip()
+        or os.environ.get("BOND_MCPS_JWT_PUBLIC_KEY", "").strip()
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST /connect/<name>/ticket
 # ---------------------------------------------------------------------------
@@ -224,7 +387,14 @@ async def _mint_ticket(request: Request, config: ProviderConnectConfig) -> Respo
     The user_key comes from the validated JWT (FastMCP middleware has already
     enforced it). The optional ``return_url`` (JSON body) is validated against
     the allowlist here and carried in the connect_url.
+    Only available in JWT mode; in local/proxy mode tickets are unnecessary.
     """
+    if not _is_jwt_mode():
+        return JSONResponse(
+            {"error": "not_found", "error_description": "Tickets are not used in local mode."},
+            status_code=404,
+        )
+
     user_key, err = _authenticated_user_key()
     if err is not None:
         return err
@@ -255,13 +425,17 @@ async def _mint_ticket(request: Request, config: ProviderConnectConfig) -> Respo
 
 
 async def _start_connect(request: Request, config: ProviderConnectConfig) -> Response:
-    ticket = request.query_params.get("ticket")
-    if not ticket:
-        return _html(400, f"Missing ticket. Reopen the link printed by the {config.name} tool.")
-    try:
-        consumed = consume_ticket(ticket=ticket, provider=config.name)
-    except TicketError as exc:
-        return _html(400, str(exc))
+    if _is_jwt_mode():
+        ticket = request.query_params.get("ticket")
+        if not ticket:
+            return _html(400, f"Missing ticket. Reopen the link printed by the {config.name} tool.")
+        try:
+            consumed = consume_ticket(ticket=ticket, provider=config.name)
+        except TicketError as exc:
+            return _html(400, str(exc))
+        user_key = consumed.user_key
+    else:
+        user_key = current_user_key()
 
     return_url = request.query_params.get("return_url")
     if return_url is not None and not _validate_return_url(return_url):
@@ -278,9 +452,13 @@ async def _start_connect(request: Request, config: ProviderConnectConfig) -> Res
     code_verifier, code_challenge = generate_pkce_pair()
     state = generate_state()
     redirect_uri = _redirect_uri(config)
+
+    if not _is_jwt_mode():
+        _register_with_proxy(state=state, provider=config.name, config=config)
+
     _stash_pkce(
         state=state,
-        user_key=consumed.user_key,
+        user_key=user_key,
         code_verifier=code_verifier,
         provider=config.name,
         return_url=return_url,
@@ -295,6 +473,8 @@ async def _start_connect(request: Request, config: ProviderConnectConfig) -> Res
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
+    if config.extra_authorize_params:
+        params.update(config.extra_authorize_params)
     return RedirectResponse(
         f"{config.resolved_authorize_url()}?{urlencode(params)}", status_code=302
     )
@@ -413,49 +593,137 @@ def _connect_result(
 
 
 async def _connect_status(request: Request, config: ProviderConnectConfig) -> Response:
-    """Report the caller's connection status for this provider."""
+    """Report the caller's connection status for this provider.
+
+    Superset of both lineages' shapes so every consumer keeps working:
+    ``connected``/``valid``/``scopes``/``expires_at``/``has_refresh_token``
+    (bond-ai's contract: connected = a token row exists; valid = not expired
+    OR refreshable) plus ``provider``/``token``/``reason`` (the fork's
+    diagnostics: token = valid|refreshed|msal, reason = why not usable).
+
+    Self-heals: an expired-but-refreshable token is refreshed in a worker
+    thread (warms the token for scheduled jobs); MSAL-managed providers fall
+    back to the msal_token_caches row, which provider_tokens never sees.
+    """
     import time
 
-    user_key, err = _authenticated_user_key()
+    user_key, err = _request_user_key()
     if err is not None:
         return err
 
-    data = TokenRepository().get_token(user_key, config.name)
-    if data is None:
+    def _payload(
+        *,
+        connected: bool,
+        valid: bool,
+        scopes=None,
+        expires_at=None,
+        has_refresh: bool = False,
+        token: str | None = None,
+        reason: str | None = None,
+    ) -> JSONResponse:
         return JSONResponse(
             {
-                "connected": False,
-                "valid": True,
-                "scopes": None,
-                "expires_at": None,
-                "has_refresh_token": False,
+                "connected": connected,
+                "valid": valid,
+                "scopes": scopes,
+                # Epoch seconds; consumers (bond-ai) render it for the user.
+                "expires_at": float(expires_at) if expires_at is not None else None,
+                "has_refresh_token": has_refresh,
+                "provider": config.name,
+                "token": token,
+                "reason": reason,
             }
         )
+
+    repo = TokenRepository()
+    data = repo.get_token(user_key, config.name)
+    if data is None:
+        # No provider_tokens row. MSAL-managed providers (Microsoft) keep
+        # their tokens in msal_token_caches instead — treat a usable cache
+        # as connected, else main's historical "no row" shape.
+        if config.name in _MSAL_PROVIDERS and _has_msal_connection(user_key):
+            return _payload(connected=True, valid=True, token="msal")
+        return _payload(connected=False, valid=True, reason="not_connected")
 
     expires_at = data.get("expires_at")
     has_refresh = bool(data.get("refresh_token"))
     expired = expires_at is not None and time.time() >= float(expires_at)
-    valid = (not expired) or has_refresh
-    return JSONResponse(
-        {
-            "connected": True,
-            "valid": valid,
-            "scopes": data.get("scopes"),
-            # Epoch seconds; consumers (bond-ai) render it for the user.
-            "expires_at": float(expires_at) if expires_at is not None else None,
-            "has_refresh_token": has_refresh,
-        }
+    if not expired:
+        return _payload(
+            connected=True,
+            valid=True,
+            scopes=data.get("scopes"),
+            expires_at=expires_at,
+            has_refresh=has_refresh,
+            token="valid",
+        )
+
+    # Access token expired. Before reporting a stale expiry, attempt a real
+    # refresh: refreshing here also warms the token so the next tool call
+    # (e.g. a scheduled job) doesn't have to. Never let a network error 500
+    # the status route. refresh_if_needed does synchronous, blocking network
+    # I/O (urllib) while holding a row lock, so run it in a worker thread —
+    # a slow upstream IdP must not stall other requests on this pod.
+    store = TokenStore(config.name, user_key=user_key)
+    client_id, client_secret = _provider_secrets(config)
+    if has_refresh and client_id:
+        try:
+            token_url = config.resolved_token_url()
+            refreshed = await anyio.to_thread.run_sync(
+                store.refresh_if_needed, client_id, client_secret or "", token_url
+            )
+        except Exception:
+            logger.warning(
+                "Status refresh attempt failed for %s (user_key=%s)",
+                config.name,
+                user_key,
+                exc_info=True,
+            )
+            refreshed = None
+        if refreshed:
+            fresh = repo.get_token(user_key, config.name) or {}
+            return _payload(
+                connected=True,
+                valid=True,
+                scopes=fresh.get("scopes", data.get("scopes")),
+                expires_at=fresh.get("expires_at"),
+                has_refresh=bool(fresh.get("refresh_token")) or has_refresh,
+                token="refreshed",
+            )
+
+    if config.name in _MSAL_PROVIDERS and _has_msal_connection(user_key):
+        return _payload(connected=True, valid=True, scopes=data.get("scopes"), token="msal")
+
+    # Row exists but the token isn't usable. connected stays True (bond-ai's
+    # contract: a row exists); valid keeps main's formula (refreshable counts
+    # as valid, even when this refresh attempt failed — the next may succeed).
+    # reason distinguishes "refresh failed; reconnect likely needed" from
+    # "expired with nothing to refresh", so scheduled-job failures are
+    # diagnosable.
+    return _payload(
+        connected=True,
+        valid=has_refresh,
+        scopes=data.get("scopes"),
+        expires_at=expires_at,
+        has_refresh=has_refresh,
+        reason="refresh_failed" if has_refresh else "not_connected",
     )
+
+
+# Fork lineage name for the status handler; kept so existing imports and
+# patch sites (tests, fork call sites) resolve unchanged.
+_check_status = _connect_status
 
 
 async def _disconnect(request: Request, config: ProviderConnectConfig) -> Response:
     """Delete the caller's stored token for this provider."""
-    user_key, err = _authenticated_user_key()
+    user_key, err = _request_user_key()
     if err is not None:
         return err
 
     existed = TokenRepository().get_token(user_key, config.name) is not None
     TokenStore(config.name, user_key=user_key).clear()
+    _clear_msal_cache(config, user_key)
     return JSONResponse({"disconnected": existed})
 
 
@@ -481,6 +749,36 @@ async def _disconnect(request: Request, config: ProviderConnectConfig) -> Respon
 # ---------------------------------------------------------------------------
 
 _CONNECT_CLIENT_PREFIX = "connect:"
+
+
+def _register_with_proxy(*, state: str, provider: str, config: ProviderConnectConfig) -> None:
+    """Register OAuth state with the auth proxy for browser callback relay."""
+    import json
+    import os
+    import urllib.request
+
+    proxy_port = os.environ.get("BOND_AUTH_PROXY_PORT", "8000")
+    public_url = _public_base(config)
+    redirect_target = f"{public_url}/connect/{provider}/callback"
+
+    body = json.dumps(
+        {
+            "state": state,
+            "provider": provider,
+            "redirect_target": redirect_target,
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        f"http://localhost:{proxy_port}/auth/register",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=3)  # nosec B310
+    except Exception as e:
+        logger.warning("Failed to register with auth proxy: %s", e)
 
 
 def _stash_pkce(
@@ -509,7 +807,7 @@ def _stash_pkce(
                 client_state=return_url,  # repurposed slot — see header comment
                 code_challenge="",
                 code_challenge_method="S256",
-                resource=None,
+                resource=return_url,
                 scope=None,
                 upstream_code_verifier_encrypted=blob,
                 key_version=key_version,
@@ -590,12 +888,15 @@ def _public_base(config: ProviderConnectConfig) -> str:
 
 
 def _redirect_uri(config: ProviderConnectConfig) -> str:
-    base = _public_base(config)
-    if not base:
-        raise RuntimeError(
-            f"{ENV_CONNECT_PUBLIC_URL} or {config.public_url_env} must be set for /connect."
-        )
-    return f"{base}/connections/{config.name}/callback"
+    if _is_jwt_mode():
+        base = _public_base(config)
+        if not base:
+            raise RuntimeError(
+                f"{ENV_CONNECT_PUBLIC_URL} or {config.public_url_env} must be set for /connect."
+            )
+        return f"{base}/connections/{config.name}/callback"
+    proxy_port = os.environ.get("BOND_AUTH_PROXY_PORT", "8000")
+    return f"http://localhost:{proxy_port}/connections/{config.name}/callback"
 
 
 def _aware(value: datetime) -> datetime:
@@ -624,7 +925,9 @@ def _exchange_code(
     }
     with httpx.Client(timeout=30.0) as http:
         resp = http.post(
-            config.resolved_token_url(), data=body, headers={"Accept": "application/json"}
+            config.resolved_token_url(),
+            data=body,
+            headers={"Accept": "application/json", "User-Agent": OUTBOUND_USER_AGENT},
         )
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")

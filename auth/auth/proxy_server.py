@@ -40,6 +40,7 @@ class PendingAuth:
     provider: str
     created_at: float
     result: dict | None = None
+    redirect_target: str | None = None
 
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -115,6 +116,7 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
 
         state = data.get("state")
         provider = data.get("provider")
+        redirect_target = data.get("redirect_target")
         if not state or not provider:
             self._send_json(400, {"error": "state and provider required"})
             return
@@ -126,6 +128,7 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
                 _pending[state] = PendingAuth(
                     provider=provider,
                     created_at=time.time(),
+                    redirect_target=redirect_target,
                 )
                 duplicate = False
 
@@ -144,10 +147,13 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         with _lock:
             if not state or state not in _pending:
                 outcome = "unknown"
+                redirect_target = None
             elif _pending[state].provider != provider:
                 outcome = "mismatch"
+                redirect_target = None
             else:
                 _pending[state].result = params
+                redirect_target = _pending[state].redirect_target
                 outcome = "ok"
 
         if outcome == "unknown":
@@ -162,6 +168,15 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
             self._send_html(
                 400, "<h2>Authentication failed</h2>" "<p>Provider mismatch. Please try again.</p>"
             )
+        elif redirect_target:
+            from urllib.parse import urlencode
+
+            separator = "&" if "?" in redirect_target else "?"
+            location = f"{redirect_target}{separator}{urlencode(params)}"
+            logger.info("Redirecting browser to %s for %s", redirect_target.split("?")[0], provider)
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
         else:
             has_code = "code" in params
             logger.info(

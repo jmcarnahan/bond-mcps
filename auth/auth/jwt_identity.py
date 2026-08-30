@@ -45,6 +45,8 @@ ENV_ISSUER = "BOND_MCPS_JWT_ISSUER"
 ENV_AUDIENCE = "BOND_MCPS_JWT_AUDIENCE"
 ENV_ALGORITHM = "BOND_MCPS_JWT_ALGORITHM"
 ENV_SUB_CLAIM = "BOND_MCPS_JWT_SUB_CLAIM"
+ENV_SHARED_SECRET = "BOND_MCPS_JWT_SHARED_SECRET"
+ENV_SHARED_SECRET_ISSUER = "BOND_MCPS_JWT_SHARED_SECRET_ISSUER"
 
 # RemoteAuthProvider config
 ENV_AS_BASE_URL = "BOND_MCPS_AS_BASE_URL"
@@ -113,21 +115,107 @@ def _resolve_audience() -> list[str] | str | None:
     return values if len(values) > 1 else values[0]
 
 
-def build_verifier() -> JWTVerifier:
-    """Construct a FastMCP ``JWTVerifier`` from env config.
+class CompositeTokenVerifier:
+    """Verifies JWTs from multiple issuers with different algorithms.
 
-    Mutually exclusive sources: JWKS URI (preferred) or static public key /
-    HS256 shared secret. Issuer and audience are validated when configured.
+    Primary: RS256 via JWKS (bond-mcps AS, Claude Code users)
+    Secondary: HS256 via shared secret (bond-ai backend)
+
+    Routing: decode JWT header (unverified) to read ``alg``. HS256 tokens
+    are verified via the shared secret; all others go to the JWKS verifier.
+    HS256 tokens must also have the expected secondary issuer — this prevents
+    algorithm confusion attacks.
+    """
+
+    def __init__(self, primary_verifier, secondary_verifier, secondary_issuer: str):
+        self.primary = primary_verifier
+        self.secondary = secondary_verifier
+        self.secondary_issuer = secondary_issuer
+        self.required_scopes = getattr(primary_verifier, "required_scopes", None) or []
+        self.scopes_supported = getattr(primary_verifier, "scopes_supported", None) or []
+
+    async def verify_token(self, token: str):
+        """Route verification based on JWT algorithm header."""
+        import jwt as pyjwt
+
+        try:
+            header = pyjwt.get_unverified_header(token)
+        except Exception:
+            return await self.primary.verify_token(token)
+
+        alg = header.get("alg", "")
+
+        if alg == "HS256":
+            try:
+                unverified = pyjwt.decode(token, options={"verify_signature": False})
+            except pyjwt.DecodeError:
+                logger.debug("HS256 token rejected: malformed JWT payload")
+                return None
+            if unverified.get("iss") != self.secondary_issuer:
+                logger.warning(
+                    "HS256 token rejected: issuer %r does not match expected %r",
+                    unverified.get("iss"),
+                    self.secondary_issuer,
+                )
+                return None
+            return await self.secondary.verify_token(token)
+
+        return await self.primary.verify_token(token)
+
+
+def build_verifier() -> "JWTVerifier | CompositeTokenVerifier":
+    """Construct a JWT verifier from env config.
+
+    Supports three modes:
+    1. JWKS only (standard deployed with AS)
+    2. Static key only (test/dev)
+    3. Composite: JWKS + shared secret (deployed with bond-ai integration)
 
     Raises:
-        JWTConfigError: neither source is set, or both are set, or the
-            algorithm doesn't match the source shape.
+        JWTConfigError: config is incomplete, conflicting, or malformed.
     """
     from fastmcp.server.auth.providers.jwt import JWTVerifier
 
     jwks_uri = os.environ.get(ENV_JWKS_URI, "").strip()
     public_key = os.environ.get(ENV_PUBLIC_KEY, "").strip()
+    shared_secret = os.environ.get(ENV_SHARED_SECRET, "").strip()
 
+    # --- Composite mode: JWKS + shared secret ---
+    if jwks_uri and shared_secret:
+        if public_key:
+            raise JWTConfigError(
+                f"Cannot set {ENV_PUBLIC_KEY} when using composite mode "
+                f"({ENV_JWKS_URI} + {ENV_SHARED_SECRET})."
+            )
+
+        issuer = _parse_csv(os.environ.get(ENV_ISSUER, "").strip())
+        audience = _resolve_audience()
+        secondary_issuer = os.environ.get(ENV_SHARED_SECRET_ISSUER, "").strip() or "bond-ai"
+
+        primary = JWTVerifier(
+            jwks_uri=jwks_uri,
+            algorithm="RS256",
+            issuer=issuer,
+            audience=audience,
+        )
+        secondary = JWTVerifier(
+            public_key=shared_secret,
+            algorithm="HS256",
+            issuer=secondary_issuer,
+            audience=audience,
+        )
+
+        logger.info(
+            "Composite JWT verification: JWKS (RS256) + shared secret (HS256, issuer=%s)",
+            secondary_issuer,
+        )
+        return CompositeTokenVerifier(
+            primary_verifier=primary,
+            secondary_verifier=secondary,
+            secondary_issuer=secondary_issuer,
+        )
+
+    # --- Single-source modes (existing behavior) ---
     if jwks_uri and public_key:
         raise JWTConfigError(f"Only one of {ENV_JWKS_URI} or {ENV_PUBLIC_KEY} may be set.")
     if not jwks_uri and not public_key:
@@ -166,6 +254,12 @@ def build_remote_auth_provider(resource_name: str) -> RemoteAuthProvider | None:
       discover where to authenticate.
     * ``BOND_MCPS_PUBLIC_URL`` -- public URL of *this* MCP. Used as the
       resource server URL in the metadata document.
+
+    ``resource_name`` is only the human-readable label in that metadata
+    document -- it does NOT affect token validation. Accepted audiences come
+    from ``BOND_MCPS_JWT_AUDIENCE`` plus ``<BOND_MCPS_PUBLIC_URL>/mcp`` (see
+    ``build_verifier``), so this may differ from the MCP's path prefix without
+    breaking auth. By convention callers pass their provider key.
     """
     if not is_jwt_verification_enabled():
         return None
@@ -186,3 +280,40 @@ def build_remote_auth_provider(resource_name: str) -> RemoteAuthProvider | None:
         base_url=rs_public_url,
         resource_name=resource_name,
     )
+
+
+def register_noauth_wellknown(mcp) -> None:
+    """Register a JSON-returning /.well-known handler when JWT mode is off.
+
+    MCP SDK clients probe /.well-known/oauth-protected-resource on connect.
+    When auth is disabled (local mode), FastMCP doesn't mount this route and
+    the default Starlette 404 returns HTML "Not Found" — which the SDK fails
+    to parse as JSON, producing a noisy "SDK auth failed" warning.
+
+    This registers a catch-all that returns a proper JSON 404 so the SDK
+    handles it gracefully. Only mounted when JWT mode is off (when it's on,
+    FastMCP's RemoteAuthProvider provides the real route).
+    """
+    if is_jwt_verification_enabled():
+        return
+
+    from starlette.responses import JSONResponse
+
+    async def _wellknown_noauth(request):
+        return JSONResponse(
+            {
+                "error": "not_found",
+                "error_description": "This server does not require transport authentication.",
+            },
+            status_code=404,
+        )
+
+    # The MCP SDK probes multiple discovery/registration paths on connect:
+    #   /.well-known/oauth-protected-resource[/mcp]  (RFC 9728)
+    #   /.well-known/oauth-authorization-server      (RFC 8414)
+    #   /.well-known/openid-configuration            (OIDC)
+    #   /register                                    (dynamic client registration)
+    # In local mode these don't exist; the default Starlette 404 returns HTML
+    # which the SDK can't parse as JSON. Return proper JSON so it fails cleanly.
+    mcp.custom_route("/.well-known/{path:path}", methods=["GET"])(_wellknown_noauth)
+    mcp.custom_route("/register", methods=["POST"])(_wellknown_noauth)

@@ -172,6 +172,21 @@ class TestDCR:
         r = client.post("/oauth/register", content=b"not-json")
         assert r.status_code == 400
 
+    def test_rejects_query_fragment_and_userinfo(self, client):
+        """The AS appends its own ?code=... to the redirect_uri, so a registered URI that
+        already carries a query would fold `code` into the client's last param. A fragment
+        is forbidden by RFC 6749 §3.1.2 outright."""
+        for bad_uri in (
+            "http://127.0.0.1:18999/callback?evil=1",
+            "http://127.0.0.1:18999/callback#frag",
+            "http://user:pw@127.0.0.1:18999/callback",
+        ):
+            r = client.post(
+                "/oauth/register", json={"client_name": "x", "redirect_uris": [bad_uri]}
+            )
+            assert r.status_code == 400, bad_uri
+            assert r.json()["error"] == "invalid_client_metadata"
+
     def test_rejects_https_when_allowlist_unset(self, client):
         """Fail-closed: HTTPS callback rejected when allowlist env is unset.
 
@@ -233,6 +248,139 @@ class TestFullFlow:
         )
         assert r.status_code == 201
         return r.json()["client_id"]
+
+    def test_authorize_allows_different_loopback_port(self, client, patched_upstream):
+        """RFC 8252 §7.3: native apps pick an ephemeral loopback port per auth
+        attempt, so a loopback redirect_uri must match a registered loopback URI
+        on scheme/host/path even when the port differs."""
+        client_id = self._register_client(client)  # registered port 18999
+        _, challenge = generate_pkce_pair()
+        r = client.get(
+            "/oauth/authorize",
+            params={
+                "client_id": client_id,
+                "redirect_uri": "http://127.0.0.1:52892/callback",
+                "response_type": "code",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "client-state",
+                "resource": "github",
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 302
+
+    def test_authorize_loopback_carveout_still_checks_host_and_path(self, client, patched_upstream):
+        client_id = self._register_client(client)  # registered 127.0.0.1 /callback
+        _, challenge = generate_pkce_pair()
+        for bad_uri in (
+            "http://localhost:18999/callback",  # host differs from registered
+            "http://127.0.0.1:18999/other",  # path differs
+            "https://127.0.0.1:18999/callback",  # scheme differs
+            "http://attacker.example:18999/callback",  # not loopback at all
+            # A smuggled query would corrupt the success redirect, which is built as
+            # f"{redirect_uri}?{urlencode(code=...)}" — `code` would parse into `evil`.
+            "http://127.0.0.1:52892/callback?evil=1",
+            "http://127.0.0.1:52892/callback#frag",
+            "http://user:pw@127.0.0.1:52892/callback",  # userinfo is not part of the match
+            "http://127.0.0.1:notaport/callback",  # unparseable port must not crash
+        ):
+            r = client.get(
+                "/oauth/authorize",
+                params={
+                    "client_id": client_id,
+                    "redirect_uri": bad_uri,
+                    "response_type": "code",
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                    "state": "client-state",
+                    "resource": "github",
+                },
+                follow_redirects=False,
+            )
+            assert r.status_code == 400, bad_uri
+            assert r.json()["error_description"] == "redirect_uri not registered."
+
+    def test_authorize_rejects_stale_query_bearing_registration(self, client, patched_upstream):
+        """Registration now rejects a query, but rows predating that check (or seeded via
+        BOND_MCPS_STATIC_CLIENTS) may still hold one. Such a URI must not be usable even
+        though it matches its registration exactly, or the appended `code` is corrupted."""
+        from auth.auth_server import clients as client_registry
+
+        bad = "http://127.0.0.1:18999/callback?evil=1"
+        record = client_registry.ClientRecord(
+            client_id="bm-stale",
+            client_name="stale",
+            redirect_uris=[bad],
+            token_endpoint_auth_method="none",
+            grant_types=list(client_registry.DEFAULT_GRANT_TYPES),
+            response_types=list(client_registry.DEFAULT_RESPONSE_TYPES),
+            scope=None,
+            is_static=False,
+        )
+        client_registry._persist(record)
+
+        assert client_registry.is_redirect_uri_allowed(record, bad) is False
+        _, challenge = generate_pkce_pair()
+        r = client.get(
+            "/oauth/authorize",
+            params={
+                "client_id": "bm-stale",
+                "redirect_uri": bad,
+                "response_type": "code",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "s",
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 400
+        assert r.json()["error_description"] == "redirect_uri not registered."
+
+    def test_authorize_never_redirects_to_unvalidated_uri(self, client, patched_upstream):
+        """OAuth 2.1 §4.1.2.1: an unregistered redirect_uri must NEVER receive a redirect,
+        or the AS is an open redirector usable for phishing off a trusted origin. Every
+        pre-validation failure has to answer with a direct 400 instead."""
+        evil = "https://evil.example.com/steal"
+        for params in (
+            # Missing code_challenge — previously error-redirected to `evil` before the
+            # redirect_uri was ever checked.
+            {"client_id": "whatever", "redirect_uri": evil, "response_type": "code"},
+            {"client_id": "whatever", "redirect_uri": evil, "response_type": "token"},
+            # Unknown client, bad method: still must not bounce off evil.
+            {
+                "client_id": "unknown",
+                "redirect_uri": evil,
+                "response_type": "code",
+                "code_challenge": "x",
+                "code_challenge_method": "plain",
+            },
+        ):
+            r = client.get(
+                "/oauth/authorize", params={**params, "state": "s"}, follow_redirects=False
+            )
+            assert r.status_code == 400, params
+            assert "evil.example.com" not in r.headers.get("location", "")
+
+    def test_authorize_reports_late_errors_via_redirect(self, client, patched_upstream):
+        """The flip side: once redirect_uri IS validated, protocol errors are reported to
+        the client by redirect (per spec) rather than a 400."""
+        client_id = self._register_client(client)
+        r = client.get(
+            "/oauth/authorize",
+            params={
+                "client_id": client_id,
+                "redirect_uri": "http://127.0.0.1:18999/callback",
+                "response_type": "token",  # unsupported => error redirect
+                "code_challenge": "x",
+                "state": "s",
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 302
+        loc = r.headers["location"]
+        assert loc.startswith("http://127.0.0.1:18999/callback?")
+        assert "error=unsupported_response_type" in loc
 
     def test_authorize_redirects_to_upstream(self, client, patched_upstream):
         client_id = self._register_client(client)

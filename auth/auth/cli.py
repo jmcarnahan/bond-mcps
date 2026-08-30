@@ -335,7 +335,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_clear.add_argument(
         "--provider",
         required=True,
-        choices=("github", "atlassian", "microsoft"),
+        choices=(
+            "github",
+            "atlassian",
+            "microsoft",
+            "microsoft_powerbi",
+            "databricks",
+            "databricks_octo",
+            "workday",
+            "figma",
+            "omnea",
+            "aws",
+            "bond_ai",
+        ),
         help="Which provider's cached token to delete",
     )
     p_clear.add_argument("--user", help="Override BOND_MCPS_USER_ID")

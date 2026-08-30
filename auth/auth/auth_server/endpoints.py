@@ -25,6 +25,7 @@ from auth.auth_server import clients as client_registry
 from auth.auth_server import codes as code_store
 from auth.auth_server import token_exchange
 from auth.auth_server.keys import build_jwks_document, load_signing_key
+from auth.auth_server.registry import registry_endpoint
 from auth.auth_server.upstream import (
     UpstreamAuthError,
     UpstreamConfigError,
@@ -100,6 +101,7 @@ def build_app() -> Starlette:
             Route("/oauth/token", oauth_token, methods=["POST"]),
             Route("/oauth/register", oauth_register, methods=["POST"]),
             Route("/connections/discovery", connections_discovery, methods=["GET"]),
+            Route("/registry", registry_endpoint, methods=["GET"]),
         ]
     )
     return app
@@ -136,7 +138,7 @@ def run(host: str = "127.0.0.1", port: int = 8001) -> None:
 
 
 async def healthz(_: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "version": os.environ.get("BUILD_VERSION", "dev")})
 
 
 async def authorization_server_metadata(_: Request) -> JSONResponse:
@@ -195,12 +197,36 @@ async def oauth_authorize(request: Request) -> Response:
     resource = q.get("resource")
     scope = q.get("scope")
 
-    if not client_id or not redirect_uri or not code_challenge:
+    # OAuth 2.1 §4.1.2.1: NOTHING may be redirected to an unvalidated redirect_uri, or the
+    # AS becomes an open redirector for phishing. So client_id + redirect_uri are resolved
+    # and authorized FIRST, answering with a direct 400; only after the redirect target is
+    # known-registered may later failures be reported back to the client via _error_redirect.
+    if not client_id or not redirect_uri:
+        return JSONResponse(
+            {
+                "error": "invalid_request",
+                "error_description": "client_id and redirect_uri are required.",
+            },
+            status_code=400,
+        )
+    client = client_registry.get_client(client_id)
+    if client is None:
+        return JSONResponse(
+            {"error": "invalid_client", "error_description": "Unknown client_id."},
+            status_code=400,
+        )
+    if not client_registry.is_redirect_uri_allowed(client, redirect_uri):
+        return JSONResponse(
+            {"error": "invalid_request", "error_description": "redirect_uri not registered."},
+            status_code=400,
+        )
+
+    if not code_challenge:
         return _error_redirect_or_400(
             redirect_uri,
             state,
             "invalid_request",
-            "client_id, redirect_uri, and code_challenge are required.",
+            "code_challenge is required.",
         )
     if response_type != "code":
         return _error_redirect_or_400(
@@ -212,18 +238,6 @@ async def oauth_authorize(request: Request) -> Response:
             state,
             "invalid_request",
             "code_challenge_method must be S256.",
-        )
-
-    client = client_registry.get_client(client_id)
-    if client is None:
-        return JSONResponse(
-            {"error": "invalid_client", "error_description": "Unknown client_id."},
-            status_code=400,
-        )
-    if not client_registry.is_redirect_uri_allowed(client, redirect_uri):
-        return JSONResponse(
-            {"error": "invalid_request", "error_description": "redirect_uri not registered."},
-            status_code=400,
         )
 
     try:
@@ -316,7 +330,7 @@ async def oauth_upstream_callback(request: Request) -> Response:
     params = {"code": auth_code}
     if pending.client_state:
         params["state"] = pending.client_state
-    return RedirectResponse(f"{pending.redirect_uri}?{urlencode(params)}", status_code=302)
+    return RedirectResponse(_redirect_with_params(pending.redirect_uri, params), status_code=302)
 
 
 # ---------------------------------------------------------------------------
@@ -556,14 +570,23 @@ def _error_redirect_or_400(
     return JSONResponse({"error": error, "error_description": description}, status_code=400)
 
 
+def _redirect_with_params(redirect_uri: str, params: dict) -> str:
+    """Append params to a client redirect_uri, preserving any query it already has.
+
+    Registration rejects query-bearing redirect URIs, so `sep` should always be "?" in
+    practice — this is defense in depth: appending a bare "?" to a URI that already had
+    one would fold our `code`/`error` into the client's last parameter value."""
+    sep = "&" if "?" in redirect_uri else "?"
+    return f"{redirect_uri}{sep}{urlencode(params)}"
+
+
 def _client_redirect_with_error(
     redirect_uri: str, state: str | None, *, error: str, description: str
 ) -> str:
     params = {"error": error, "error_description": description}
     if state:
         params["state"] = state
-    sep = "&" if "?" in redirect_uri else "?"
-    return f"{redirect_uri}{sep}{urlencode(params)}"
+    return _redirect_with_params(redirect_uri, params)
 
 
 def _html_error(status: int, message: str) -> Response:

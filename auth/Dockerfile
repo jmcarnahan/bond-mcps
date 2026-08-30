@@ -34,8 +34,10 @@ RUN poetry install --only main --no-interaction --no-ansi
 RUN useradd --create-home --uid 1000 app && chown -R app:app /app
 USER app
 
+ARG BUILD_VERSION=dev
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8000
+    PORT=8000 \
+    BUILD_VERSION=$BUILD_VERSION
 
 EXPOSE 8000
 

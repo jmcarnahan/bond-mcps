@@ -87,6 +87,10 @@ class TestConnectRoutesLive:
             "scopes": None,
             "expires_at": None,
             "has_refresh_token": False,
+            # Fork-lineage diagnostics carried by the merged superset shape.
+            "provider": "atlassian",
+            "token": None,
+            "reason": "not_connected",
         }
 
     def test_status_reflects_stored_token(self, client):
