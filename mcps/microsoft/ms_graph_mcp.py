@@ -128,7 +128,11 @@ MICROSOFT_CONNECT_CONFIG = ProviderConnectConfig(
     name="microsoft",
     authorize_url=lambda: f"https://login.microsoftonline.com/{_ms_tenant()}/oauth2/v2.0/authorize",
     token_url=lambda: f"https://login.microsoftonline.com/{_ms_tenant()}/oauth2/v2.0/token",
-    scopes=_ms_graph_scopes(),
+    # Callable, not a call: like the tenant above, the scope policy branches on
+    # env (MS_TENANT_ID/MS_SCOPES) that may load after module import — an
+    # import-time capture would hand an org tenant the consumer wish-list and
+    # rebuild the exact "Approval required" wall login_scopes() removes.
+    scopes=_ms_graph_scopes,
     client_id_env="MS_CLIENT_ID",
     client_secret_env="MS_CLIENT_SECRET",
     post_exchange=_microsoft_post_exchange,

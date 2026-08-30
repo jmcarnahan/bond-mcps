@@ -3675,3 +3675,25 @@ class TestConnectFlowScopes:
             clear=True,
         ):
             assert _ms_graph_scopes().split() == ["Mail.Read", "offline_access"]
+
+    def test_connect_config_resolves_scopes_at_request_time(self):
+        """The config must carry the policy FUNCTION, not an import-time call.
+
+        MS_TENANT_ID/MS_SCOPES can load after module import (same reason the
+        config's authorize_url/token_url are lambdas over _ms_tenant); a
+        captured string would hand an org tenant the consumer wish-list and
+        rebuild the "Approval required" wall.
+        """
+        import os
+        from unittest.mock import patch as env_patch
+
+        from ms_graph.local_auth import CONSENTED_ORG_SCOPES
+        from ms_graph_mcp import MICROSOFT_CONNECT_CONFIG
+
+        assert callable(MICROSOFT_CONNECT_CONFIG.scopes)
+        with env_patch.dict(os.environ, {"MS_TENANT_ID": "t"}, clear=True):
+            org = MICROSOFT_CONNECT_CONFIG.resolved_scopes().split()
+        with env_patch.dict(os.environ, {"MS_SCOPES": "Mail.Read"}, clear=True):
+            overridden = MICROSOFT_CONNECT_CONFIG.resolved_scopes().split()
+        assert org == [*CONSENTED_ORG_SCOPES, "offline_access"]
+        assert overridden == ["Mail.Read", "offline_access"]
