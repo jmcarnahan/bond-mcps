@@ -195,6 +195,63 @@ class TestTrySilentUnderLock:
         assert token == "silent-tok"
         fake_handle.set_blob.assert_called_once_with('{"AccessToken": {"x": "y"}}')
 
+    def test_tries_every_account_not_just_the_first(self):
+        """A long-lived cache accumulates accounts (a consumer MSA beside the
+        org account) and MSAL orders them arbitrarily. Silent acquisition
+        against the wrong-realm account answers None; pinning to accounts[0]
+        turned one stale account into an interactive browser round on every
+        call, forever. The first account that CAN answer silently must win."""
+        from ms_graph.local_auth import _try_silent_under_lock
+
+        stale = {"username": "old@consumers", "realm": "consumers"}
+        org = {"username": "u@org", "realm": "tenant-1"}
+        mock_app = MagicMock()
+        mock_app.get_accounts.return_value = [stale, org]
+        mock_app.acquire_token_silent.side_effect = [
+            None,
+            {"access_token": "org-tok"},
+        ]
+
+        fake_handle = MagicMock(blob=None)
+        fake_repo = MagicMock()
+        fake_repo.locked_msal_cache.return_value.__enter__.return_value = fake_handle
+        fake_repo.locked_msal_cache.return_value.__exit__.return_value = False
+
+        with (
+            patch("ms_graph.local_auth._get_repo", return_value=fake_repo),
+            patch("ms_graph.local_auth._user_key", return_value="alice"),
+            patch("ms_graph.local_auth._create_msal_app", return_value=mock_app),
+        ):
+            token = _try_silent_under_lock("cid", ["scope"])
+
+        assert token == "org-tok"
+        assert [c.kwargs["account"] for c in mock_app.acquire_token_silent.call_args_list] == [
+            stale,
+            org,
+        ]
+
+    def test_all_accounts_failing_silently_is_none(self):
+        """Every account answering None is the caller's cue for interactive —
+        the same answer an empty cache gives."""
+        from ms_graph.local_auth import _try_silent_under_lock
+
+        mock_app = MagicMock()
+        mock_app.get_accounts.return_value = [{"username": "a"}, {"username": "b"}]
+        mock_app.acquire_token_silent.return_value = None
+
+        fake_handle = MagicMock(blob=None)
+        fake_repo = MagicMock()
+        fake_repo.locked_msal_cache.return_value.__enter__.return_value = fake_handle
+        fake_repo.locked_msal_cache.return_value.__exit__.return_value = False
+
+        with (
+            patch("ms_graph.local_auth._get_repo", return_value=fake_repo),
+            patch("ms_graph.local_auth._user_key", return_value="alice"),
+            patch("ms_graph.local_auth._create_msal_app", return_value=mock_app),
+        ):
+            assert _try_silent_under_lock("cid", ["scope"]) is None
+        assert mock_app.acquire_token_silent.call_count == 2
+
 
 class TestCreateMsalApp:
     def test_creates_public_app_without_secret(self):

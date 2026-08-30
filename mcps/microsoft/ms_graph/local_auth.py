@@ -162,15 +162,23 @@ def _try_silent_under_lock(client_id: str, scopes: list[str]) -> str | None:
         if handle.blob:
             cache.deserialize(handle.blob)
         app = _create_msal_app(client_id, cache)
-        accounts = app.get_accounts()
-        if not accounts:
-            return None
-        result = app.acquire_token_silent(scopes, account=accounts[0])
+        # EVERY cached account gets a try, not just the first. A long-lived
+        # cache accumulates accounts (a consumer MSA from an old sign-in
+        # beside the org account), and MSAL orders them arbitrarily. Silent
+        # acquisition against the wrong-realm account answers None — and a
+        # None here sends the caller to a fresh browser round, whose save
+        # ADDS tokens but never reorders the accounts. Pinning to
+        # accounts[0] therefore turned one stale account into an interactive
+        # sign-in on every single call, forever.
+        token: str | None = None
+        for account in app.get_accounts():
+            result = app.acquire_token_silent(scopes, account=account)
+            if result and "access_token" in result:
+                token = result["access_token"]
+                break
         if cache.has_state_changed:
             handle.set_blob(cache.serialize())
-        if result and "access_token" in result:
-            return result["access_token"]
-        return None
+        return token
 
 
 def _create_msal_app(client_id: str, cache: msal.SerializableTokenCache) -> msal.ClientApplication:
