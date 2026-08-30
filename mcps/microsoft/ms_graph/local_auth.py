@@ -51,13 +51,44 @@ CALENDAR_SCOPES = [
     "Calendars.ReadWrite",
 ]
 
+# What the org tenant's admin has actually consented for this registration.
+#
+# Entra evaluates a consent request as ONE bundle: a single admin-gated scope
+# in it (Chat.ReadWrite, ChannelMessage.Read.All, Sites.ReadWrite.All, ...)
+# walls the ENTIRE sign-in behind "Approval required" — including the mail
+# scopes the user could have granted alone. So the default org request must be
+# exactly the consented set, not the wish-list. The scope groups above stay as
+# the documented menu; widening is a config change (MS_SCOPES), not a code
+# change, the day the admin approves more.
+CONSENTED_ORG_SCOPES = [
+    "Mail.Read",
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "MailboxSettings.Read",
+    "User.Read",
+    "Files.Read.All",
+]
 
-def _get_scopes() -> list[str]:
-    """Return scopes based on whether a tenant ID is set (org vs consumer)."""
-    scopes = MAIL_SCOPES + FILES_SCOPES + CALENDAR_SCOPES
+
+def login_scopes() -> list[str]:
+    """The scopes a sign-in requests.
+
+    ``MS_SCOPES`` (space-separated) wins outright when set — that is the
+    escape hatch for a tenant whose admin has approved more, and for tests.
+    Otherwise an org tenant gets the consented set above, and a consumer
+    account — where admin consent does not exist and nothing can wall the
+    request — keeps the full mail/files/calendar feature set.
+
+    A tool whose scope is not in the request simply gets a Graph 403 when
+    called; requesting less never breaks the server, while requesting too
+    much can make sign-in impossible.
+    """
+    env = (os.environ.get("MS_SCOPES") or "").split()
+    if env:
+        return env
     if os.environ.get("MS_TENANT_ID"):
-        scopes += SITES_SCOPES + TEAMS_SCOPES
-    return scopes
+        return list(CONSENTED_ORG_SCOPES)
+    return MAIL_SCOPES + FILES_SCOPES + CALENDAR_SCOPES
 
 
 def _get_repo():
@@ -306,7 +337,7 @@ def get_local_token() -> str:
             "MS_CLIENT_ID environment variable is required for local authentication."
         )
 
-    scopes = _get_scopes()
+    scopes = login_scopes()
 
     token = _try_silent_under_lock(client_id, scopes)
     if token is not None:

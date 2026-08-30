@@ -52,7 +52,7 @@ from ms_graph import power_bi as pbi_ops
 from ms_graph import teams as teams_ops
 from ms_graph.auth import get_graph_token, get_powerbi_token
 from ms_graph.graph_client import AsyncGraphClient, GraphError
-from ms_graph.local_auth import MAIL_SCOPES
+from ms_graph.local_auth import login_scopes
 from ms_graph.power_bi import AsyncPowerBIClient
 from ms_graph.teams import TeamsNotAvailableError, extract_message_sender, extract_message_text
 
@@ -104,25 +104,23 @@ def _ms_tenant() -> str:
 
 
 def _ms_graph_scopes() -> str:
-    """Compute Graph scopes for the /connect flow.
+    """Graph scopes for the /connect flow: the login policy + offline_access.
 
-    Uses MAIL_SCOPES from local_auth (single source of truth for mail
-    permissions) plus file/calendar/teams scopes and offline_access.
+    One policy for both consent doors (this flow and local MSAL), from
+    ``ms_graph.local_auth.login_scopes``: the org default is exactly what the
+    tenant admin has consented, because Entra treats the request as one
+    bundle and a single admin-gated scope walls the WHOLE sign-in behind
+    "Approval required" — mail included. Widening is config (``MS_SCOPES``),
+    never code; a tool whose scope was not requested 403s at call time, which
+    is the acceptable failure.
+
+    ``offline_access`` is appended here and not in the login policy: MSAL
+    manages refresh implicitly, while this code-grant flow must ask for the
+    refresh token explicitly or the stored connection dies in an hour.
     """
-    scopes = list(MAIL_SCOPES) + [
-        "Files.ReadWrite.All",
-        "Calendars.ReadWrite",
-    ]
-    if os.environ.get("MS_TENANT_ID"):
-        scopes += [
-            "Sites.ReadWrite.All",
-            "Team.ReadBasic.All",
-            "Channel.ReadBasic.All",
-            "ChannelMessage.Send",
-            "ChannelMessage.Read.All",
-            "Chat.ReadWrite",
-        ]
-    scopes.append("offline_access")
+    scopes = login_scopes()
+    if "offline_access" not in scopes:
+        scopes = [*scopes, "offline_access"]
     return " ".join(scopes)
 
 
