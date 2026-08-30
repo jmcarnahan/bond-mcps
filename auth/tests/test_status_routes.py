@@ -376,6 +376,78 @@ class TestRouteRegistration:
         resp = client.post("/connect/github/status")
         assert resp.status_code == 405
 
+    def test_repeated_registration_is_idempotent_per_instance(self, repo, config):
+        """register_connect_routes registers the status routes itself, and the
+        explicit register_status_routes call sites in the MCP modules run right
+        after it — the guard must collapse the duplicates for the SAME mcp
+        instance while a fresh instance still gets its own routes (the guard is
+        an attribute on the instance, never id(mcp), which CPython recycles)."""
+        from starlette.routing import Route
+
+        def make_mcp(routes):
+            class FakeMCP:
+                def custom_route(self, path, methods=None):
+                    def decorator(fn):
+                        routes.append(Route(path, fn, methods=methods))
+                        return fn
+
+                    return decorator
+
+            return FakeMCP()
+
+        routes_a: list = []
+        mcp_a = make_mcp(routes_a)
+        register_status_routes(mcp_a, config)
+        register_status_routes(mcp_a, config)  # explicit second call: no-op
+        status_paths = [r.path for r in routes_a if r.path == "/connect/github/status"]
+        assert len(status_paths) == 1
+
+        # A different instance registers independently even after the first
+        # is gone (id() would be recyclable here).
+        del mcp_a
+        routes_b: list = []
+        mcp_b = make_mcp(routes_b)
+        register_status_routes(mcp_b, config)
+        assert [r.path for r in routes_b if r.path == "/connect/github/status"]
+
+    def test_connect_routes_include_status_and_local_callback(self, repo, config, monkeypatch):
+        """register_connect_routes provides the status/token routes itself and,
+        in local mode only, the /connect/<n>/callback proxy-relay target."""
+        from unittest.mock import patch as _patch
+
+        from starlette.routing import Route
+
+        from auth.connect_routes import register_connect_routes
+
+        def collect(jwt_key: str) -> list[str]:
+            routes: list = []
+
+            class FakeMCP:
+                def custom_route(self, path, methods=None):
+                    def decorator(fn):
+                        routes.append(Route(path, fn, methods=methods))
+                        return fn
+
+                    return decorator
+
+            with _patch.dict(
+                "os.environ",
+                {"BOND_MCPS_JWT_JWKS_URI": "", "BOND_MCPS_JWT_PUBLIC_KEY": jwt_key},
+            ):
+                register_connect_routes(FakeMCP(), config)
+            return [r.path for r in routes]
+
+        local_paths = collect(jwt_key="")
+        assert "/connect/github/status" in local_paths
+        assert "/connect/github/token" in local_paths
+        assert "/connect/github/callback" in local_paths  # proxy relay target
+
+        jwt_paths = collect(jwt_key="test-key")
+        assert "/connect/github/status" in jwt_paths
+        # JWT mode keeps the canonical /connections path exclusively.
+        assert "/connect/github/callback" not in jwt_paths
+        assert "/connections/github/callback" in jwt_paths
+
 
 @pytest.fixture
 def microsoft_config():

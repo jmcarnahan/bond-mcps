@@ -2940,6 +2940,23 @@ class TestMCPConnectionStatus:
         assert data["connected"] is True
         assert data["scopes"] == []
 
+    async def test_unexpected_auth_error_reports_disconnected(self, mcp_server):
+        """A status probe must never surface a tool error.
+
+        The local MSAL path can raise beyond the not-connected contract (e.g.
+        AttributeError from a confidential client hitting the device-flow path
+        on a stale cache); connection_status maps anything unexpected to a
+        plain disconnected report instead of an isError result.
+        """
+        with patch("ms_graph_mcp.get_graph_token", side_effect=AttributeError("boom")):
+            result = await _call(mcp_server, "connection_status")
+
+        data = _structured(result)
+        assert data["connected"] is False
+        assert data["scopes"] == []
+        assert data["connect_url"] is None
+        assert data["account"] is None
+
     @respx.mock
     async def test_scope_lookup_failure_is_swallowed(self, mcp_server):
         """Laptop (MSAL) mode has no token row and no DB — status must still answer."""

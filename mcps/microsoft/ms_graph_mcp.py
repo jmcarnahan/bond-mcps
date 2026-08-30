@@ -2525,6 +2525,14 @@ async def connection_status() -> dict:
             "connect_url": getattr(e, "connect_url", None),
             "account": None,
         }
+    except Exception:
+        # A status probe must never surface a tool error — clients call it
+        # precisely to decide what to show. Anything the auth chain throws
+        # beyond the not-connected contract (e.g. MSAL's confidential-client
+        # path rejecting a device flow on a stale cache) reads as
+        # "not connected, no connect step known".
+        logger.warning("connection_status: token acquisition failed", exc_info=True)
+        return {"connected": False, "scopes": [], "connect_url": None, "account": None}
 
     account = None
     try:
