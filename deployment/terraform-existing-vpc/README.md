@@ -52,13 +52,14 @@ with one managed node group.
 **2. Seed Secrets Manager values** (see next section). Skip and `terraform
 apply` will fail loudly via `null_resource.encryption_key_seeded`.
 
-**3. Push your service images to ECR.** Output `ecr_repository_urls` gives you
-the URLs. `image_tag` in tfvars must match what CI pushes.
-
-**4. Full apply:**
+**3. Full apply — images build inside it.** `build-stages.tf` content-hashes
+each repo-built image's sources, builds + pushes anything ECR doesn't already
+have (docker buildx, linux/amd64), then rolls the services. Only foreign
+images (`image_tag`-pinned, e.g. sbel) must be pushed from their own repo.
+From the repo root:
 
 ```bash
-terraform apply -var-file=environments/dev.tfvars
+make deploy-plan && make deploy
 ```
 
 Rolls out the ALB Load Balancer Controller, External Secrets Operator, the

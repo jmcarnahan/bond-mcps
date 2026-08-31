@@ -27,6 +27,12 @@
 LOG_DIR := tmp/logs
 TOKEN_DIR := $(HOME)/.bond_mcps
 
+GREEN  := \033[32m
+RED    := \033[31m
+YELLOW := \033[33m
+BLUE   := \033[34m
+RESET  := \033[0m
+
 # Optional local dev secrets/overrides (gitignored). Set BOND_MCPS_JWT_SECRET
 # here ONCE (= bond-ai JWT_SECRET_KEY) instead of passing it on every
 # `make dev-combined-jwt`. Parsed by make, so keep entries simple KEY=value
@@ -514,3 +520,119 @@ migrate-tokens:
 	  echo "Removed orphan ~/.github_mcp_tokens.json (the old github CLI cache; the CLI now shares $(TOKEN_DIR)/github.json)"; \
 	fi
 	@echo "Migration complete. Token dir: $(TOKEN_DIR)"
+
+# ── Deploy to EKS ───────────────────────────────────────────────────────────
+# `terraform apply` IS the deploy. It computes a content-hash tag per image
+# from the files each Dockerfile COPYs (build-stages.tf), builds + pushes any
+# tag ECR doesn't already have, then rolls the helm releases onto those tags.
+# There is no separate build step and no image_tag to hand-edit —
+# scripts/build-and-push-ecr.sh was deleted precisely because keeping the two
+# in sync by hand was the failure mode this replaces.
+#
+# THE WORKING TREE IS THE INPUT. build-stages.tf hashes files on disk, not a
+# git ref, so a dirty tree or a feature branch ships to dev silently.
+# deploy-check guards exactly that, and is why this wrapper exists.
+#
+# Two steps, on purpose:
+#   make deploy-plan   → guard, then plan, saved to $(TF_PLAN). READ IT.
+#   make deploy        → apply exactly that saved plan; it never re-plans.
+# Applying a SAVED plan is what makes "what I read" and "what I shipped" one
+# artifact. A bare `terraform apply` re-plans and can ship something nobody saw.
+#
+# The saved plan embeds resolved variable values — including everything in
+# environments/$(TF_ENV).tfvars — so it lives under tmp/ (gitignored) and is
+# deleted after a successful apply.
+#
+# Fresh-fork note: the documented two-apply bootstrap (docs/DEPLOYMENT.md)
+# still applies — the first-ever apply fails fast at the encryption_key_seeded
+# precondition (before any image builds). Seed secrets, then re-run
+# `make deploy-plan && make deploy`; terraform refuses stale saved plans on
+# its own.
+
+TF_DIR     := deployment/terraform-existing-vpc
+TF_ENV     ?= dev
+TF_VARFILE := environments/$(TF_ENV).tfvars
+TF_PLAN    := $(CURDIR)/tmp/terraform-$(TF_ENV).tfplan
+# Services excluded from `make smoke`'s per-MCP checks: the AS is passed
+# separately via --as-url, and sbel is a foreign data-only image with no
+# /connect routes or PRM contract.
+SMOKE_SKIP ?= auth_server sbel
+
+.PHONY: deploy-check deploy-plan deploy deploy-status smoke
+
+# Refuses to ship anything that is not exactly the merged commit. DEPLOY_UNSAFE=1
+# skips only the three git checks — never the tooling ones, which are hard
+# prerequisites rather than policy.
+deploy-check:
+	@command -v terraform >/dev/null || { printf "$(RED)✗$(RESET) terraform not installed\n"; exit 1; }
+	@command -v aws       >/dev/null || { printf "$(RED)✗$(RESET) aws CLI not installed\n"; exit 1; }
+	@command -v jq        >/dev/null || { printf "$(RED)✗$(RESET) jq not installed\n"; exit 1; }
+	@command -v docker    >/dev/null || { printf "$(RED)✗$(RESET) docker not installed\n"; exit 1; }
+	@docker info >/dev/null 2>&1 || { printf "$(RED)✗$(RESET) docker daemon is not running — apply builds the images\n"; exit 1; }
+	@docker buildx version >/dev/null 2>&1 || { printf "$(RED)✗$(RESET) docker buildx missing — needed for --platform linux/amd64\n"; exit 1; }
+	@test -f $(TF_DIR)/$(TF_VARFILE) || { printf "$(RED)✗$(RESET) missing $(TF_DIR)/$(TF_VARFILE)\n"; exit 1; }
+	@aws sts get-caller-identity >/dev/null 2>&1 || { printf "$(RED)✗$(RESET) no usable AWS credentials (aws sts get-caller-identity failed)\n"; exit 1; }
+	@if [ -n "$(DEPLOY_UNSAFE)" ]; then \
+	   printf "  $(YELLOW)!$(RESET) DEPLOY_UNSAFE=1 — shipping this working tree with no git checks\n"; \
+	 else \
+	   test -z "$$(git status --porcelain)" || { \
+	     printf "$(RED)✗$(RESET) working tree is not clean — the images are built from it, so uncommitted\n"; \
+	     printf "    (and untracked) files would ship. Commit or stash first.\n"; \
+	     printf "    Deliberate? make deploy-plan DEPLOY_UNSAFE=1\n"; exit 1; }; \
+	   b=$$(git rev-parse --abbrev-ref HEAD); \
+	   [ "$$b" = "main" ] || { \
+	     printf "$(RED)✗$(RESET) on branch '$$b', not main — dev serves merged code\n"; \
+	     printf "    Deliberate? make deploy-plan DEPLOY_UNSAFE=1\n"; exit 1; }; \
+	   git fetch -q origin main; \
+	   [ "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" ] || { \
+	     printf "$(RED)✗$(RESET) local main is not identical to origin/main — pull or push first\n"; exit 1; }; \
+	 fi
+	@printf "  $(GREEN)✓$(RESET) $(TF_ENV) ← $$(git rev-parse --short HEAD) ($$(git rev-parse --abbrev-ref HEAD)) as account $$(aws sts get-caller-identity --query Account --output text)\n"
+
+deploy-plan: deploy-check
+	@mkdir -p tmp
+	@terraform -chdir=$(TF_DIR) init -input=false >/dev/null
+	@terraform -chdir=$(TF_DIR) plan -var-file=$(TF_VARFILE) -out=$(TF_PLAN)
+	@git rev-parse HEAD > $(TF_PLAN).sha
+	@printf "\n  $(BLUE)→$(RESET) read the plan above. Expected for a code release: null_resource.build[...]\n"
+	@printf "    replaced for each changed image, and module.service[...].helm_release.service\n"
+	@printf "    updated in place with the new image tag. Nothing else.\n"
+	@printf "    Aurora, EKS, KMS, Secrets Manager or ACM appearing is NOT expected.\n"
+	@printf "  $(BLUE)→$(RESET) then: make deploy\n"
+
+# Re-runs the guard rather than trusting the one deploy-plan ran. The saved plan
+# pins the image TAGS, but `docker buildx` reads the tree at APPLY time — so a
+# commit landing in between would ship different content under the reviewed tag.
+# Comparing HEAD against the sha recorded at plan time is what closes that.
+deploy: deploy-check
+	@test -f $(TF_PLAN) || { printf "$(RED)✗$(RESET) no saved plan — run: make deploy-plan\n"; exit 1; }
+	@planned=$$(cat $(TF_PLAN).sha 2>/dev/null); \
+	 [ "$$planned" = "$$(git rev-parse HEAD)" ] || { \
+	   printf "$(RED)✗$(RESET) HEAD moved since the plan was made — re-run: make deploy-plan\n"; \
+	   printf "    planned $$planned\n    now     $$(git rev-parse HEAD)\n"; exit 1; }
+	@terraform -chdir=$(TF_DIR) apply $(TF_PLAN)
+	@rm -f $(TF_PLAN) $(TF_PLAN).sha
+	@printf "  $(GREEN)✓$(RESET) applied. Next: make smoke\n"
+
+# What terraform thinks is deployed vs what the cluster is actually running.
+deploy-status:
+	@printf "  $(BLUE)terraform$(RESET)\n"
+	@terraform -chdir=$(TF_DIR) output -json deployed_image_tags | jq -r 'to_entries[] | "    \(.key)\t\(.value)"'
+	@printf "  $(BLUE)cluster$(RESET)\n"
+	@kubectl get deploy -n bond-mcps \
+	  -o custom-columns=NAME:.metadata.name,READY:.status.readyReplicas,IMAGE:'.spec.template.spec.containers[0].image' \
+	  2>/dev/null || printf "    $(YELLOW)!$(RESET) kubectl not configured — %s\n" "$$(terraform -chdir=$(TF_DIR) output -raw kubectl_config_cmd)"
+
+# Post-deploy contract check against the live URLs terraform just published.
+# httpx lives in auth's dev env, so run the script through poetry there.
+smoke:
+	@urls=$$(terraform -chdir=$(TF_DIR) output -json service_urls); \
+	 as=$$(printf '%s' "$$urls" | jq -r '.auth_server // empty'); \
+	 [ -n "$$as" ] || { printf "$(RED)✗$(RESET) no auth_server in service_urls output\n"; exit 1; }; \
+	 skip=$$(printf '%s\n' $(SMOKE_SKIP) | jq -R . | jq -sc .); \
+	 args=""; \
+	 for u in $$(printf '%s' "$$urls" | jq -r --argjson s "$$skip" 'to_entries[] | select(.key as $$k | $$s | index($$k) | not) | .value'); do \
+	   args="$$args --mcp-url $$u/mcp"; \
+	 done; \
+	 printf "  $(BLUE)→$(RESET) smoke: AS=$$as$$args\n"; \
+	 cd auth && poetry run python ../scripts/smoke-deployed.py --as-url "$$as" $$args
