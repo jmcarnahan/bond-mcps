@@ -1,13 +1,13 @@
-# Local backend by default. Once multiple operators apply this stack, switch
-# to S3 + DynamoDB by uncommenting the s3 block and removing the local one.
+# Remote state: S3 + DynamoDB locking. Migrated from the local backend on
+# 2026-08-31 so the cluster's source of truth no longer lives on one laptop.
+# The bucket is versioned and KMS-encrypted; every state revision is
+# recoverable from S3 version history.
 terraform {
-  backend "local" {}
-
-  # backend "s3" {
-  #   bucket         = "bond-mcps-tfstate-<account-id>"
-  #   key            = "bond-mcps/existing-vpc/dev/terraform.tfstate"
-  #   region         = "us-west-2"
-  #   dynamodb_table = "bond-mcps-tfstate-lock"
-  #   encrypt        = true
-  # }
+  backend "s3" {
+    bucket         = "bond-mcps-tfstate-119684128788"
+    key            = "bond-mcps/existing-vpc/dev/terraform.tfstate"
+    region         = "us-west-2"
+    dynamodb_table = "bond-mcps-tfstate-lock"
+    encrypt        = true
+  }
 }
