@@ -38,20 +38,19 @@ every step has a verification check.
 - AWS Secrets Manager + ExternalSecrets Operator inject runtime secrets.
 - All ingress HTTPS via one wildcard ACM cert for `*.<base_domain>`.
 
-## TL;DR (10 steps)
+## TL;DR (9 steps)
 
 ```
 1.  Fork repo, install tools, get AWS context.
 2.  Create Cognito user pool + PKCE-only app client (or use Okta).
 3.  Copy environments/dev.tfvars.example → environments/<env>.tfvars; edit.
-4.  cd deployment/terraform-existing-vpc && terraform init && terraform apply -var-file=environments/<env>.tfvars
-    → fails at encryption_key_seeded precondition (expected).
+4.  make deploy-plan && make deploy
+    → fails at encryption_key_seeded precondition (expected, before any image build).
 5.  Seed AWS Secrets Manager (encryption-key, as-credentials, per-provider OAuth secrets).
-6.  ./scripts/build-and-push-ecr.sh 0.1.0   # builds + pushes all 5 images
-7.  Add https://auth.<base>/oauth/upstream/callback to upstream IdP client.
-8.  terraform apply -var-file=environments/<env>.tfvars   # second apply, completes.
-9.  python scripts/smoke-deployed.py --as-url … --mcp-url …   # all green.
-10. Per-provider OAuth app callback URLs, then claude mcp add + /mcp.
+6.  Add https://auth.<base>/oauth/upstream/callback to upstream IdP client.
+7.  make deploy-plan && make deploy   # second pass: builds + pushes images, completes.
+8.  make smoke                        # all green.
+9.  Per-provider OAuth app callback URLs, then claude mcp add + /mcp.
 ```
 
 ## 1. Prerequisites
@@ -206,7 +205,7 @@ services = {
   auth_server = {
     enabled         = true
     image_repo_name = "bond-mcps-auth"
-    image_tag       = "0.1.0"
+    build           = "auth"            # built by terraform apply; tag = content hash
     hostname_prefix = "auth"            # → auth.<base_domain>
     container_port  = 8001
     replicas        = 1                 # AS is stateless DB-backed; can scale, doesn't need to
@@ -219,7 +218,7 @@ services = {
   microsoft = {
     enabled           = true
     image_repo_name   = "bond-mcps-mcp-microsoft"
-    image_tag         = "0.1.0"
+    build             = "microsoft"
     # IMPORTANT: do NOT use "microsoft" as the hostname prefix. Entra ID
     # rejects reply URLs whose hostname contains Microsoft-trademark terms.
     hostname_prefix   = "ms-graph"
@@ -233,7 +232,7 @@ services = {
   atlassian = {
     enabled           = true
     image_repo_name   = "bond-mcps-mcp-atlassian"
-    image_tag         = "0.1.0"
+    build             = "atlassian"
     hostname_prefix   = "atlassian"
     replicas          = 2
     oauth_secret_name = "atlassian-oauth"
@@ -243,7 +242,7 @@ services = {
   github = {
     enabled           = true
     image_repo_name   = "bond-mcps-mcp-github"
-    image_tag         = "0.1.0"
+    build             = "github"
     hostname_prefix   = "github"
     replicas          = 2
     oauth_secret_name = "github-oauth"
@@ -253,7 +252,7 @@ services = {
   databricks = {
     enabled           = true
     image_repo_name   = "bond-mcps-mcp-databricks"
-    image_tag         = "0.1.0"
+    build             = "databricks"
     hostname_prefix   = "databricks"
     replicas          = 2
     oauth_secret_name = "databricks-oauth"
@@ -266,6 +265,13 @@ services = {
 }
 ```
 
+**Note on `build` vs `image_tag`:** every service sets exactly one of the two
+(terraform validation enforces it). Services built from this repo set
+`build = "<key>"` — one of `auth`, `microsoft`, `atlassian`, `github`,
+`databricks` — and their tag is a content hash computed at plan time; there is
+no tag to hand-edit. A foreign image built in another repo (e.g. `sbel`) keeps
+a hand-pinned `image_tag`, because terraform cannot build it. See §6.
+
 **Note on `.gitignore`:** the repo's `.gitignore` has an exception that *keeps*
 `environments/*.tfvars` checked in. This is intentional — tfvars hold
 identifiers (pool ID, subnet IDs, hosted zone ID), NOT secrets. Real secrets
@@ -276,20 +282,31 @@ line from `.gitignore`.
 ## 4. First terraform apply (expect to fail)
 
 ```bash
-cd deployment/terraform-existing-vpc
+cd <fork-root>
 export AWS_REGION=us-west-2          # MUST match your tfvars region
 aws sts get-caller-identity          # confirm right account
-terraform init
-terraform plan -var-file=environments/<env>.tfvars -out=/tmp/plan-1.tfplan
+make deploy-plan TF_ENV=<env>        # preflight + guards, then terraform plan
 # Review: should be ~100 resources for a fresh deploy
-terraform apply /tmp/plan-1.tfplan
+make deploy TF_ENV=<env>             # applies exactly the plan you just read
 ```
+
+`TF_ENV` defaults to `dev`, so plain `make deploy-plan && make deploy` is the
+usual invocation. `deploy-plan` runs `make deploy-check` first: tooling
+(terraform, aws, jq, docker + buildx, a running docker daemon), the tfvars
+file, AWS credentials, and the git guards — clean tree, on `main`, HEAD equal
+to `origin/main`. **The working tree is the input**: image tags are hashed from
+the files on disk, not from a git ref, so a dirty tree would ship uncommitted
+code. `DEPLOY_UNSAFE=1` skips the three git checks (never the tooling ones)
+when you deliberately want to deploy something other than merged `main`.
 
 **Expected failure** (~15-20 min in):
 ```
 Error: Resource precondition failed
   …encryption_key is not yet seeded (status: missing or placeholder).
 ```
+
+The image builds depend on this precondition, so the apply fails *before*
+spending 15-30 min on cross-arch builds it could never deploy.
 
 Infrastructure exists. Now seed.
 
@@ -346,35 +363,50 @@ aws --region us-west-2 secretsmanager put-secret-value \
 **Note:** if you disable any MCP service via `enabled = false`, the
 corresponding `<env>-<name>-oauth` SM secret is not created — skip its put.
 
-## 6. Build + push images
+## 6. Images (built by terraform)
 
-ECR repos exist from step 4's first apply. Push images now.
+There is no build step to run. `terraform apply` builds and pushes every
+repo-built image itself (`deployment/terraform-existing-vpc/build-stages.tf`):
 
-```bash
-cd <fork-root>
-./scripts/build-and-push-ecr.sh 0.1.0 2>&1 | tee /tmp/build.log
-```
-
-The script:
-- Logs into ECR via your local AWS creds
-- Uses `docker buildx` with `--platform linux/amd64` (works from Apple Silicon Macs)
-- Stages `_shared_auth_pkg/` under each MCP context (mirrors the CI workflow)
-- Pushes all 5 images at the tag you pass
+- Each image's tag is a 12-char md5 content hash of exactly the files its
+  Dockerfile `COPY`s — plus, for the MCP images, the vendored auth package
+  (`auth/auth/**/*.py`, `**/*.mako`, `auth/pyproject.toml`, `auth/poetry.lock`)
+  that gets staged into `_shared_auth_pkg/` at build time.
+- Changed code ⇒ new tag ⇒ terraform builds (`docker buildx`,
+  `--platform linux/amd64`, builder `bond-mcps-builder`), pushes, and the helm
+  release rolls. Unchanged code ⇒ same tag ⇒ no-op.
+- If the tag is already in ECR, the build is skipped:
+  `==> [microsoft] a1b2c3d4e5f6 already exists in ECR — skipping build`.
 
 **Cross-arch build on Apple Silicon takes 15-30 min the first time.** Buildx
 cache speeds up subsequent runs to <5 min.
 
-Verify:
+What the current tree hashes to (also visible in the plan output):
 ```bash
-for r in bond-mcps-auth bond-mcps-mcp-microsoft bond-mcps-mcp-atlassian \
-         bond-mcps-mcp-github bond-mcps-mcp-databricks; do
-  printf "%-30s " "$r"
-  aws --region us-west-2 ecr describe-images --repository-name "$r" \
-    --image-ids imageTag=0.1.0 --query 'imageDetails[0].imageDigest' --output text
+terraform -chdir=deployment/terraform-existing-vpc output -json built_images | jq .
+terraform -chdir=deployment/terraform-existing-vpc output -json deployed_image_tags | jq .
+```
+`built_images` is the images terraform builds for enabled services;
+`deployed_image_tags` is the tag each service actually deploys (content hash
+for repo-built images, the hand-pinned `image_tag` for foreign ones like
+`sbel`).
+
+Verify the tags landed in ECR:
+```bash
+TAGS=$(terraform -chdir=deployment/terraform-existing-vpc output -json built_images)
+for pair in bond-mcps-auth:auth bond-mcps-mcp-microsoft:microsoft \
+            bond-mcps-mcp-atlassian:atlassian bond-mcps-mcp-github:github \
+            bond-mcps-mcp-databricks:databricks; do
+  repo=${pair%%:*}; key=${pair##*:}
+  tag=$(printf '%s' "$TAGS" | jq -r --arg k "$key" '.[$k] // empty')
+  [ -n "$tag" ] || { printf "%-30s (not enabled)\n" "$repo"; continue; }
+  printf "%-30s %s " "$repo" "$tag"
+  aws --region us-west-2 ecr describe-images --repository-name "$repo" \
+    --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text
 done
 ```
 
-All five lines should print a `sha256:` digest.
+Every enabled service should print a `sha256:` digest.
 
 ## 7. Add upstream IdP callback URL
 
@@ -394,13 +426,15 @@ the same URL.
 ## 8. Second terraform apply
 
 ```bash
-cd deployment/terraform-existing-vpc
-terraform plan -var-file=environments/<env>.tfvars -out=/tmp/plan-2.tfplan
-terraform apply /tmp/plan-2.tfplan
+cd <fork-root>
+make deploy-plan TF_ENV=<env>
+make deploy TF_ENV=<env>
 ```
 
-This time it completes (~5-10 min). The 4 helm releases roll out, ALB
-provisions, ACM cert validates, Route53 A records point to the ALB.
+This time it completes. On a fresh fork this is the apply that does the cold
+cross-arch image builds (15-30 min, §6) before the ~5-10 min of infrastructure
+work: the 4 helm releases roll out, ALB provisions, ACM cert validates,
+Route53 A records point to the ALB.
 
 If you see `helm_release` failures, see Troubleshooting → "Helm releases stuck".
 
@@ -411,6 +445,16 @@ sudo killall -HUP mDNSResponder    # macOS only — flush negative DNS cache
                                     # (DNS records were just created; the OS
                                     # may have cached "doesn't exist")
 
+make smoke                          # reads terraform's service_urls output
+```
+
+`make smoke` passes the AS via `--as-url` and every other enabled service via
+`--mcp-url`, skipping `auth_server` (already covered as the AS) and `sbel`
+(foreign data-only image, no PRM contract). Override the skip list with
+`SMOKE_SKIP="auth_server sbel"`.
+
+Equivalent manual invocation:
+```bash
 python scripts/smoke-deployed.py \
   --as-url   https://auth.<base_domain> \
   --mcp-url  https://ms-graph.<base_domain>/mcp \
@@ -476,15 +520,34 @@ re-authenticates without browser prompt as long as the JWT is unexpired).
 ## Operations
 
 ### Image rebuild + redeploy
-When you change MCP code:
-1. Bump the per-service `image_tag` in tfvars (`0.1.0` → `0.1.1`). **You must
-   bump the tag**, not push over the existing tag — kubelet's
-   `IfNotPresent` policy caches the old digest on every node.
-2. `./scripts/build-and-push-ecr.sh 0.1.1`
-3. `terraform plan -var-file=environments/<env>.tfvars -out=/tmp/plan.tfplan && terraform apply /tmp/plan.tfplan`
+There is no tag to bump — the tag is derived from the content of the files the
+Dockerfile copies (§6), so changed code is already a changed tag. When you
+change MCP or AS code:
+1. Merge the change to `main` and pull, so the working tree is exactly
+   `origin/main` (the guards in `make deploy-check` insist on it — the images
+   are built from the tree, not from a git ref).
+2. `make deploy-plan` — read the plan. Expected for a code release:
+   `null_resource.build[...]` replaced for each changed image, and
+   `module.service[...].helm_release.service` updated in place with the new
+   tag. Aurora, EKS, KMS, Secrets Manager or ACM appearing is not.
+3. `make deploy` — applies exactly that saved plan (it refuses if HEAD moved
+   since the plan was made) and deletes it afterwards.
+4. `make deploy-status` — terraform's `deployed_image_tags` next to what the
+   cluster is actually running.
 
-The chart's `image.pullPolicy=IfNotPresent` saves bandwidth on healthy pods;
-the tag bump is what forces the pull.
+Unchanged images are skipped at apply time with
+`already exists in ECR — skipping build`, so redeploying costs nothing for the
+services you didn't touch. The chart's `image.pullPolicy=IfNotPresent` is safe
+because a new content hash is always a new tag.
+
+**`force_rebuild` (escape hatch).** The hash covers files, not the
+`python:3.12-slim` base image and not apt/PyPI resolution during the build. To
+force fresh tags for everything the hash cannot see, bump the token in tfvars:
+```hcl
+force_rebuild = "2026-09-01-cve"
+```
+Then `make deploy-plan && make deploy`. A new token mints new tags for every
+repo-built image, which can never hit the skip-if-exists path.
 
 ### Secret rotation
 - **Encryption key** (master key for token encryption-at-rest):
@@ -551,9 +614,9 @@ disaster-recovery options.
 | ALB controller CrashLoopBackOff: `failed to fetch VPC ID from instance metadata` | IMDS blocked from pods (EKS default hop-limit=1) | Already mitigated: `eks-lb-controller.tf` passes `vpcId`/`region` explicitly. Confirm chart values include them |
 | ESO install fails: `no endpoints available for service aws-load-balancer-webhook-service` | ALB controller webhook intercepts ESO Service creation before LB controller pod is ready | Already mitigated: `external-secrets.tf` has `depends_on = [helm_release.alb_controller]` |
 | Service helm release: invalid release name (underscores) | Service key has `_` (e.g. `auth_server`) | Already mitigated: module sanitizes `_` → `-` in release name AND chart `nameOverride` |
-| Pod CrashLoopBackOff: `ModuleNotFoundError: starlette` (or uvicorn / httpx / python-multipart) | AS image missing deps | Already mitigated in `auth/pyproject.toml`; rebuild image |
-| Pod ImagePullBackOff: `<tag>: not found` | ECR repo exists but image not pushed for that tag | `./scripts/build-and-push-ecr.sh <tag>` |
-| Pod still running old code after rebuild | `IfNotPresent` cached the old digest on kubelet | Bump `image_tag` (e.g. `0.1.0` → `0.1.1`), re-apply |
+| Pod CrashLoopBackOff: `ModuleNotFoundError: starlette` (or uvicorn / httpx / python-multipart) | AS image missing deps | Already mitigated in `auth/pyproject.toml`; the dep change rehashes the image, so `make deploy-plan && make deploy` rebuilds it |
+| Pod ImagePullBackOff: `<tag>: not found` | ECR has no image at the tag the release wants | `make deploy-plan && make deploy` — the apply builds any tag ECR is missing. For a foreign image (`sbel`) push the pinned `image_tag` from its own repo |
+| Pod still running old code after a deploy | Content hash unchanged — the edited files aren't `COPY`ed into the image, or the drift is invisible to the hash (base image, apt/PyPI) | Compare `terraform -chdir=deployment/terraform-existing-vpc output -json built_images` before/after; for invisible drift bump `force_rebuild` in tfvars and re-deploy |
 | Pod CreateContainerConfigError: `secret "<svc>-jwt" not found` | Chart's envFrom referenced a JWT static-PEM secret that's not created in JWKS-URI mode | Already mitigated: `_helpers.tpl` gates on `jwt.publicKey.secretsManagerName` |
 | ALB controller logs: `couldn't auto-discover subnets: 0 match VPC and tags: [kubernetes.io/role/elb]` | Shared VPC's public subnets aren't tagged | Already mitigated: `public_subnet_ids` tfvar → annotation. Confirm tfvars |
 | Route53 ALIAS records return NXDOMAIN | `EvaluateTargetHealth=true` returns empty until ALB has healthy targets | Wait for target groups to register healthy; verify with `aws elbv2 describe-target-health`. If an ingress is missing, `helm get manifest <release> | kubectl apply -f -` |
@@ -567,9 +630,14 @@ disaster-recovery options.
 ## File reference
 
 ```
+Makefile                      # deploy-check / deploy-plan / deploy / deploy-status / smoke
+                              #   (TF_ENV ?= dev; DEPLOY_UNSAFE=1 skips the git guards)
+
 deployment/
   terraform-existing-vpc/
     aurora.tf                 # Aurora Serverless v2 + parameter group
+    backend.tf                # Remote state: S3 bucket + DynamoDB lock table
+    build-stages.tf           # Content-hash image tags + buildx build/push during apply
     custom-domain.tf          # Wildcard ACM cert + DNS validation
     eks.tf                    # EKS cluster + node group + addons (before_compute=true on cni/kube-proxy)
     eks-lb-controller.tf      # ALB controller helm (passes vpcId/region explicitly)
@@ -581,7 +649,7 @@ deployment/
     services.tf               # for_each over services; one module.service per
     variables.tf              # Schema for jwt_verification + services + public_subnet_ids
     locals.tf                 # mcp_env_overlay (includes FASTMCP_STATELESS_HTTP=1)
-    outputs.tf
+    outputs.tf                # service_urls, deployed_image_tags, built_images
     environments/
       <env>.tfvars            # Your config (gitignored)
     modules/service/          # Per-service helm wrapper (sanitizes _, etc.)
@@ -596,8 +664,7 @@ deployment/helm/mcp-service/  # Chart used by every service (AS + MCPs)
   values.yaml                 # Defaults + schema
 
 scripts/
-  build-and-push-ecr.sh       # All 5 images, linux/amd64, ECR
-  smoke-deployed.py           # 22-check smoke against deployed URLs
+  smoke-deployed.py           # 22-check smoke against deployed URLs (driven by `make smoke`)
 
 auth/
   pyproject.toml              # AS runtime deps (starlette, uvicorn, httpx, python-multipart)
@@ -642,10 +709,17 @@ Reduce by:
   secret material never lands in terraform state (we use `data.external`
   status probes rather than `data.aws_secretsmanager_secret_version`).
 
-## CI (optional)
+## CI
 
-`.github/workflows/build-and-push.yml` builds + pushes on every merge to
-main, tagging both `{sha}` and `latest`. Wire it up:
+`.github/workflows/build-and-push.yml` ("Build images") builds every service
+image on pull requests and on pushes to `main` as **validation only** — no
+ECR push, no AWS credentials, no OIDC role. Its job is catching Dockerfile,
+`.dockerignore` and dependency regressions before merge. Publishing is
+`terraform apply`'s (§6), driven by `make deploy-plan && make deploy` from a
+workstation.
+
+CI publishing to ECR is deliberate future work. If you ever want it, the
+wiring is:
 1. Create a GitHub-Actions OIDC provider in your AWS account.
 2. Create an IAM role trusted by it with `ecr:*` on
    `arn:aws:ecr:<region>:<account>:repository/bond-mcps-*` plus
@@ -653,5 +727,5 @@ main, tagging both `{sha}` and `latest`. Wire it up:
 3. Set GitHub repo secret `AWS_PUSH_ROLE_ARN` = role ARN.
 4. Set repo variable `AWS_REGION` (or rely on `us-west-2` default).
 
-The workflow does NOT update `image_tag` in tfvars — that's still manual or
-via your own CD step.
+Note that a CI push only pre-warms ECR: the deploying apply still computes the
+same content-hash tag and would skip the build it finds already pushed.

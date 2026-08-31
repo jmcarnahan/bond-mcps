@@ -28,13 +28,14 @@ Make sure you're in the right account and region. The deploy is regional.
 In `environments/<env>.tfvars`, set `enabled = true` for each MCP block
 in `services`. Disabled MCPs cost nothing.
 
-### 4. Build + push images to ECR
-ECR repos are created by terraform on first apply, but **images must exist
-before pods start**. Either:
-- Apply once with all `services.*.enabled = false` to create the ECR repos,
-  push images, then re-apply with services enabled, OR
-- Use the GitHub Actions workflow at `.github/workflows/build-and-push.yml`
-  which pushes on every merge to main.
+### 4. Images build during apply
+Terraform builds + pushes the repo-built images itself during `apply`
+(`build-stages.tf`): each image's tag is a content hash of its sources, ECR
+repos are created in the same apply, and the builds are ordered after repo
+creation — no separate push step. Only foreign images (e.g. `sbel`, set via
+a hand-pinned `image_tag`) must be pushed from their own repo before their
+service is enabled. Requires a running Docker daemon with buildx
+(cross-builds `linux/amd64` from Apple Silicon).
 
 ### 5. Pick Cognito (or Okta) coordinates
 For Cognito reuse from bond-ai's user pool:

@@ -81,9 +81,17 @@ variable "services" {
     how the per-service fields map into chart values.
   EOT
   type = map(object({
-    enabled            = bool
-    image_repo_name    = string
-    image_tag          = string
+    enabled         = bool
+    image_repo_name = string
+    # Which image in build-stages.tf's build_matrix this service runs. Set
+    # for anything built from THIS repo — terraform builds it during apply
+    # and deploys the resulting content-hash tag. Mutually exclusive with
+    # image_tag.
+    build = optional(string)
+    # Hand-pinned tag. ONLY for images built outside this repo (e.g. sbel).
+    # Repo-built services must use `build` instead: a hand-pinned tag is how
+    # you ship an image that was never actually pushed.
+    image_tag          = optional(string)
     container_port     = optional(number, 8000)
     hostname_prefix    = string
     replicas           = optional(number, 1)
@@ -127,6 +135,36 @@ variable "services" {
     condition     = length([for k, v in var.services : k if v.is_auth_server]) <= 1
     error_message = "At most one service may have is_auth_server = true."
   }
+  validation {
+    condition = alltrue([
+      for k, v in var.services :
+      (v.build != null) != (v.image_tag != null && v.image_tag != "")
+    ])
+    error_message = "Each service must set exactly one of `build` (repo-built, tag computed) or `image_tag` (foreign image, hand-pinned)."
+  }
+  validation {
+    # Must match local.build_matrix keys in build-stages.tf. Validation
+    # blocks cannot reference locals, hence the duplicated list.
+    # Ternary, not `||`: terraform's || does not short-circuit, and
+    # contains(list, null) is an error.
+    condition = alltrue([
+      for k, v in var.services :
+      v.build == null ? true : contains(["auth", "microsoft", "atlassian", "github", "databricks"], v.build)
+    ])
+    error_message = "services[*].build must be one of: auth, microsoft, atlassian, github, databricks."
+  }
+}
+
+variable "force_rebuild" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Arbitrary token folded into every computed image tag (build-stages.tf).
+    The content hash covers the files the Dockerfiles COPY — not the
+    python:3.12-slim base image, not apt/PyPI resolution during the build.
+    Bump this (e.g. "2026-09-01-cve") to mint fresh tags and force a real
+    rebuild of every repo-built image.
+  EOT
 }
 
 # =========================================================================

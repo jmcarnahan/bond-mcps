@@ -1,25 +1,16 @@
-# Builds the bond-mcps service images and pushes them to ECR.
+# Builds the bond-mcps service images as VALIDATION ONLY — no push, no AWS
+# credentials. Publishing moved into `terraform apply`
+# (deployment/terraform-existing-vpc/build-stages.tf): the apply computes a
+# content-hash tag per image, builds anything ECR doesn't already have, and
+# rolls the helm releases. `make deploy-plan && make deploy` is the deploy.
 #
-# Triggers:
-#   - push to main          → build + push, tags {sha} + latest
-#   - pull_request          → build only (verify Dockerfile changes), no push
-#   - workflow_dispatch     → build + push (manual; tags {sha} only, no latest)
+# This workflow's job is catching Dockerfile / .dockerignore / dependency
+# regressions before merge, on both PRs and main pushes.
 #
-# Prerequisites (one-time per AWS account):
-#   1. Create a GitHub-Actions OIDC provider in the AWS account:
-#        - URL:      https://token.actions.githubusercontent.com
-#        - Audience: sts.amazonaws.com
-#   2. Create an IAM role trusted by that OIDC provider, with policy granting
-#      ecr:GetAuthorizationToken (resource: *) + ecr:* (resource:
-#      arn:aws:ecr:<region>:<account>:repository/bond-mcps-*). Sample trust:
-#        Principal: {Federated: <oidc-provider-arn>}
-#        Action:    sts:AssumeRoleWithWebIdentity
-#        Condition: StringLike:
-#          token.actions.githubusercontent.com:sub: repo:<owner>/<repo>:*
-#   3. Set GitHub repo secret AWS_PUSH_ROLE_ARN = role ARN.
-#   4. Set GitHub repo variable AWS_REGION (or use the us-west-2 default below).
+# Wiring an OIDC role + CI publishing to ECR is deliberate future work; see
+# docs/DEPLOYMENT.md ("CI" section) if that's ever wanted.
 
-name: Build & push images
+name: Build images
 
 on:
   push:
@@ -35,18 +26,13 @@ on:
       - '.github/workflows/build-and-push.yml'
       - '**/Dockerfile'
       - '**/.dockerignore'
-  workflow_dispatch:
 
 permissions:
-  id-token: write   # OIDC → AWS role
   contents: read
 
 concurrency:
   group: build-and-push-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
 
 jobs:
   build:
@@ -57,27 +43,22 @@ jobs:
       matrix:
         service:
           - name: auth
-            ecr_repo: bond-mcps-auth
             context: auth
             dockerfile: auth/Dockerfile
             needs_shared_auth: false
           - name: mcp-github
-            ecr_repo: bond-mcps-mcp-github
             context: mcps/github
             dockerfile: mcps/github/Dockerfile
             needs_shared_auth: true
           - name: mcp-microsoft
-            ecr_repo: bond-mcps-mcp-microsoft
             context: mcps/microsoft
             dockerfile: mcps/microsoft/Dockerfile
             needs_shared_auth: true
           - name: mcp-atlassian
-            ecr_repo: bond-mcps-mcp-atlassian
             context: mcps/atlassian
             dockerfile: mcps/atlassian/Dockerfile
             needs_shared_auth: true
           - name: mcp-databricks
-            ecr_repo: bond-mcps-mcp-databricks
             context: mcps/databricks
             dockerfile: mcps/databricks/Dockerfile
             needs_shared_auth: true
@@ -103,72 +84,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Configure AWS credentials (OIDC)
-        if: github.event_name != 'pull_request'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_PUSH_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to ECR
-        if: github.event_name != 'pull_request'
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # PR builds verify the Dockerfile + .dockerignore changes still work.
-      # No push, no AWS creds needed.
-      - name: Build (PR verify, no push)
-        if: github.event_name == 'pull_request'
+      - name: Build (validation, no push)
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.service.context }}
           file: ${{ matrix.service.dockerfile }}
           platforms: linux/amd64
           push: false
-          tags: bond-mcps/${{ matrix.service.name }}:pr-${{ github.event.pull_request.number }}
+          tags: bond-mcps/${{ matrix.service.name }}:ci
           cache-from: type=gha,scope=${{ matrix.service.name }}
           cache-to: type=gha,scope=${{ matrix.service.name }},mode=max
-
-      # Push tags: always {sha}; also latest on main pushes (not on workflow_dispatch).
-      - name: Compute push tags
-        if: github.event_name != 'pull_request'
-        id: pushtags
-        run: |
-          set -euo pipefail
-          IMAGE="${{ steps.ecr.outputs.registry }}/${{ matrix.service.ecr_repo }}"
-          TAGS="$IMAGE:${{ github.sha }}"
-          if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" ]]; then
-            TAGS="$TAGS"$'\n'"$IMAGE:latest"
-          fi
-          {
-            echo "tags<<EOF"
-            echo "$TAGS"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build & push
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.service.context }}
-          file: ${{ matrix.service.dockerfile }}
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.pushtags.outputs.tags }}
-          cache-from: type=gha,scope=${{ matrix.service.name }}
-          cache-to: type=gha,scope=${{ matrix.service.name }},mode=max
-
-      - name: Summary
-        if: github.event_name != 'pull_request' && success()
-        run: |
-          {
-            echo "## ${{ matrix.service.name }}"
-            echo ""
-            echo "- Repository: \`${{ steps.ecr.outputs.registry }}/${{ matrix.service.ecr_repo }}\`"
-            echo "- SHA tag:    \`${{ github.sha }}\`"
-            if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" ]]; then
-              echo "- Also tagged \`latest\`"
-            fi
-            echo ""
-            echo "Wire \`image_tag = \"${{ github.sha }}\"\` for \`${{ matrix.service.name }}\` in your tfvars."
-          } >> "$GITHUB_STEP_SUMMARY"

@@ -157,3 +157,17 @@ output "needs_scaling_work_services" {
   description = "Services flagged needs_scaling_work — surfaced so operators see them after apply."
   value       = [for k, v in var.services : k if try(v.needs_scaling_work, false)]
 }
+
+# =========================================================================
+# Image builds (build-stages.tf)
+# =========================================================================
+
+output "deployed_image_tags" {
+  description = "Tag each service actually deploys: content-hash for repo-built images, hand-pinned for foreign ones (sbel)."
+  value       = local.effective_image_tag
+}
+
+output "built_images" {
+  description = "Images terraform builds during apply (enabled services only) and their content-hash tags."
+  value       = { for bk in local.active_build_keys : bk => local.image_tags[bk] }
+}

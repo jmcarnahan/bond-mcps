@@ -19,7 +19,7 @@ module "service" {
   namespace       = kubernetes_namespace.bond_mcps.metadata[0].name
 
   image_repository = aws_ecr_repository.this[each.key].repository_url
-  image_tag        = each.value.image_tag
+  image_tag        = local.effective_image_tag[each.key]
   container_port   = each.value.container_port
   replicas         = each.value.replicas
   is_auth_proxy    = each.value.is_auth_proxy
@@ -105,5 +105,10 @@ module "service" {
     helm_release.alb_controller,           # so the ingress class resolves
     aws_rds_cluster_instance.bond_mcps,    # so preflight can reach the DB
     terraform_data.encryption_key_seeded,  # so preflight has a real key
+    # Every helm release waits for every image build. Module-level depends_on
+    # is all-or-nothing, and here that is the behavior we want: if any image
+    # fails to build, NO service rolls, so the cluster is never left half on
+    # the new revision and half on the old.
+    null_resource.build,
   ]
 }

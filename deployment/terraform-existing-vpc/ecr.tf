@@ -20,8 +20,11 @@ resource "aws_ecr_repository" "this" {
   tags = { Name = each.value.image_repo_name }
 }
 
-# Keep the last 20 tagged images. Old images sit around forever otherwise
-# (ECR doesn't auto-clean by default) and accrue cost.
+# Keep the last 50 images. Old images sit around forever otherwise (ECR
+# doesn't auto-clean by default) and accrue cost. 50, not 20: content-hash
+# tags (build-stages.tf) churn faster than the old semver tags did, and with
+# pullPolicy IfNotPresent an expired-but-deployed tag bites on node
+# replacement.
 resource "aws_ecr_lifecycle_policy" "this" {
   for_each   = var.services
   repository = aws_ecr_repository.this[each.key].name
@@ -29,11 +32,11 @@ resource "aws_ecr_lifecycle_policy" "this" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep last 20 images"
+      description  = "Keep last 50 images"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
-        countNumber = 20
+        countNumber = 50
       }
       action = { type = "expire" }
     }]
