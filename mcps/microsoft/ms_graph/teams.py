@@ -644,9 +644,42 @@ def chats_page(client: GraphClient, cursor: str = "", top: int = 50) -> dict[str
     return client.get(_chats_page_path(top))
 
 
+# /chats/{id}/members rejects $top outright ("Query option 'Top' is not
+# allowed"), so Graph alone picks the page size and we cannot ask for the whole
+# roster in one call. Teams chats hold up to 250 participants; 20 pages covers
+# that even if Graph pages in small chunks.
+_MAX_MEMBER_PAGES = 20
+
+
+def _members_path(chat_id: str) -> str:
+    """Build the members URL. No query options — see _MAX_MEMBER_PAGES."""
+    return f"/chats/{_safe_id(chat_id)}/members"
+
+
+def _merge_member_pages(last_page: dict[str, Any], members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Graph-shaped response carrying every member collected.
+
+    Keeps the final page's other keys, so an @odata.nextLink survives when the
+    page cap cut the walk short — the caller can still see it was truncated.
+    """
+    return {**last_page, "value": members}
+
+
 def chat_members(client: GraphClient, chat_id: str) -> dict[str, Any]:
-    """Fetch ONE page of a chat's members."""
-    return client.get(f"/chats/{_safe_id(chat_id)}/members?$top=50")
+    """Fetch a chat's full member list, following @odata.nextLink."""
+    data = client.get(_members_path(chat_id))
+    members = list(data.get("value", []))
+
+    pages = 1
+    while pages < _MAX_MEMBER_PAGES:
+        next_link = data.get("@odata.nextLink")
+        if not next_link:
+            break
+        data = client.get(next_link)
+        members.extend(data.get("value", []))
+        pages += 1
+
+    return _merge_member_pages(data, members)
 
 
 def chat_messages_page(
@@ -666,8 +699,20 @@ async def achats_page(client: AsyncGraphClient, cursor: str = "", top: int = 50)
 
 
 async def achat_members(client: AsyncGraphClient, chat_id: str) -> dict[str, Any]:
-    """Fetch ONE page of a chat's members (async)."""
-    return await client.get(f"/chats/{_safe_id(chat_id)}/members?$top=50")
+    """Fetch a chat's full member list (async). No ``$top`` — see chat_members."""
+    data = await client.get(_members_path(chat_id))
+    members = list(data.get("value", []))
+
+    pages = 1
+    while pages < _MAX_MEMBER_PAGES:
+        next_link = data.get("@odata.nextLink")
+        if not next_link:
+            break
+        data = await client.get(next_link)
+        members.extend(data.get("value", []))
+        pages += 1
+
+    return _merge_member_pages(data, members)
 
 
 async def achat_messages_page(

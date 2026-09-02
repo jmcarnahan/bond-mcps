@@ -2505,8 +2505,9 @@ async def get_chat_members_json(chat_id: str) -> dict:
     """
     List a chat's members as structured JSON.
 
-    For programmatic clients. Returns one page of up to 50 members, each with
-    user_id and display_name. Use it to label 1:1 chats, which have no topic.
+    For programmatic clients. Returns the chat's full member list, each entry
+    with user_id and display_name. Use it to label 1:1 chats, which have no
+    topic.
 
     Args:
         chat_id: The chat ID (from list_chats_page).

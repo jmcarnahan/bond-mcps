@@ -885,7 +885,9 @@ class TestChatMembers:
     """Chat members tests (sync and async)."""
 
     @respx.mock
-    def test_requests_one_page_of_fifty(self):
+    def test_requests_members_without_top(self):
+        # Graph's /chats/{id}/members rejects $top ("Query option 'Top' is
+        # not allowed"), so the request must carry no query options at all.
         route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MEMBERS_RESPONSE)
         )
@@ -893,7 +895,51 @@ class TestChatMembers:
             data = teams.chat_members(client, "chat-1on1-001")
 
         assert data == SAMPLE_CHAT_MEMBERS_RESPONSE
-        assert str(route.calls[0].request.url).endswith("/chats/chat-1on1-001/members?$top=50")
+        assert route.calls[0].request.url.path.endswith("/chats/chat-1on1-001/members")
+        assert not route.calls[0].request.url.query
+
+    @respx.mock
+    def test_follows_next_link_across_pages(self):
+        next_link = f"{GRAPH_BASE_URL}/chats/chat-group-001/members?$skiptoken=abc"
+        # Register the cursor route first: a respx URL pattern without query
+        # params matches ANY query string, so the bare route would swallow both.
+        respx.get(next_link).mock(
+            return_value=httpx.Response(200, json={"value": [{"userId": "u2"}]})
+        )
+        respx.get(f"{GRAPH_BASE_URL}/chats/chat-group-001/members").mock(
+            return_value=httpx.Response(
+                200, json={"value": [{"userId": "u1"}], "@odata.nextLink": next_link}
+            )
+        )
+        with GraphClient("tok") as client:
+            data = teams.chat_members(client, "chat-group-001")
+
+        assert [m["userId"] for m in data["value"]] == ["u1", "u2"]
+        assert "@odata.nextLink" not in data
+
+    @respx.mock
+    def test_page_cap_stops_the_walk_and_keeps_next_link(self):
+        """A runaway nextLink chain stops at the cap, and the link survives as a
+        truncation signal instead of silently yielding a partial roster."""
+        calls = {"n": 0}
+
+        def _endless(request):
+            calls["n"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "value": [{"userId": f"u{calls['n']}"}],
+                    "@odata.nextLink": f"{GRAPH_BASE_URL}/chats/c/members?$skiptoken={calls['n']}",
+                },
+            )
+
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(side_effect=_endless)
+        with GraphClient("tok") as client:
+            data = teams.chat_members(client, "chat-group-001")
+
+        assert calls["n"] == teams._MAX_MEMBER_PAGES
+        assert len(data["value"]) == teams._MAX_MEMBER_PAGES
+        assert data["@odata.nextLink"]
 
     @respx.mock
     async def test_achat_members_encodes_chat_id(self):
@@ -905,6 +951,27 @@ class TestChatMembers:
 
         assert data == SAMPLE_CHAT_MEMBERS_RESPONSE
         assert "/chats/19%3Aa%2Fb%2Bc%40thread.v2/members" in str(route.calls[0].request.url)
+        # The async path is the one get_chat_members_json ships; $top here is
+        # what broke the tool, so pin the empty query string, not a substring.
+        assert not route.calls[0].request.url.query
+
+    @respx.mock
+    async def test_achat_members_follows_next_link(self):
+        next_link = f"{GRAPH_BASE_URL}/chats/chat-group-001/members?$skiptoken=abc"
+        # Register the cursor route first: a respx URL pattern without query
+        # params matches ANY query string, so the bare route would swallow both.
+        respx.get(next_link).mock(
+            return_value=httpx.Response(200, json={"value": [{"userId": "u2"}]})
+        )
+        respx.get(f"{GRAPH_BASE_URL}/chats/chat-group-001/members").mock(
+            return_value=httpx.Response(
+                200, json={"value": [{"userId": "u1"}], "@odata.nextLink": next_link}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await teams.achat_members(client, "chat-group-001")
+
+        assert [m["userId"] for m in data["value"]] == ["u1", "u2"]
 
 
 class TestChatMessagesPageSync:
