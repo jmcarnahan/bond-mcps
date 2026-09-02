@@ -2773,11 +2773,316 @@ class TestMCPDraftFlow:
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
+class TestMCPMarkMailReadJson:
+    """mark_mail_read_json."""
+
+    @respx.mock
+    async def test_marks_every_id_read(self, mcp_server):
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "mark_mail_read_json",
+                {"message_ids": json.dumps(["msg-1", "msg-2"])},
+            )
+
+        assert _structured(result) == {"updated": 2, "failed": []}
+        assert route.call_count == 2
+        assert str(route.calls[0].request.url).endswith("/me/messages/msg-1")
+        assert str(route.calls[1].request.url).endswith("/me/messages/msg-2")
+        assert json.loads(route.calls[0].request.content) == {"isRead": True}
+
+    @respx.mock
+    async def test_is_read_false_marks_unread(self, mcp_server):
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "mark_mail_read_json",
+                {"message_ids": json.dumps(["msg-1"]), "is_read": "false"},
+            )
+
+        assert _structured(result) == {"updated": 1, "failed": []}
+        assert json.loads(route.calls[0].request.content) == {"isRead": False}
+
+    @respx.mock
+    async def test_one_missing_message_does_not_sink_the_batch(self, mcp_server):
+        """A deleted message is reported in failed; the rest still get patched."""
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            side_effect=[
+                httpx.Response(404, json=GRAPH_ERROR_404),
+                httpx.Response(200, json=SAMPLE_MESSAGE),
+            ]
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "mark_mail_read_json",
+                {"message_ids": json.dumps(["gone", "msg-2"])},
+            )
+
+        data = _structured(result)
+        assert route.call_count == 2
+        assert data["updated"] == 1
+        assert len(data["failed"]) == 1
+        assert data["failed"][0]["id"] == "gone"
+        assert "404" in data["failed"][0]["error"]
+
+    @respx.mock
+    @pytest.mark.parametrize("bad", ["{oops", '"notanarray"', "[1, 2]"])
+    async def test_malformed_message_ids_makes_no_graph_calls(self, mcp_server, bad):
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "mark_mail_read_json", {"message_ids": bad})
+
+        assert _structured(result) == {
+            "updated": 0,
+            "failed": [],
+            "error": "message_ids must be a JSON array of strings",
+        }
+        assert route.call_count == 0
+
+    @respx.mock
+    async def test_bad_is_read_value_is_an_error_not_a_default(self, mcp_server):
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "mark_mail_read_json",
+                {"message_ids": json.dumps(["msg-1"]), "is_read": "yes"},
+            )
+
+        assert _structured(result) == {
+            "updated": 0,
+            "failed": [],
+            "error": 'is_read must be "true" or "false"',
+        }
+        assert route.call_count == 0
+
+    @respx.mock
+    async def test_is_read_is_case_insensitive(self, mcp_server):
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "mark_mail_read_json",
+                {"message_ids": json.dumps(["msg-1"]), "is_read": "False"},
+            )
+
+        assert _structured(result)["updated"] == 1
+        assert json.loads(route.calls[0].request.content) == {"isRead": False}
+
+    @respx.mock
+    async def test_only_the_first_100_ids_are_processed(self, mcp_server):
+        route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "mark_mail_read_json",
+                {"message_ids": json.dumps([f"msg-{i}" for i in range(150)])},
+            )
+
+        assert _structured(result) == {"updated": 100, "failed": []}
+        assert route.call_count == 100
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server, "mark_mail_read_json", {"message_ids": json.dumps(["msg-1"])}
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+def _fake_jwt(claims: dict) -> str:
+    """Build an unsigned JWT whose payload decode_token_claims can read."""
+    import base64
+
+    header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    sig = base64.urlsafe_b64encode(b"s").rstrip(b"=").decode()
+    return f"{header}.{payload}.{sig}"
+
+
+IDENTITY_TOKEN = _fake_jwt({"oid": "user-obj-id", "tid": "tenant-id-123"})
+
+SAMPLE_CHAT_MESSAGE_CREATED = {
+    "id": "chat-msg-sent-002",
+    "messageType": "message",
+    "createdDateTime": "2026-01-06T09:00:00Z",
+    "lastModifiedDateTime": "2026-01-06T09:00:00Z",
+    "from": {"user": {"id": "user-id-001", "displayName": "Test User"}},
+    "body": {"contentType": "text", "content": "on my way"},
+}
+
+
+class TestMCPMarkChatReadJson:
+    """mark_chat_read_json."""
+
+    @respx.mock
+    async def test_marks_the_chat_for_the_token_identity(self, mcp_server):
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/markChatReadForUser").mock(
+            return_value=httpx.Response(204)
+        )
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+
+        assert _structured(result) == {"ok": True}
+        assert route.call_count == 1
+        assert str(route.calls[0].request.url) == (
+            f"{GRAPH_BASE_URL}/chats/chat-1on1-001/markChatReadForUser"
+        )
+        assert json.loads(route.calls[0].request.content) == {
+            "user": {"id": "user-obj-id", "tenantId": "tenant-id-123"}
+        }
+
+    @respx.mock
+    async def test_empty_chat_id_makes_no_graph_calls(self, mcp_server):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(204)
+        )
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "   "})
+
+        assert _structured(result) == {"ok": False, "error": "chat_id must not be empty"}
+        assert route.call_count == 0
+
+    @respx.mock
+    async def test_token_without_claims_is_no_identity_not_a_blank_call(self, mcp_server):
+        """A token we cannot decode would mark the chat for nobody — refuse it."""
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(204)
+        )
+        with _mock_token("test-ms-token"):
+            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+
+        assert _structured(result) == {"ok": False, "error": "no_identity"}
+        assert route.call_count == 0
+
+    @respx.mock
+    async def test_teams_403_reports_unavailable(self, mcp_server):
+        respx.post(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/markChatReadForUser").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+
+        assert _structured(result) == {"ok": False, "error": "teams_unavailable"}
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPSendChatMessageJson:
+    """send_chat_message_json."""
+
+    @respx.mock
+    async def test_sends_plain_text_and_returns_the_flat_message(self, mcp_server):
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {"chat_id": "chat-1on1-001", "text": "on my way"},
+            )
+
+        assert route.call_count == 1
+        assert json.loads(route.calls[0].request.content) == {
+            "body": {"contentType": "text", "content": "on my way"}
+        }
+        assert _structured(result) == {
+            "message": {
+                "id": "chat-msg-sent-002",
+                "message_type": "message",
+                "from_user_id": "user-id-001",
+                "from_user_display": "Test User",
+                "from_application_id": None,
+                "body_content": "on my way",
+                "body_content_type": "text",
+                "created": "2026-01-06T09:00:00Z",
+                "last_modified": "2026-01-06T09:00:00Z",
+            }
+        }
+
+    @respx.mock
+    async def test_angle_bracket_is_sent_verbatim_not_as_markup(self, mcp_server):
+        """content_type "text" — "auto" would treat a typed < as HTML."""
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {"chat_id": "chat-1on1-001", "text": "a < b"},
+            )
+
+        assert json.loads(route.calls[0].request.content) == {
+            "body": {"contentType": "text", "content": "a < b"}
+        }
+
+    @respx.mock
+    async def test_empty_text_makes_no_graph_calls(self, mcp_server):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {"chat_id": "chat-1on1-001", "text": "   "},
+            )
+
+        assert _structured(result) == {"message": None, "error": "text must not be empty"}
+        assert route.call_count == 0
+
+    @respx.mock
+    async def test_empty_chat_id_makes_no_graph_calls(self, mcp_server):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "send_chat_message_json", {"chat_id": "", "text": "hello"}
+            )
+
+        assert _structured(result) == {"message": None, "error": "chat_id must not be empty"}
+        assert route.call_count == 0
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {"chat_id": "chat-1on1-001", "text": "hello"},
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
 class TestMCPChatsPage:
     """list_chats_page and get_chat_members_json."""
 
     @respx.mock
     async def test_maps_chats_and_tolerates_null_preview(self, mcp_server):
+        """last_read_at comes off viewpoint, and is null on a chat without one."""
         respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
             return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
         )
@@ -2791,13 +3096,20 @@ class TestMCPChatsPage:
                 "id": "chat-1on1-001",
                 "topic": None,
                 "last_preview_at": "2025-12-15T14:00:00Z",
+                "last_read_at": "2025-12-15T14:00:00Z",
             },
             {
                 "id": "chat-group-001",
                 "topic": "Project Standup",
                 "last_preview_at": "2025-12-15T13:00:00Z",
+                "last_read_at": "2025-12-15T12:00:00Z",
             },
-            {"id": "chat-empty-001", "topic": "Newly Created", "last_preview_at": None},
+            {
+                "id": "chat-empty-001",
+                "topic": "Newly Created",
+                "last_preview_at": None,
+                "last_read_at": None,
+            },
         ]
 
     @respx.mock
