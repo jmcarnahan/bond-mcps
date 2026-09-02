@@ -24,6 +24,7 @@ from .conftest import (
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
     SAMPLE_CHAT_MEMBERS_RESPONSE,
+    SAMPLE_CHAT_MESSAGE_FULL,
     SAMPLE_CHAT_MESSAGE_SENT,
     SAMPLE_CHAT_MESSAGES_PAGE,
     SAMPLE_CHAT_MESSAGES_RESPONSE,
@@ -3016,6 +3017,7 @@ class TestMCPSendChatMessageJson:
                 "from_application_id": None,
                 "body_content": "on my way",
                 "body_content_type": "text",
+                "mentioned_user_ids": [],
                 "created": "2026-01-06T09:00:00Z",
                 "last_modified": "2026-01-06T09:00:00Z",
             }
@@ -3172,6 +3174,7 @@ class TestMCPChatMessagesPage:
             "from_application_id": None,
             "body_content": "<p>Sounds good!</p>",
             "body_content_type": "html",
+            "mentioned_user_ids": [],
             "created": "2026-01-05T14:00:00Z",
             "last_modified": "2026-01-05T14:05:00Z",
         }
@@ -3182,6 +3185,91 @@ class TestMCPChatMessagesPage:
         assert system_msg["from_user_id"] is None
         assert system_msg["from_application_id"] is None
         assert system_msg["body_content"] is None
+
+    @respx.mock
+    async def test_mentions_flatten_to_user_ids_in_order(self, mcp_server):
+        msg_with_mentions = {
+            **SAMPLE_CHAT_MESSAGE_FULL,
+            "mentions": [
+                {
+                    "id": 0,
+                    "mentionText": "Test User",
+                    "mentioned": {"user": {"id": "user-id-001", "displayName": "Test User"}},
+                },
+                {
+                    "id": 1,
+                    "mentionText": "Bob Jones",
+                    "mentioned": {"user": {"id": "user-id-003", "displayName": "Bob Jones"}},
+                },
+            ],
+        }
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json={"value": [msg_with_mentions]})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+            )
+
+        assert _structured(result)["messages"][0]["mentioned_user_ids"] == [
+            "user-id-001",
+            "user-id-003",
+        ]
+
+    @respx.mock
+    async def test_mentions_without_a_user_are_dropped(self, mcp_server):
+        """Channel and tag mentions have no user under mentioned."""
+        msg_with_channel_mention = {
+            **SAMPLE_CHAT_MESSAGE_FULL,
+            "mentions": [
+                {
+                    "id": 0,
+                    "mentionText": "Everyone",
+                    "mentioned": {"conversation": {"id": "channel-001", "displayName": "Everyone"}},
+                },
+                {
+                    "id": 1,
+                    "mentionText": "Test User",
+                    "mentioned": {"user": {"id": "user-id-001", "displayName": "Test User"}},
+                },
+            ],
+        }
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json={"value": [msg_with_channel_mention]})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+            )
+
+        assert _structured(result)["messages"][0]["mentioned_user_ids"] == ["user-id-001"]
+
+    @respx.mock
+    async def test_malformed_mention_entries_are_dropped(self, mcp_server):
+        """A mention nests three deep and every level is type-checked. Graph
+        sends none of these shapes, but one bad entry must not sink the page —
+        the real id at the end is what proves the walk kept going."""
+        msg_with_junk_mentions = {
+            **SAMPLE_CHAT_MESSAGE_FULL,
+            "mentions": [
+                "not-a-dict",
+                {"id": 0, "mentionText": "No mentioned key"},
+                {"id": 1, "mentioned": None},
+                {"id": 2, "mentioned": "not-a-dict"},
+                {"id": 3, "mentioned": {"user": None}},
+                {"id": 4, "mentioned": {"user": {"id": ""}}},
+                {"id": 5, "mentioned": {"user": {"id": "user-id-001"}}},
+            ],
+        }
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json={"value": [msg_with_junk_mentions]})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+            )
+
+        assert _structured(result)["messages"][0]["mentioned_user_ids"] == ["user-id-001"]
 
     @respx.mock
     async def test_since_filters_on_the_orderby_property(self, mcp_server):
