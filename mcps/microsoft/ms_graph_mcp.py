@@ -2223,6 +2223,17 @@ def _chat_message_json(msg: dict) -> dict:
     user = sender.get("user") or {}
     application = sender.get("application") or {}
     body = msg.get("body") or {}
+    # Only "who was named" travels: the desktop re-nests it. Channel/tag
+    # mentions have no user under mentioned, so they drop out here. Each level
+    # is type-checked rather than `or {}`-chained, because unlike the sender
+    # above, a mention is a collection — one bad entry must not sink the page.
+    mentioned_user_ids = []
+    for mention in msg.get("mentions") or []:
+        mentioned = mention.get("mentioned") if isinstance(mention, dict) else None
+        mentioned_user = mentioned.get("user") if isinstance(mentioned, dict) else None
+        mentioned_id = mentioned_user.get("id") if isinstance(mentioned_user, dict) else None
+        if mentioned_id:
+            mentioned_user_ids.append(mentioned_id)
     return {
         "id": msg.get("id"),
         "message_type": msg.get("messageType"),
@@ -2231,6 +2242,7 @@ def _chat_message_json(msg: dict) -> dict:
         "from_application_id": application.get("id"),
         "body_content": body.get("content"),
         "body_content_type": body.get("contentType"),
+        "mentioned_user_ids": mentioned_user_ids,
         "created": msg.get("createdDateTime"),
         "last_modified": msg.get("lastModifiedDateTime"),
     }
@@ -2533,8 +2545,10 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
 
     For programmatic clients. Messages come back newest-first and flattened:
     id, message_type, from_user_id, from_user_display, from_application_id,
-    body_content, body_content_type, created, last_modified. System events have
-    no sender, so the from_* fields are null. Returns next_cursor for the next
+    body_content, body_content_type, mentioned_user_ids, created,
+    last_modified. System events have no sender, so the from_* fields are null.
+    mentioned_user_ids is the Graph user ids the message @mentions, in the
+    order they appear and empty when none. Returns next_cursor for the next
     page, empty when there are no more.
 
     Args:
