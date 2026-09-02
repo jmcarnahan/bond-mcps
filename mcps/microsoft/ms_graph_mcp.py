@@ -13,15 +13,16 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (36 tools):
+Tool summary (39 tools):
   Email     : get_user_profile, list_emails, read_email, send_email, manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
   Teams     : list_teams, list_chats, read_teams_messages, send_teams_message, get_teams_activity
   Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, edit_document, manage_file
   Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
   Desktop JSON : get_profile_json, list_mail_delta, get_mail_detail, create_reply_draft_json,
-                 update_draft_body, send_draft, list_chats_page, get_chat_members_json,
-                 list_chat_messages_page, connection_status
+                 update_draft_body, send_draft, mark_mail_read_json, list_chats_page,
+                 get_chat_members_json, list_chat_messages_page, mark_chat_read_json,
+                 send_chat_message_json, connection_status
 
 The 26 markdown tools above render prose for an LLM to read. The Desktop JSON
 namespace is for programmatic clients (the desktop mail app) and follows a
@@ -2197,9 +2198,11 @@ async def export_report(
 # structuredContent. Parameters remain str/int only.
 #
 # Error contract: a missing Microsoft connection returns the not_connected
-# payload (with a connect URL when one exists). Everything else — Graph 5xx,
-# throttling, unexpected shapes — propagates so FastMCP raises a tool error,
-# which is the client's "transient, retry later" signal.
+# payload (with a connect URL when one exists). The Teams write tools return
+# a structured "teams_unavailable" error for the no-license 403, which is
+# permanent and must not be retried. Everything else — Graph 5xx, throttling,
+# unexpected shapes — propagates so FastMCP raises a tool error, which is the
+# client's "transient, retry later" signal.
 # ---------------------------------------------------------------------------
 
 
@@ -2414,14 +2417,62 @@ async def send_draft(draft_id: str) -> dict:
 
 
 @mcp.tool()
+async def mark_mail_read_json(message_ids: str, is_read: str = "true") -> dict:
+    """
+    Mark messages read (or unread) in bulk. Returns structured JSON.
+
+    For programmatic clients syncing read state. Best effort per message: a
+    message that no longer exists is reported in failed rather than failing the
+    whole call. Returns updated (how many were patched) and failed (one entry
+    per message that was not, with id and error). At most 100 IDs are processed
+    per call; anything beyond that is ignored.
+
+    Args:
+        message_ids: JSON array of Graph message IDs, as a string, e.g.
+            '["AAMkAGI2...", "AAMkAGI3..."]'.
+        is_read: "true" (default) marks read, "false" marks unread.
+    """
+    import json
+
+    try:
+        ids = json.loads(message_ids)
+    except (json.JSONDecodeError, TypeError):
+        ids = None
+    if not isinstance(ids, list) or not all(isinstance(mid, str) for mid in ids):
+        return {"updated": 0, "failed": [], "error": "message_ids must be a JSON array of strings"}
+
+    flag = is_read.strip().lower()
+    if flag not in ("true", "false"):
+        return {"updated": 0, "failed": [], "error": 'is_read must be "true" or "false"'}
+
+    updated = 0
+    failed = []
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            for message_id in ids[:100]:
+                try:
+                    await mail_ops.amark_read(client, message_id, is_read=flag == "true")
+                except GraphError as e:
+                    failed.append({"id": message_id, "error": str(e)})
+                else:
+                    updated += 1
+    except PermissionError as e:
+        return _not_connected(e)
+
+    return {"updated": updated, "failed": failed}
+
+
+@mcp.tool()
 async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
     """
     Fetch ONE page of the user's Teams chats as structured JSON.
 
     For programmatic clients. Chats come back newest-activity-first. Each entry
     has id, topic (null for 1:1 chats — resolve a name via
-    get_chat_members_json), and last_preview_at. Returns next_cursor for the
-    next page, empty when the listing is complete.
+    get_chat_members_json), last_preview_at, and last_read_at (how far the
+    signed-in user has read the chat; null when Graph sends no viewpoint).
+    Returns next_cursor for the next page, empty when the listing is complete.
 
     Args:
         cursor: A next_cursor from a previous call. Empty starts at page one.
@@ -2437,11 +2488,13 @@ async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
     chats = []
     for chat in data.get("value", []):
         preview = chat.get("lastMessagePreview") or {}
+        viewpoint = chat.get("viewpoint") or {}
         chats.append(
             {
                 "id": chat.get("id"),
                 "topic": chat.get("topic"),
                 "last_preview_at": preview.get("createdDateTime"),
+                "last_read_at": viewpoint.get("lastMessageReadDateTime"),
             }
         )
     return {"chats": chats, "next_cursor": data.get("@odata.nextLink", "")}
@@ -2501,6 +2554,80 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
         "messages": [_chat_message_json(m) for m in data.get("value", [])],
         "next_cursor": data.get("@odata.nextLink", ""),
     }
+
+
+@mcp.tool()
+async def mark_chat_read_json(chat_id: str) -> dict:
+    """
+    Mark a Teams chat read for the signed-in user. Returns structured JSON.
+
+    Read state in Teams is per CHAT, not per message: it is a viewpoint on the
+    conversation, so this marks the chat read up to its newest message and
+    there is no way to ack one message and leave a later one unread. For
+    programmatic clients acking a read the client already recorded locally.
+    Requires Chat.ReadWrite.
+
+    Returns ok: true on success. On failure ok is false and error says why —
+    "no_identity" when the signed-in user cannot be read off the token,
+    "teams_unavailable" when the account has no Teams license.
+
+    Args:
+        chat_id: The chat ID (from list_chats_page).
+    """
+    if not chat_id.strip():
+        return {"ok": False, "error": "chat_id must not be empty"}
+
+    try:
+        token = get_graph_token()
+        # Graph wants the user explicitly; a blank oid/tid would be a call that
+        # marks nothing, so it is an error here rather than a request.
+        claims = teams_ops.decode_token_claims(token)
+        if not claims["oid"] or not claims["tid"]:
+            return {"ok": False, "error": "no_identity"}
+        async with AsyncGraphClient(token) as client:
+            await teams_ops.amark_chat_read(client, chat_id, claims["oid"], claims["tid"])
+    except PermissionError as e:
+        return _not_connected(e)
+    except TeamsNotAvailableError:
+        return {"ok": False, "error": "teams_unavailable"}
+
+    return {"ok": True}
+
+
+@mcp.tool()
+async def send_chat_message_json(chat_id: str, text: str) -> dict:
+    """
+    Send a plain-text message to a Teams chat. Returns structured JSON.
+
+    The content type is explicitly "text", not "auto": the desktop composer is
+    a plain-text field, and auto-detection would read a typed "<" as markup —
+    the same rule update_draft_body holds for mail. Returns the created message
+    flattened exactly as list_chat_messages_page returns one, so the client can
+    store its own reply without waiting for the next pull. Requires
+    Chat.ReadWrite.
+
+    On failure message is null and error says why ("teams_unavailable" when the
+    account has no Teams license).
+
+    Args:
+        chat_id: The chat ID (from list_chats_page).
+        text: The message body, sent as typed.
+    """
+    if not chat_id.strip():
+        return {"message": None, "error": "chat_id must not be empty"}
+    if not text.strip():
+        return {"message": None, "error": "text must not be empty"}
+
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            created = await teams_ops.asend_chat_message(client, chat_id, text, content_type="text")
+    except PermissionError as e:
+        return _not_connected(e)
+    except TeamsNotAvailableError:
+        return {"message": None, "error": "teams_unavailable"}
+
+    return {"message": _chat_message_json(created)}
 
 
 @mcp.tool()
