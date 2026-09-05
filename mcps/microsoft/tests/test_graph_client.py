@@ -10,6 +10,11 @@ from ms_graph.graph_client import (
     GraphError,
 )
 
+UPLOAD_URL = "https://sn3302.up.1drv.com/up/session-abc"
+FINAL_LOCATION = (
+    "https://outlook.office.com/api/v2.0/Users('u1')/Messages('m1')/Attachments('AAMkAtt001%3D')"
+)
+
 
 class TestGraphClient:
     """Synchronous GraphClient tests."""
@@ -401,3 +406,260 @@ class TestExtraHeaders:
             await client.get("/me")
 
         assert "prefer" not in route.calls[0].request.headers
+
+
+class TestGetBytesWithType:
+    """get_bytes_with_type returns the Content-Type header alongside the bytes."""
+
+    @respx.mock
+    def test_returns_bytes_and_content_type(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/f1/content").mock(
+            return_value=httpx.Response(
+                200, content=b"PNGDATA", headers={"Content-Type": "image/png"}
+            )
+        )
+        with GraphClient("tok") as client:
+            data, content_type = client.get_bytes_with_type("/me/drive/items/f1/content")
+
+        assert data == b"PNGDATA"
+        assert content_type == "image/png"
+
+    @respx.mock
+    def test_missing_content_type_is_empty_string(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/f1/content").mock(
+            return_value=httpx.Response(200, content=b"raw")
+        )
+        with GraphClient("tok") as client:
+            _, content_type = client.get_bytes_with_type("/me/drive/items/f1/content")
+
+        assert content_type == ""
+
+    @respx.mock
+    def test_follows_redirect(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/f1/content").mock(
+            return_value=httpx.Response(302, headers={"Location": "https://cdn.example.com/blob"})
+        )
+        respx.get("https://cdn.example.com/blob").mock(
+            return_value=httpx.Response(
+                200, content=b"redirected", headers={"Content-Type": "application/pdf"}
+            )
+        )
+        with GraphClient("tok") as client:
+            data, content_type = client.get_bytes_with_type("/me/drive/items/f1/content")
+
+        assert data == b"redirected"
+        assert content_type == "application/pdf"
+
+    @respx.mock
+    def test_error_raises(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/f1/content").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "ItemNotFound"}})
+        )
+        with pytest.raises(GraphError) as exc:
+            with GraphClient("tok") as client:
+                client.get_bytes_with_type("/me/drive/items/f1/content")
+
+        assert exc.value.status_code == 404
+
+    @respx.mock
+    async def test_async_returns_bytes_and_content_type(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/f1/content").mock(
+            return_value=httpx.Response(
+                200, content=b"PNGDATA", headers={"Content-Type": "image/png"}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            data, content_type = await client.get_bytes_with_type("/me/drive/items/f1/content")
+
+        assert (data, content_type) == (b"PNGDATA", "image/png")
+
+    @respx.mock
+    async def test_async_follows_redirect(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/f1/content").mock(
+            return_value=httpx.Response(302, headers={"Location": "https://cdn.example.com/blob"})
+        )
+        respx.get("https://cdn.example.com/blob").mock(
+            return_value=httpx.Response(
+                200, content=b"redirected", headers={"Content-Type": "application/pdf"}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            data, content_type = await client.get_bytes_with_type("/me/drive/items/f1/content")
+
+        assert (data, content_type) == (b"redirected", "application/pdf")
+
+
+class TestSyncDelete:
+    """The sync client gained delete() for parity with the async one."""
+
+    @respx.mock
+    def test_delete_returns_none_on_204(self):
+        route = respx.delete(f"{GRAPH_BASE_URL}/me/messages/draft-1").mock(
+            return_value=httpx.Response(204)
+        )
+        with GraphClient("tok") as client:
+            assert client.delete("/me/messages/draft-1") is None
+
+        assert route.called
+        assert route.calls[0].request.headers["authorization"] == "Bearer tok"
+
+    @respx.mock
+    def test_delete_error_raises(self):
+        respx.delete(f"{GRAPH_BASE_URL}/me/messages/draft-1").mock(
+            return_value=httpx.Response(403, json={"error": {"code": "AccessDenied"}})
+        )
+        with pytest.raises(GraphError) as exc:
+            with GraphClient("tok") as client:
+                client.delete("/me/messages/draft-1")
+
+        assert exc.value.status_code == 403
+
+
+class TestPutRangeSync:
+    """put_range talks to pre-authenticated upload-session URLs."""
+
+    @respx.mock
+    def test_sends_range_and_length_without_bearer(self):
+        route = respx.put(UPLOAD_URL).mock(
+            return_value=httpx.Response(202, json={"nextExpectedRanges": ["5-9"]})
+        )
+        with GraphClient("tok") as client:
+            result = client.put_range(UPLOAD_URL, b"01234", 0, 10)
+
+        req = route.calls[0].request
+        assert req.headers["content-range"] == "bytes 0-4/10"
+        assert req.headers["content-length"] == "5"
+        assert req.headers["content-type"] == "application/octet-stream"
+        assert "authorization" not in req.headers
+        assert result.status_code == 202
+        assert result.body == {"nextExpectedRanges": ["5-9"]}
+        assert result.location == ""
+
+    @respx.mock
+    def test_final_201_carries_location(self):
+        respx.put(UPLOAD_URL).mock(
+            return_value=httpx.Response(201, headers={"Location": FINAL_LOCATION})
+        )
+        with GraphClient("tok") as client:
+            result = client.put_range(UPLOAD_URL, b"56789", 5, 10)
+
+        assert result.status_code == 201
+        assert result.body is None
+        assert result.location == FINAL_LOCATION
+
+    @respx.mock
+    def test_offset_range_is_computed_from_start(self):
+        route = respx.put(UPLOAD_URL).mock(return_value=httpx.Response(200, json={"id": "item-1"}))
+        with GraphClient("tok") as client:
+            result = client.put_range(UPLOAD_URL, b"XY", 8, 10, content_type="image/png")
+
+        assert route.calls[0].request.headers["content-range"] == "bytes 8-9/10"
+        assert route.calls[0].request.headers["content-type"] == "image/png"
+        assert result.body == {"id": "item-1"}
+
+    @respx.mock
+    def test_failure_raises_graph_error(self):
+        respx.put(UPLOAD_URL).mock(
+            return_value=httpx.Response(416, json={"error": {"code": "InvalidRange"}})
+        )
+        with pytest.raises(GraphError) as exc:
+            with GraphClient("tok") as client:
+                client.put_range(UPLOAD_URL, b"01234", 0, 10)
+
+        assert exc.value.status_code == 416
+
+
+class TestPutRangeAsync:
+    """Async twin of TestPutRangeSync."""
+
+    @respx.mock
+    async def test_sends_range_without_bearer(self):
+        route = respx.put(UPLOAD_URL).mock(
+            return_value=httpx.Response(202, json={"nextExpectedRanges": ["5-9"]})
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await client.put_range(UPLOAD_URL, b"01234", 0, 10)
+
+        req = route.calls[0].request
+        assert req.headers["content-range"] == "bytes 0-4/10"
+        assert req.headers["content-length"] == "5"
+        assert "authorization" not in req.headers
+        assert result.body == {"nextExpectedRanges": ["5-9"]}
+
+    @respx.mock
+    async def test_final_201_carries_location(self):
+        respx.put(UPLOAD_URL).mock(
+            return_value=httpx.Response(201, headers={"Location": FINAL_LOCATION})
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await client.put_range(UPLOAD_URL, b"56789", 5, 10)
+
+        assert (result.status_code, result.body, result.location) == (201, None, FINAL_LOCATION)
+
+    @respx.mock
+    async def test_failure_raises_graph_error(self):
+        respx.put(UPLOAD_URL).mock(
+            return_value=httpx.Response(500, json={"error": {"code": "ServiceError"}})
+        )
+        with pytest.raises(GraphError) as exc:
+            async with AsyncGraphClient("tok") as client:
+                await client.put_range(UPLOAD_URL, b"01234", 0, 10)
+
+        assert exc.value.status_code == 500
+
+
+class TestDeleteUrl:
+    """delete_url cancels an upload session through the bare client."""
+
+    @respx.mock
+    def test_204_is_success_and_sends_no_bearer(self):
+        route = respx.delete(UPLOAD_URL).mock(return_value=httpx.Response(204))
+        with GraphClient("tok") as client:
+            assert client.delete_url(UPLOAD_URL) is None
+
+        assert "authorization" not in route.calls[0].request.headers
+
+    @respx.mock
+    def test_200_is_success(self):
+        respx.delete(UPLOAD_URL).mock(return_value=httpx.Response(200, json={}))
+        with GraphClient("tok") as client:
+            assert client.delete_url(UPLOAD_URL) is None
+
+    @respx.mock
+    def test_error_raises(self):
+        respx.delete(UPLOAD_URL).mock(
+            return_value=httpx.Response(404, json={"error": {"code": "SessionNotFound"}})
+        )
+        with pytest.raises(GraphError) as exc:
+            with GraphClient("tok") as client:
+                client.delete_url(UPLOAD_URL)
+
+        assert exc.value.status_code == 404
+
+    @respx.mock
+    def test_unexpected_success_status_raises(self):
+        respx.delete(UPLOAD_URL).mock(return_value=httpx.Response(202))
+        with pytest.raises(GraphError) as exc:
+            with GraphClient("tok") as client:
+                client.delete_url(UPLOAD_URL)
+
+        assert exc.value.error_code == "UnexpectedStatus"
+
+    @respx.mock
+    async def test_async_204_is_success(self):
+        route = respx.delete(UPLOAD_URL).mock(return_value=httpx.Response(204))
+        async with AsyncGraphClient("tok") as client:
+            assert await client.delete_url(UPLOAD_URL) is None
+
+        assert "authorization" not in route.calls[0].request.headers
+
+    @respx.mock
+    async def test_async_error_raises(self):
+        respx.delete(UPLOAD_URL).mock(
+            return_value=httpx.Response(404, json={"error": {"code": "SessionNotFound"}})
+        )
+        with pytest.raises(GraphError) as exc:
+            async with AsyncGraphClient("tok") as client:
+                await client.delete_url(UPLOAD_URL)
+
+        assert exc.value.status_code == 404

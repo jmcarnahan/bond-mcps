@@ -8,9 +8,11 @@ or AsyncGraphClient and return parsed dicts.
 
 import asyncio
 import base64
+import logging
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 from .document_extract import (
     MAX_DOCUMENT_DOWNLOAD_BYTES,
@@ -19,8 +21,27 @@ from .document_extract import (
 )
 from .graph_client import AsyncGraphClient, GraphClient, GraphError
 
+logger = logging.getLogger(__name__)
+
 MAX_TEXT_DOWNLOAD_BYTES = 2_000_000  # 2 MB
 MAX_SIMPLE_UPLOAD_BYTES = 4_000_000  # 4 MB (Graph simple upload limit)
+
+# 12 x 320 KiB. OneDrive requires fragments to be a multiple of 320 KiB and
+# Outlook wants each PUT under 4 MB, so one constant serves both session kinds.
+UPLOAD_CHUNK_BYTES = 3_932_160
+
+_THUMBNAIL_SIZES = frozenset({"small", "medium", "large"})
+
+
+def _path_segments(folder_path: str, filename: str) -> tuple[str, str]:
+    """Percent-encode a folder path and file name for the ``root:/…:`` path form.
+
+    Names come from callers (an LLM spec, a Teams file), and a ``#`` or ``?``
+    in one would otherwise end the URL path early. Slashes stay in the folder
+    path (they are separators there) and are encoded in the file name.
+    """
+    return quote(folder_path.strip("/"), safe="/"), quote(filename, safe="")
+
 
 # Content-type mapping for upload (by file extension)
 _UPLOAD_CONTENT_TYPES: dict[str, str] = {
@@ -870,3 +891,309 @@ def _parse_search_response(data: dict[str, Any] | None) -> list[dict[str, Any]]:
                     resource["_searchSummary"] = summary
                 results.append(resource)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Upload sessions (files above the 4 MB simple-upload limit)
+# ---------------------------------------------------------------------------
+
+
+def _upload_session_path(
+    folder_path: str,
+    filename: str,
+    site_id: str,
+    drive_id: str,
+    parent_id: str,
+) -> str:
+    """Graph path that opens an upload session for a new/replaced file."""
+    base = _drive_base(site_id or None, drive_id or None)
+    path, name = _path_segments(folder_path, filename)
+    if parent_id:
+        return f"{base}/items/{parent_id}:/{name}:/createUploadSession"
+    if path:
+        return f"{base}/root:/{path}/{name}:/createUploadSession"
+    return f"{base}/root:/{name}:/createUploadSession"
+
+
+def _simple_upload_path(
+    folder_path: str,
+    filename: str,
+    site_id: str,
+    drive_id: str,
+    parent_id: str,
+    conflict_behavior: str,
+) -> str:
+    """Graph path for a simple content PUT.
+
+    The conflict behavior travels as a query parameter because ``client.put``
+    talks to a bearer client that takes no ``params``.
+    """
+    base = _drive_base(site_id or None, drive_id or None)
+    path, name = _path_segments(folder_path, filename)
+    if parent_id:
+        url = f"{base}/items/{parent_id}:/{name}:/content"
+    elif path:
+        url = f"{base}/root:/{path}/{name}:/content"
+    else:
+        url = f"{base}/root:/{name}:/content"
+    if conflict_behavior != "replace":
+        url += f"?@microsoft.graph.conflictBehavior={conflict_behavior}"
+    return url
+
+
+def _upload_session_body(filename: str, conflict_behavior: str) -> dict[str, Any]:
+    """Request body for createUploadSession."""
+    return {
+        "item": {
+            "@microsoft.graph.conflictBehavior": conflict_behavior,
+            "name": filename,
+        }
+    }
+
+
+def _upload_url_from_session(session: dict[str, Any] | None) -> str:
+    """Pull uploadUrl out of a createUploadSession response, or fail loudly."""
+    upload_url = (session or {}).get("uploadUrl", "")
+    if not upload_url:
+        raise GraphError(500, "NoUploadUrl", "createUploadSession did not return an uploadUrl")
+    return upload_url
+
+
+def _final_item(body: dict[str, Any] | None) -> dict[str, Any]:
+    """The last fragment carries the finished driveItem; anything else is a bug."""
+    if body is None:
+        raise GraphError(
+            500,
+            "NoDriveItem",
+            "Upload session completed without returning the uploaded item",
+        )
+    return body
+
+
+def _check_session_payload(data: bytes) -> None:
+    """An upload session needs at least one fragment to send."""
+    if not data:
+        raise ValueError("Cannot upload empty content through an upload session.")
+
+
+def upload_bytes_session(
+    client: GraphClient,
+    folder_path: str,
+    filename: str,
+    data: bytes,
+    content_type: str = "application/octet-stream",
+    site_id: str = "",
+    drive_id: str = "",
+    parent_id: str = "",
+    conflict_behavior: str = "replace",
+) -> dict[str, Any]:
+    """Upload bytes through a resumable upload session. Returns the driveItem.
+
+    Fragments go out sequentially because each one must be acknowledged before
+    the next range is valid. A failure mid-way cancels the session so the
+    abandoned upload does not linger in the drive's quota.
+    """
+    _check_session_payload(data)
+    session = client.post(
+        _upload_session_path(folder_path, filename, site_id, drive_id, parent_id),
+        json_data=_upload_session_body(filename, conflict_behavior),
+    )
+    upload_url = _upload_url_from_session(session)
+    total = len(data)
+    result = None
+    try:
+        start = 0
+        while start < total:
+            chunk = data[start : start + UPLOAD_CHUNK_BYTES]
+            result = client.put_range(upload_url, chunk, start, total, content_type)
+            start += len(chunk)
+    except Exception:
+        _cancel_session(client, upload_url)
+        raise
+    return _final_item(result.body if result else None)
+
+
+async def aupload_bytes_session(
+    client: AsyncGraphClient,
+    folder_path: str,
+    filename: str,
+    data: bytes,
+    content_type: str = "application/octet-stream",
+    site_id: str = "",
+    drive_id: str = "",
+    parent_id: str = "",
+    conflict_behavior: str = "replace",
+) -> dict[str, Any]:
+    """Upload bytes through a resumable upload session (async). Returns the driveItem."""
+    _check_session_payload(data)
+    session = await client.post(
+        _upload_session_path(folder_path, filename, site_id, drive_id, parent_id),
+        json_data=_upload_session_body(filename, conflict_behavior),
+    )
+    upload_url = _upload_url_from_session(session)
+    total = len(data)
+    result = None
+    try:
+        start = 0
+        while start < total:
+            chunk = data[start : start + UPLOAD_CHUNK_BYTES]
+            result = await client.put_range(upload_url, chunk, start, total, content_type)
+            start += len(chunk)
+    except Exception:
+        await _acancel_session(client, upload_url)
+        raise
+    return _final_item(result.body if result else None)
+
+
+def _cancel_session(client: GraphClient, upload_url: str) -> None:
+    """Best-effort cancel — the original failure is what the caller must see."""
+    try:
+        client.delete_url(upload_url)
+    except Exception:
+        logger.debug("Could not cancel upload session at %s", upload_url, exc_info=True)
+
+
+async def _acancel_session(client: AsyncGraphClient, upload_url: str) -> None:
+    """Best-effort cancel (async)."""
+    try:
+        await client.delete_url(upload_url)
+    except Exception:
+        logger.debug("Could not cancel upload session at %s", upload_url, exc_info=True)
+
+
+def upload_any(
+    client: GraphClient,
+    folder_path: str,
+    filename: str,
+    data: bytes,
+    content_type: str = "application/octet-stream",
+    site_id: str = "",
+    drive_id: str = "",
+    parent_id: str = "",
+    conflict_behavior: str = "replace",
+) -> dict[str, Any]:
+    """Upload bytes of any size, picking simple upload or an upload session."""
+    if len(data) <= MAX_SIMPLE_UPLOAD_BYTES:
+        url = _simple_upload_path(
+            folder_path, filename, site_id, drive_id, parent_id, conflict_behavior
+        )
+        return client.put(url, content=data, content_type=content_type)
+    return upload_bytes_session(
+        client,
+        folder_path,
+        filename,
+        data,
+        content_type,
+        site_id=site_id,
+        drive_id=drive_id,
+        parent_id=parent_id,
+        conflict_behavior=conflict_behavior,
+    )
+
+
+async def aupload_any(
+    client: AsyncGraphClient,
+    folder_path: str,
+    filename: str,
+    data: bytes,
+    content_type: str = "application/octet-stream",
+    site_id: str = "",
+    drive_id: str = "",
+    parent_id: str = "",
+    conflict_behavior: str = "replace",
+) -> dict[str, Any]:
+    """Upload bytes of any size, picking simple upload or an upload session (async)."""
+    if len(data) <= MAX_SIMPLE_UPLOAD_BYTES:
+        url = _simple_upload_path(
+            folder_path, filename, site_id, drive_id, parent_id, conflict_behavior
+        )
+        return await client.put(url, content=data, content_type=content_type)
+    return await aupload_bytes_session(
+        client,
+        folder_path,
+        filename,
+        data,
+        content_type,
+        site_id=site_id,
+        drive_id=drive_id,
+        parent_id=parent_id,
+        conflict_behavior=conflict_behavior,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sharing-link raw content and thumbnails
+# ---------------------------------------------------------------------------
+
+
+def _check_shared_item(item: dict[str, Any]) -> None:
+    """Refuse folders and oversized files before downloading anything."""
+    if "folder" in item:
+        raise ValueError(
+            f"'{item.get('name', 'item')}' is a folder, not a file; sharing links to "
+            "folders cannot be downloaded."
+        )
+    size = item.get("size", 0)
+    if isinstance(size, int) and size > MAX_DOCUMENT_DOWNLOAD_BYTES:
+        raise ValueError(
+            f"'{item.get('name', 'item')}' is {size:,} bytes, which exceeds the "
+            f"{MAX_DOCUMENT_DOWNLOAD_BYTES:,} byte download limit."
+        )
+
+
+def _check_thumbnail_size(size: str) -> None:
+    """Graph only serves the three named thumbnail sizes."""
+    if size not in _THUMBNAIL_SIZES:
+        raise ValueError(f"size must be 'small', 'medium', or 'large'; got {size!r}")
+
+
+def resolve_sharing_link_bytes(client: GraphClient, url: str) -> tuple[dict[str, Any], bytes]:
+    """Resolve a sharing URL and download the file's raw bytes.
+
+    Returns (item_metadata, raw_bytes). Unlike resolve_sharing_link_content this
+    does not care whether the file is text — attachments are frequently binary.
+    """
+    token = _encode_sharing_url(url.strip())
+    item = client.get(f"/shares/{token}/driveItem")
+    _check_shared_item(item)
+    return item, client.get_bytes(f"/shares/{token}/driveItem/content")
+
+
+async def aresolve_sharing_link_bytes(
+    client: AsyncGraphClient, url: str
+) -> tuple[dict[str, Any], bytes]:
+    """Resolve a sharing URL and download the file's raw bytes (async)."""
+    token = _encode_sharing_url(url.strip())
+    item = await client.get(f"/shares/{token}/driveItem")
+    _check_shared_item(item)
+    return item, await client.get_bytes(f"/shares/{token}/driveItem/content")
+
+
+def get_sharing_link_thumbnail(
+    client: GraphClient, url: str, size: str = "medium"
+) -> tuple[bytes, str] | None:
+    """Fetch a thumbnail for a shared item. None when the item has no thumbnail."""
+    _check_thumbnail_size(size)
+    token = _encode_sharing_url(url.strip())
+    try:
+        return client.get_bytes_with_type(f"/shares/{token}/driveItem/thumbnails/0/{size}/content")
+    except GraphError as e:
+        if e.status_code == 404:
+            return None
+        raise
+
+
+async def aget_sharing_link_thumbnail(
+    client: AsyncGraphClient, url: str, size: str = "medium"
+) -> tuple[bytes, str] | None:
+    """Fetch a thumbnail for a shared item (async). None when there is none."""
+    _check_thumbnail_size(size)
+    token = _encode_sharing_url(url.strip())
+    try:
+        return await client.get_bytes_with_type(
+            f"/shares/{token}/driveItem/thumbnails/0/{size}/content"
+        )
+    except GraphError as e:
+        if e.status_code == 404:
+            return None
+        raise

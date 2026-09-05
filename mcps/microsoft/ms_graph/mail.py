@@ -115,6 +115,20 @@ _HTML_TAG_RE = re.compile(
 
 _VALID_BODY_TYPES = frozenset({"HTML", "Text", "auto"})
 
+# A fileAttachment carries contentBytes by default, so every attachment read
+# must $select explicitly or a listing drags whole files through the wire.
+# Defined here (not in attachments.py) because attachments.py imports mail.
+#
+# contentId lives on the derived fileAttachment type, not on the base
+# attachment type the collection is declared as, so it has to be selected
+# through a type cast. A bare "contentId" is a 400 ("Could not find a property
+# named 'contentId' on type 'microsoft.graph.attachment'") — verified live
+# 2026-09-05 on both the collection and the $expand form.
+ATTACHMENT_LIST_SELECT = (
+    "id,name,contentType,size,isInline,lastModifiedDateTime,"
+    "microsoft.graph.fileAttachment/contentId"
+)
+
 
 def _base(mailbox: str | None) -> str:
     """Graph API path prefix: /users/{mailbox} for shared, /me for own."""
@@ -131,6 +145,38 @@ def _detect_body_type(body: str) -> str:
     'if x<y and z>w' that contain angle brackets but are not HTML.
     """
     return "HTML" if _HTML_TAG_RE.search(body) else "Text"
+
+
+def _build_message_payload(
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    from_address: str | None,
+    body_type: str,
+) -> dict[str, Any]:
+    """Build the Graph message object shared by sendMail and draft creation.
+
+    Optional recipient keys are omitted rather than sent empty because Graph
+    treats an explicit empty ccRecipients differently from an absent one.
+    """
+    if body_type not in _VALID_BODY_TYPES:
+        raise ValueError(f"body_type must be 'HTML', 'Text', or 'auto'; got {body_type!r}")
+    effective_type = _detect_body_type(body) if body_type == "auto" else body_type
+
+    message: dict[str, Any] = {
+        "subject": subject,
+        "body": {"contentType": effective_type, "content": body},
+        "toRecipients": [{"emailAddress": {"address": addr}} for addr in to],
+    }
+    if cc:
+        message["ccRecipients"] = [{"emailAddress": {"address": addr}} for addr in cc]
+    if bcc:
+        message["bccRecipients"] = [{"emailAddress": {"address": addr}} for addr in bcc]
+    if from_address:
+        message["from"] = {"emailAddress": {"address": from_address}}
+    return message
 
 
 def _extract_mailbox_address(odata_context: str) -> str | None:
@@ -227,31 +273,106 @@ def send_message(
     from_address: str | None = None,
     body_type: str = "auto",
     mailbox: str | None = None,
+    attachments: list[Any] | None = None,
 ) -> None:
-    """Send an email message."""
-    if body_type not in _VALID_BODY_TYPES:
-        raise ValueError(f"body_type must be 'HTML', 'Text', or 'auto'; got {body_type!r}")
-    to_recipients = [{"emailAddress": {"address": addr}} for addr in to]
-    cc_recipients = [{"emailAddress": {"address": addr}} for addr in (cc or [])]
-    bcc_recipients = [{"emailAddress": {"address": addr}} for addr in (bcc or [])]
-    effective_type = _detect_body_type(body) if body_type == "auto" else body_type
+    """Send an email message.
 
-    payload: dict[str, Any] = {
-        "message": {
-            "subject": subject,
-            "body": {"contentType": effective_type, "content": body},
-            "toRecipients": to_recipients,
-        },
-        "saveToSentItems": True,
-    }
-    if cc_recipients:
-        payload["message"]["ccRecipients"] = cc_recipients
-    if bcc_recipients:
-        payload["message"]["bccRecipients"] = bcc_recipients
-    if from_address:
-        payload["message"]["from"] = {"emailAddress": {"address": from_address}}
+    With attachments the send goes through a draft (create, attach, send)
+    because sendMail caps the whole request at 4 MB; without them it stays on
+    the single sendMail call. ``attachments`` holds
+    ``attachments.ResolvedAttachment`` values, typed loosely here because that
+    module imports this one.
+    """
+    message = _build_message_payload(to, subject, body, cc, bcc, from_address, body_type)
+    if attachments:
+        _send_via_draft(client, message, attachments, mailbox)
+        return
+    client.post(
+        f"{_base(mailbox)}/sendMail", json_data={"message": message, "saveToSentItems": True}
+    )
 
-    client.post(f"{_base(mailbox)}/sendMail", json_data=payload)
+
+def create_draft(
+    client: GraphClient,
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    from_address: str | None = None,
+    body_type: str = "auto",
+    mailbox: str | None = None,
+) -> dict[str, Any]:
+    """Create a draft message and return it (the ``id`` is what callers attach to)."""
+    message = _build_message_payload(to, subject, body, cc, bcc, from_address, body_type)
+    return client.post(f"{_base(mailbox)}/messages", json_data=message) or {}
+
+
+def _draft_id(draft: dict[str, Any]) -> str:
+    """Every later step needs the draft id, so a draft without one is fatal."""
+    draft_id = draft.get("id", "")
+    if not draft_id:
+        raise GraphError(500, "NoDraftId", "Creating the draft returned no message id")
+    return draft_id
+
+
+def _discard_draft(client: GraphClient, draft_id: str, mailbox: str | None) -> None:
+    """Best-effort cleanup so a failed attach does not leave a half-built draft."""
+    try:
+        client.delete(f"{_base(mailbox)}/messages/{_safe_id(draft_id)}")
+    except Exception:
+        logger.debug("Could not delete draft %s after a failed send", draft_id, exc_info=True)
+
+
+async def _adiscard_draft(client: AsyncGraphClient, draft_id: str, mailbox: str | None) -> None:
+    """Best-effort cleanup (async)."""
+    try:
+        await client.delete(f"{_base(mailbox)}/messages/{_safe_id(draft_id)}")
+    except Exception:
+        logger.debug("Could not delete draft %s after a failed send", draft_id, exc_info=True)
+
+
+def _send_via_draft(
+    client: GraphClient,
+    message: dict[str, Any],
+    attachments: list[Any],
+    mailbox: str | None,
+) -> None:
+    """Create a draft, attach every resolved attachment, then send it."""
+    from . import attachments as attachment_ops  # local import: attachments imports mail
+
+    draft_id = _draft_id(client.post(f"{_base(mailbox)}/messages", json_data=message) or {})
+    try:
+        for att in attachments:
+            attachment_ops.add_file_attachment(
+                client, draft_id, att.name, att.data, att.content_type, mailbox
+            )
+        send_draft(client, draft_id, mailbox=mailbox)
+    except Exception:
+        _discard_draft(client, draft_id, mailbox)
+        raise
+
+
+async def _asend_via_draft(
+    client: AsyncGraphClient,
+    message: dict[str, Any],
+    attachments: list[Any],
+    mailbox: str | None,
+) -> None:
+    """Create a draft, attach every resolved attachment, then send it (async)."""
+    from . import attachments as attachment_ops  # local import: attachments imports mail
+
+    draft = await client.post(f"{_base(mailbox)}/messages", json_data=message) or {}
+    draft_id = _draft_id(draft)
+    try:
+        for att in attachments:
+            await attachment_ops.aadd_file_attachment(
+                client, draft_id, att.name, att.data, att.content_type, mailbox
+            )
+        await asend_draft(client, draft_id, mailbox=mailbox)
+    except Exception:
+        await _adiscard_draft(client, draft_id, mailbox)
+        raise
 
 
 def search_messages(
@@ -356,31 +477,32 @@ async def asend_message(
     from_address: str | None = None,
     body_type: str = "auto",
     mailbox: str | None = None,
+    attachments: list[Any] | None = None,
 ) -> None:
-    """Send an email message (async)."""
-    if body_type not in _VALID_BODY_TYPES:
-        raise ValueError(f"body_type must be 'HTML', 'Text', or 'auto'; got {body_type!r}")
-    to_recipients = [{"emailAddress": {"address": addr}} for addr in to]
-    cc_recipients = [{"emailAddress": {"address": addr}} for addr in (cc or [])]
-    bcc_recipients = [{"emailAddress": {"address": addr}} for addr in (bcc or [])]
-    effective_type = _detect_body_type(body) if body_type == "auto" else body_type
+    """Send an email message (async). See :func:`send_message` for the draft path."""
+    message = _build_message_payload(to, subject, body, cc, bcc, from_address, body_type)
+    if attachments:
+        await _asend_via_draft(client, message, attachments, mailbox)
+        return
+    await client.post(
+        f"{_base(mailbox)}/sendMail", json_data={"message": message, "saveToSentItems": True}
+    )
 
-    payload: dict[str, Any] = {
-        "message": {
-            "subject": subject,
-            "body": {"contentType": effective_type, "content": body},
-            "toRecipients": to_recipients,
-        },
-        "saveToSentItems": True,
-    }
-    if cc_recipients:
-        payload["message"]["ccRecipients"] = cc_recipients
-    if bcc_recipients:
-        payload["message"]["bccRecipients"] = bcc_recipients
-    if from_address:
-        payload["message"]["from"] = {"emailAddress": {"address": from_address}}
 
-    await client.post(f"{_base(mailbox)}/sendMail", json_data=payload)
+async def acreate_draft(
+    client: AsyncGraphClient,
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    from_address: str | None = None,
+    body_type: str = "auto",
+    mailbox: str | None = None,
+) -> dict[str, Any]:
+    """Create a draft message and return it (async)."""
+    message = _build_message_payload(to, subject, body, cc, bcc, from_address, body_type)
+    return (await client.post(f"{_base(mailbox)}/messages", json_data=message)) or {}
 
 
 async def asearch_messages(
@@ -425,6 +547,10 @@ DELTA_SELECT = (
 
 DETAIL_SELECT = "id,uniqueBody,internetMessageHeaders,hasAttachments"
 
+# Expanding attachments here means one round trip for body + attachment
+# metadata, and the inner $select keeps contentBytes out of the response.
+DETAIL_EXPAND = f"attachments($select={ATTACHMENT_LIST_SELECT})"
+
 # Ask Exchange to convert the body server-side so the client never parses HTML.
 _PREFER_TEXT_BODY = 'outlook.body-content-type="text"'
 
@@ -454,9 +580,10 @@ def delta_page(
 
 
 def get_message_detail(client: GraphClient, message_id: str) -> dict[str, Any]:
-    """Fetch a message's plain-text body, internet headers, and attachment flag."""
+    """Fetch a message's plain-text body, headers, attachment flag, and attachment list."""
     return client.get(
-        f"/me/messages/{_safe_id(message_id)}?$select={quote(DETAIL_SELECT)}",
+        f"/me/messages/{_safe_id(message_id)}"
+        f"?$select={quote(DETAIL_SELECT)}&$expand={quote(DETAIL_EXPAND)}",
         headers={"Prefer": _PREFER_TEXT_BODY},
     )
 
@@ -488,9 +615,9 @@ def update_draft_body(client: GraphClient, draft_id: str, text: str) -> dict[str
     )
 
 
-def send_draft(client: GraphClient, draft_id: str) -> None:
+def send_draft(client: GraphClient, draft_id: str, mailbox: str | None = None) -> None:
     """Send an existing draft. Graph answers 202 with no body."""
-    client.post(f"/me/messages/{_safe_id(draft_id)}/send")
+    client.post(f"{_base(mailbox)}/messages/{_safe_id(draft_id)}/send")
 
 
 async def adelta_page(
@@ -506,9 +633,10 @@ async def adelta_page(
 
 
 async def aget_message_detail(client: AsyncGraphClient, message_id: str) -> dict[str, Any]:
-    """Fetch a message's plain-text body, internet headers, and attachment flag (async)."""
+    """Fetch a message's body, headers, attachment flag, and attachment list (async)."""
     return await client.get(
-        f"/me/messages/{_safe_id(message_id)}?$select={quote(DETAIL_SELECT)}",
+        f"/me/messages/{_safe_id(message_id)}"
+        f"?$select={quote(DETAIL_SELECT)}&$expand={quote(DETAIL_EXPAND)}",
         headers={"Prefer": _PREFER_TEXT_BODY},
     )
 
@@ -541,6 +669,6 @@ async def aupdate_draft_body(client: AsyncGraphClient, draft_id: str, text: str)
     )
 
 
-async def asend_draft(client: AsyncGraphClient, draft_id: str) -> None:
+async def asend_draft(client: AsyncGraphClient, draft_id: str, mailbox: str | None = None) -> None:
     """Send an existing draft (async). Graph answers 202 with no body."""
-    await client.post(f"/me/messages/{_safe_id(draft_id)}/send")
+    await client.post(f"{_base(mailbox)}/messages/{_safe_id(draft_id)}/send")

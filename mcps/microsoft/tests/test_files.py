@@ -23,6 +23,8 @@ from .conftest import (
     SAMPLE_DRIVE_ITEM_FOLDER,
     SAMPLE_DRIVE_ITEM_LARGE_TEXT,
     SAMPLE_DRIVE_ITEM_WORD,
+    SAMPLE_DRIVE_UPLOAD_SESSION,
+    SAMPLE_DRIVE_UPLOAD_URL,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_EMPTY,
     SAMPLE_SHARED_DRIVE_ITEM,
@@ -1313,3 +1315,402 @@ class TestDocumentExtractionIntegration:
         assert item["name"] == "report.docx"
         assert content is not None
         assert "Integration Test" in content
+
+
+# ---------------------------------------------------------------------------
+# Upload sessions
+# ---------------------------------------------------------------------------
+
+_SESSION_URL = f"{GRAPH_BASE_URL}/me/drive/root:/Attachments/big.bin:/createUploadSession"
+
+
+def _ranges(route):
+    """Content-Range headers of every fragment PUT, in order."""
+    return [call.request.headers["content-range"] for call in route.calls]
+
+
+class TestUploadSessionAsync:
+    """aupload_bytes_session drives a resumable upload."""
+
+    @respx.mock
+    async def test_uploads_every_fragment_in_order(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 4)
+        session = respx.post(_SESSION_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION)
+        )
+        put = respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(202, json={"nextExpectedRanges": ["4-9"]}),
+                httpx.Response(202, json={"nextExpectedRanges": ["8-9"]}),
+                httpx.Response(201, json=SAMPLE_UPLOADED_FILE),
+            ]
+        )
+        async with AsyncGraphClient("tok") as client:
+            item = await files.aupload_bytes_session(
+                client, "Attachments", "big.bin", b"0123456789"
+            )
+
+        assert item["id"] == SAMPLE_UPLOADED_FILE["id"]
+        assert put.call_count == 3
+        assert _ranges(put) == ["bytes 0-3/10", "bytes 4-7/10", "bytes 8-9/10"]
+        assert json.loads(session.calls[0].request.content) == {
+            "item": {"@microsoft.graph.conflictBehavior": "replace", "name": "big.bin"}
+        }
+        assert b"0123" == put.calls[0].request.content
+
+    @respx.mock
+    async def test_fragment_failure_cancels_session_and_reraises(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 4)
+        respx.post(_SESSION_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION)
+        )
+        respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(202, json={"nextExpectedRanges": ["4-9"]}),
+                httpx.Response(500, json={"error": {"code": "ServiceError"}}),
+            ]
+        )
+        cancel = respx.delete(SAMPLE_DRIVE_UPLOAD_URL).mock(return_value=httpx.Response(204))
+
+        with pytest.raises(GraphError) as exc:
+            async with AsyncGraphClient("tok") as client:
+                await files.aupload_bytes_session(client, "Attachments", "big.bin", b"0123456789")
+
+        assert exc.value.status_code == 500
+        assert cancel.call_count == 1
+
+    @respx.mock
+    async def test_cancel_failure_does_not_mask_the_original_error(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 4)
+        respx.post(_SESSION_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION)
+        )
+        respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            return_value=httpx.Response(500, json={"error": {"code": "ServiceError"}})
+        )
+        respx.delete(SAMPLE_DRIVE_UPLOAD_URL).mock(return_value=httpx.Response(404, json={}))
+
+        with pytest.raises(GraphError) as exc:
+            async with AsyncGraphClient("tok") as client:
+                await files.aupload_bytes_session(client, "Attachments", "big.bin", b"0123456789")
+
+        assert exc.value.status_code == 500
+
+    @respx.mock
+    async def test_session_without_upload_url_raises(self):
+        respx.post(_SESSION_URL).mock(return_value=httpx.Response(200, json={}))
+        with pytest.raises(GraphError) as exc:
+            async with AsyncGraphClient("tok") as client:
+                await files.aupload_bytes_session(client, "Attachments", "big.bin", b"data")
+
+        assert exc.value.error_code == "NoUploadUrl"
+
+    async def test_empty_payload_is_refused(self):
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="empty content"):
+                await files.aupload_bytes_session(client, "Attachments", "big.bin", b"")
+
+    @respx.mock
+    async def test_parent_id_uses_item_path(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 16)
+        session = respx.post(
+            f"{GRAPH_BASE_URL}/drives/drive-001/items/parent-9:/big.bin:/createUploadSession"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION))
+        respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await files.aupload_bytes_session(
+                client,
+                "",
+                "big.bin",
+                b"0123456789",
+                drive_id="drive-001",
+                parent_id="parent-9",
+                conflict_behavior="rename",
+            )
+
+        assert session.called
+        assert (
+            json.loads(session.calls[0].request.content)["item"][
+                "@microsoft.graph.conflictBehavior"
+            ]
+            == "rename"
+        )
+
+    @respx.mock
+    async def test_root_path_form_without_folder(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 16)
+        session = respx.post(f"{GRAPH_BASE_URL}/me/drive/root:/big.bin:/createUploadSession").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION)
+        )
+        respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_UPLOADED_FILE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await files.aupload_bytes_session(client, "", "big.bin", b"0123456789")
+
+        assert session.called
+
+
+class TestUploadSessionSync:
+    """Synchronous twin of the session upload."""
+
+    @respx.mock
+    def test_uploads_every_fragment_in_order(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 4)
+        respx.post(_SESSION_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION)
+        )
+        put = respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(202, json={"nextExpectedRanges": ["4-9"]}),
+                httpx.Response(202, json={"nextExpectedRanges": ["8-9"]}),
+                httpx.Response(201, json=SAMPLE_UPLOADED_FILE),
+            ]
+        )
+        with GraphClient("tok") as client:
+            item = files.upload_bytes_session(client, "Attachments", "big.bin", b"0123456789")
+
+        assert item["id"] == SAMPLE_UPLOADED_FILE["id"]
+        assert _ranges(put) == ["bytes 0-3/10", "bytes 4-7/10", "bytes 8-9/10"]
+
+    @respx.mock
+    def test_fragment_failure_cancels_session(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 4)
+        respx.post(_SESSION_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION)
+        )
+        respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            return_value=httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        )
+        cancel = respx.delete(SAMPLE_DRIVE_UPLOAD_URL).mock(return_value=httpx.Response(204))
+
+        with pytest.raises(GraphError):
+            with GraphClient("tok") as client:
+                files.upload_bytes_session(client, "Attachments", "big.bin", b"0123456789")
+
+        assert cancel.call_count == 1
+
+
+class TestUploadAny:
+    """upload_any picks simple upload or a session at the 4 MB boundary."""
+
+    @respx.mock
+    async def test_at_the_limit_uses_simple_put(self, monkeypatch):
+        monkeypatch.setattr(files, "MAX_SIMPLE_UPLOAD_BYTES", 5)
+        simple = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/Attachments/big.bin:/content").mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item = await files.aupload_any(client, "Attachments", "big.bin", b"01234")
+
+        assert item["id"] == SAMPLE_UPLOADED_FILE["id"]
+        assert simple.call_count == 1
+        assert simple.calls[0].request.headers["Content-Type"] == "application/octet-stream"
+
+    @respx.mock
+    async def test_one_byte_over_the_limit_uses_a_session(self, monkeypatch):
+        monkeypatch.setattr(files, "MAX_SIMPLE_UPLOAD_BYTES", 5)
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 4)
+        session = respx.post(_SESSION_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION)
+        )
+        put = respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(202, json={"nextExpectedRanges": ["4-5"]}),
+                httpx.Response(201, json=SAMPLE_UPLOADED_FILE),
+            ]
+        )
+        async with AsyncGraphClient("tok") as client:
+            await files.aupload_any(client, "Attachments", "big.bin", b"012345")
+
+        assert session.call_count == 1
+        assert _ranges(put) == ["bytes 0-3/6", "bytes 4-5/6"]
+
+    @respx.mock
+    async def test_conflict_behavior_is_a_query_param_only_when_not_replace(self):
+        route = respx.put(
+            url__startswith=f"{GRAPH_BASE_URL}/me/drive/root:/Attachments/note.txt:/content"
+        ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
+        async with AsyncGraphClient("tok") as client:
+            await files.aupload_any(client, "Attachments", "note.txt", b"hi")
+            await files.aupload_any(
+                client, "Attachments", "note.txt", b"hi", conflict_behavior="rename"
+            )
+
+        assert "conflictBehavior" not in str(route.calls[0].request.url)
+        assert "@microsoft.graph.conflictBehavior=rename" in str(route.calls[1].request.url)
+
+    @respx.mock
+    async def test_parent_id_simple_upload_path(self):
+        route = respx.put(
+            f"{GRAPH_BASE_URL}/drives/drive-001/items/parent-9:/note.txt:/content"
+        ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
+        async with AsyncGraphClient("tok") as client:
+            await files.aupload_any(
+                client, "", "note.txt", b"hi", drive_id="drive-001", parent_id="parent-9"
+            )
+
+        assert route.called
+
+    @respx.mock
+    def test_sync_simple_upload(self):
+        route = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/note.txt:/content").mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
+        with GraphClient("tok") as client:
+            files.upload_any(client, "", "note.txt", b"hi", content_type="text/plain")
+
+        assert route.calls[0].request.headers["Content-Type"] == "text/plain"
+
+
+# ---------------------------------------------------------------------------
+# Sharing-link bytes and thumbnails
+# ---------------------------------------------------------------------------
+
+
+class TestSharingLinkBytes:
+    """resolve_sharing_link_bytes downloads any file, text or binary."""
+
+    @respx.mock
+    async def test_returns_item_and_bytes(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_DRIVE_ITEM)
+        )
+        respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=b"PPTXBYTES")
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, data = await files.aresolve_sharing_link_bytes(client, SAMPLE_SHARING_URL)
+
+        assert item["name"] == "Q4-Presentation.pptx"
+        assert data == b"PPTXBYTES"
+
+    @respx.mock
+    async def test_folder_is_refused(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FOLDER)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="folder"):
+                await files.aresolve_sharing_link_bytes(client, SAMPLE_SHARING_URL)
+
+    @respx.mock
+    async def test_over_cap_is_refused(self):
+        huge = {**SAMPLE_SHARED_DRIVE_ITEM, "size": 60_000_000}
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=huge)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="exceeds"):
+                await files.aresolve_sharing_link_bytes(client, SAMPLE_SHARING_URL)
+
+    @respx.mock
+    def test_sync_returns_item_and_bytes(self):
+        respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_TEXT_FILE)
+        )
+        respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=b"# notes")
+        )
+        with GraphClient("tok") as client:
+            item, data = files.resolve_sharing_link_bytes(client, SAMPLE_SHARING_URL)
+
+        assert (item["name"], data) == ("notes.md", b"# notes")
+
+
+class TestSharingLinkThumbnail:
+    """Thumbnails answer with bytes plus a content type, or nothing at all."""
+
+    @respx.mock
+    async def test_returns_bytes_and_type(self):
+        route = respx.get(url__regex=r"/shares/u!.*/driveItem/thumbnails/0/medium/content$").mock(
+            return_value=httpx.Response(
+                200, content=b"THUMB", headers={"Content-Type": "image/jpeg"}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await files.aget_sharing_link_thumbnail(client, SAMPLE_SHARING_URL)
+
+        assert result == (b"THUMB", "image/jpeg")
+        assert route.called
+
+    @respx.mock
+    async def test_404_means_no_thumbnail(self):
+        respx.get(url__regex=r"/shares/u!.*/thumbnails/0/large/content$").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert (
+                await files.aget_sharing_link_thumbnail(client, SAMPLE_SHARING_URL, size="large")
+                is None
+            )
+
+    @respx.mock
+    async def test_other_errors_propagate(self):
+        respx.get(url__regex=r"/shares/u!.*/thumbnails/0/small/content$").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await files.aget_sharing_link_thumbnail(client, SAMPLE_SHARING_URL, size="small")
+
+        assert exc.value.status_code == 403
+
+    async def test_bad_size_is_refused_before_any_request(self):
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="small"):
+                await files.aget_sharing_link_thumbnail(client, SAMPLE_SHARING_URL, size="huge")
+
+    @respx.mock
+    def test_sync_returns_bytes_and_type(self):
+        respx.get(url__regex=r"/shares/u!.*/thumbnails/0/medium/content$").mock(
+            return_value=httpx.Response(
+                200, content=b"THUMB", headers={"Content-Type": "image/jpeg"}
+            )
+        )
+        with GraphClient("tok") as client:
+            assert files.get_sharing_link_thumbnail(client, SAMPLE_SHARING_URL) == (
+                b"THUMB",
+                "image/jpeg",
+            )
+
+    def test_sync_bad_size_is_refused(self):
+        with GraphClient("tok") as client:
+            with pytest.raises(ValueError):
+                files.get_sharing_link_thumbnail(client, SAMPLE_SHARING_URL, size="tiny")
+
+
+class TestUploadPathEncoding:
+    """Names from callers may carry '#', '?' or spaces; the path form must survive them."""
+
+    @respx.mock
+    async def test_simple_upload_encodes_file_and_folder_names(self):
+        route = respx.put(
+            f"{GRAPH_BASE_URL}/me/drive/root:/Team%20Files/Q3%20%231%3F.pdf:/content"
+        ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
+        async with AsyncGraphClient("tok") as client:
+            await files.aupload_any(client, "Team Files", "Q3 #1?.pdf", b"%PDF")
+
+        assert route.called
+
+    @respx.mock
+    async def test_session_path_encodes_file_name(self, monkeypatch):
+        monkeypatch.setattr(files, "UPLOAD_CHUNK_BYTES", 16)
+        session = respx.post(
+            f"{GRAPH_BASE_URL}/me/drive/root:/a%23b.bin:/createUploadSession"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_DRIVE_UPLOAD_SESSION))
+        respx.put(SAMPLE_DRIVE_UPLOAD_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await files.aupload_bytes_session(client, "", "a#b.bin", b"0123456789")
+
+        assert session.called
+
+    def test_slashes_stay_in_folders_and_leave_file_names(self):
+        assert files._path_segments("/Shared Documents/Sub/", "x/y.txt") == (
+            "Shared%20Documents/Sub",
+            "x%2Fy.txt",
+        )

@@ -6,8 +6,9 @@ import httpx
 import pytest
 import respx
 from ms_graph import mail
+from ms_graph.attachments import ResolvedAttachment
 from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
-from ms_graph.mail import _base, _detect_body_type
+from ms_graph.mail import _base, _build_message_payload, _detect_body_type
 
 from .conftest import (
     GRAPH_ERROR_400,
@@ -15,10 +16,12 @@ from .conftest import (
     GRAPH_ERROR_404,
     GRAPH_ERROR_410,
     SAMPLE_AWKWARD_MESSAGE_ID,
+    SAMPLE_CREATED_ATTACHMENT,
     SAMPLE_DELTA_LINK,
     SAMPLE_DELTA_NEXT_LINK,
     SAMPLE_DELTA_PAGE_FINAL,
     SAMPLE_DELTA_PAGE_NEXT,
+    SAMPLE_DRAFT_MESSAGE,
     SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
     SAMPLE_MESSAGE_2,
@@ -1061,6 +1064,10 @@ class TestGetMessageDetailSync:
         req = route.calls[0].request
         assert req.headers["prefer"] == 'outlook.body-content-type="text"'
         assert "$select=id%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments" in str(req.url)
+        # One round trip carries the attachment metadata, and never contentBytes.
+        assert "$expand=attachments%28%24select%3D" in str(req.url)
+        assert "contentId" in str(req.url)
+        assert "contentBytes" not in str(req.url)
 
     @respx.mock
     def test_message_id_is_url_encoded(self):
@@ -1086,6 +1093,8 @@ class TestGetMessageDetailAsync:
 
         assert data == SAMPLE_MESSAGE_DETAIL
         assert route.calls[0].request.headers["prefer"] == 'outlook.body-content-type="text"'
+        assert "$expand=attachments%28%24select%3D" in str(route.calls[0].request.url)
+        assert "contentBytes" not in str(route.calls[0].request.url)
 
 
 class TestCreateReplyDraftSync:
@@ -1567,3 +1576,292 @@ class TestSharedMailboxAsync:
             await mail.alist_messages(client, mailbox=None)
 
         assert route.called
+
+
+_DRAFT_ID = SAMPLE_DRAFT_MESSAGE["id"]
+_DRAFT_URL = f"{GRAPH_BASE_URL}/me/messages/AAMkAGI2draft777%3D"
+
+
+class TestBuildMessagePayload:
+    """The payload builder is shared by sendMail and draft creation."""
+
+    def test_minimal_payload(self):
+        payload = _build_message_payload(
+            ["alice@example.com"], "Hello", "Hi Alice!", None, None, None, "auto"
+        )
+        assert payload == {
+            "subject": "Hello",
+            "body": {"contentType": "Text", "content": "Hi Alice!"},
+            "toRecipients": [{"emailAddress": {"address": "alice@example.com"}}],
+        }
+
+    def test_optional_recipients_are_omitted_when_empty(self):
+        payload = _build_message_payload(["a@x.com"], "s", "b", [], [], None, "auto")
+        assert "ccRecipients" not in payload
+        assert "bccRecipients" not in payload
+        assert "from" not in payload
+
+    def test_optional_recipients_are_included_when_given(self):
+        payload = _build_message_payload(
+            ["a@x.com"], "s", "b", ["c@x.com"], ["d@x.com"], "shared@x.com", "auto"
+        )
+        assert payload["ccRecipients"] == [{"emailAddress": {"address": "c@x.com"}}]
+        assert payload["bccRecipients"] == [{"emailAddress": {"address": "d@x.com"}}]
+        assert payload["from"] == {"emailAddress": {"address": "shared@x.com"}}
+
+    def test_html_is_detected(self):
+        payload = _build_message_payload(["a@x.com"], "s", "<p>hi</p>", None, None, None, "auto")
+        assert payload["body"]["contentType"] == "HTML"
+
+    def test_explicit_body_type_wins(self):
+        payload = _build_message_payload(["a@x.com"], "s", "<p>hi</p>", None, None, None, "Text")
+        assert payload["body"]["contentType"] == "Text"
+
+    def test_invalid_body_type_raises(self):
+        with pytest.raises(ValueError, match="body_type"):
+            _build_message_payload(["a@x.com"], "s", "b", None, None, None, "markdown")
+
+    @respx.mock
+    def test_matches_what_send_message_posts(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        with GraphClient("tok") as client:
+            mail.send_message(
+                client,
+                to=["alice@example.com"],
+                subject="Hello",
+                body="Hi!",
+                cc=["bob@example.com"],
+                from_address="shared@example.com",
+            )
+
+        posted = json.loads(route.calls[0].request.content)
+        assert posted == {
+            "message": _build_message_payload(
+                ["alice@example.com"],
+                "Hello",
+                "Hi!",
+                ["bob@example.com"],
+                None,
+                "shared@example.com",
+                "auto",
+            ),
+            "saveToSentItems": True,
+        }
+
+
+class TestCreateDraft:
+    """create_draft posts the message object to the messages collection."""
+
+    @respx.mock
+    def test_posts_to_me_messages(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        with GraphClient("tok") as client:
+            draft = mail.create_draft(client, ["alice@example.com"], "Hello", "Hi!")
+
+        assert draft["id"] == _DRAFT_ID
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["subject"] == "Hello"
+        assert "saveToSentItems" not in payload
+
+    @respx.mock
+    async def test_async_posts_to_shared_mailbox(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/users/shared@example.com/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            draft = await mail.acreate_draft(
+                client, ["alice@example.com"], "Hello", "Hi!", mailbox="shared@example.com"
+            )
+
+        assert draft["id"] == _DRAFT_ID
+        assert route.called
+
+    @respx.mock
+    async def test_async_empty_response_becomes_empty_dict(self):
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(return_value=httpx.Response(202))
+        async with AsyncGraphClient("tok") as client:
+            assert await mail.acreate_draft(client, ["a@x.com"], "s", "b") == {}
+
+
+class TestSendMessageWithAttachments:
+    """With attachments the send goes create-draft -> attach -> send."""
+
+    @respx.mock
+    async def test_async_uses_the_draft_path(self):
+        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        attach = respx.post(f"{_DRAFT_URL}/attachments").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CREATED_ATTACHMENT)
+        )
+        send = respx.post(f"{_DRAFT_URL}/send").mock(return_value=httpx.Response(202))
+
+        async with AsyncGraphClient("tok") as client:
+            await mail.asend_message(
+                client,
+                to=["alice@example.com"],
+                subject="Hello",
+                body="Hi!",
+                attachments=[
+                    ResolvedAttachment("notes.txt", b"hello", "text/plain"),
+                    ResolvedAttachment("data.csv", b"a,b", "text/csv"),
+                ],
+            )
+
+        assert create.call_count == 1
+        assert attach.call_count == 2
+        assert send.call_count == 1
+        assert not send_mail.called
+        assert json.loads(attach.calls[0].request.content)["name"] == "notes.txt"
+        assert json.loads(attach.calls[1].request.content)["name"] == "data.csv"
+
+    @respx.mock
+    async def test_async_without_attachments_still_uses_send_mail(self):
+        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.asend_message(
+                client, to=["alice@example.com"], subject="Hello", body="Hi!", attachments=[]
+            )
+
+        assert send_mail.call_count == 1
+        assert not create.called
+
+    @respx.mock
+    async def test_async_attach_failure_deletes_the_draft(self):
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        respx.post(f"{_DRAFT_URL}/attachments").mock(
+            return_value=httpx.Response(507, json={"error": {"code": "QuotaExceeded"}})
+        )
+        send = respx.post(f"{_DRAFT_URL}/send").mock(return_value=httpx.Response(202))
+        delete = respx.delete(_DRAFT_URL).mock(return_value=httpx.Response(204))
+
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await mail.asend_message(
+                    client,
+                    to=["alice@example.com"],
+                    subject="Hello",
+                    body="Hi!",
+                    attachments=[ResolvedAttachment("notes.txt", b"hello", "text/plain")],
+                )
+
+        assert exc.value.status_code == 507
+        assert delete.call_count == 1
+        assert not send.called
+
+    @respx.mock
+    async def test_async_cleanup_failure_does_not_mask_the_error(self):
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        respx.post(f"{_DRAFT_URL}/attachments").mock(
+            return_value=httpx.Response(507, json={"error": {"code": "QuotaExceeded"}})
+        )
+        respx.delete(_DRAFT_URL).mock(return_value=httpx.Response(500, json={}))
+
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await mail.asend_message(
+                    client,
+                    to=["a@x.com"],
+                    subject="s",
+                    body="b",
+                    attachments=[ResolvedAttachment("notes.txt", b"hello", "text/plain")],
+                )
+
+        assert exc.value.status_code == 507
+
+    @respx.mock
+    async def test_async_draft_without_id_raises(self):
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(return_value=httpx.Response(201, json={}))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await mail.asend_message(
+                    client,
+                    to=["a@x.com"],
+                    subject="s",
+                    body="b",
+                    attachments=[ResolvedAttachment("notes.txt", b"hello", "text/plain")],
+                )
+
+        assert exc.value.error_code == "NoDraftId"
+
+    @respx.mock
+    def test_sync_uses_the_draft_path(self):
+        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        attach = respx.post(f"{_DRAFT_URL}/attachments").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CREATED_ATTACHMENT)
+        )
+        send = respx.post(f"{_DRAFT_URL}/send").mock(return_value=httpx.Response(202))
+
+        with GraphClient("tok") as client:
+            mail.send_message(
+                client,
+                to=["alice@example.com"],
+                subject="Hello",
+                body="Hi!",
+                attachments=[ResolvedAttachment("notes.txt", b"hello", "text/plain")],
+            )
+
+        assert (create.call_count, attach.call_count, send.call_count) == (1, 1, 1)
+        assert not send_mail.called
+
+    @respx.mock
+    def test_sync_attach_failure_deletes_the_draft(self):
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        )
+        respx.post(f"{_DRAFT_URL}/attachments").mock(
+            return_value=httpx.Response(403, json={"error": {"code": "AccessDenied"}})
+        )
+        delete = respx.delete(_DRAFT_URL).mock(return_value=httpx.Response(204))
+
+        with pytest.raises(GraphError):
+            with GraphClient("tok") as client:
+                mail.send_message(
+                    client,
+                    to=["a@x.com"],
+                    subject="s",
+                    body="b",
+                    attachments=[ResolvedAttachment("notes.txt", b"hello", "text/plain")],
+                )
+
+        assert delete.call_count == 1
+
+    @respx.mock
+    async def test_shared_mailbox_draft_path_routes_through_users(self):
+        base = f"{GRAPH_BASE_URL}/users/shared@example.com/messages"
+        create = respx.post(base).mock(return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE))
+        attach = respx.post(f"{base}/AAMkAGI2draft777%3D/attachments").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CREATED_ATTACHMENT)
+        )
+        send = respx.post(f"{base}/AAMkAGI2draft777%3D/send").mock(return_value=httpx.Response(202))
+
+        async with AsyncGraphClient("tok") as client:
+            await mail.asend_message(
+                client,
+                to=["a@x.com"],
+                subject="s",
+                body="b",
+                mailbox="shared@example.com",
+                attachments=[ResolvedAttachment("notes.txt", b"hello", "text/plain")],
+            )
+
+        assert (create.call_count, attach.call_count, send.call_count) == (1, 1, 1)

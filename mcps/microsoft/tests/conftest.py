@@ -896,3 +896,106 @@ SAMPLE_CHAT_MESSAGES_PAGE = {
         SAMPLE_CHAT_MESSAGE_SYSTEM,
     ]
 }
+
+
+# ---------------------------------------------------------------------------
+# Attachments (mail attachment metadata, upload sessions, sink payloads)
+# ---------------------------------------------------------------------------
+
+SAMPLE_FILE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAttachFile001=",
+    "name": "report.pdf",
+    "contentType": "application/pdf",
+    "size": 1_258_291,
+    "isInline": False,
+    "contentId": None,
+    "lastModifiedDateTime": "2025-12-15T10:30:00Z",
+}
+
+SAMPLE_INLINE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAttachInline002=",
+    "name": "logo.png",
+    "contentType": "image/png",
+    "size": 4096,
+    "isInline": True,
+    "contentId": "logo@company",
+    "lastModifiedDateTime": "2025-12-15T10:30:00Z",
+}
+
+SAMPLE_ITEM_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.itemAttachment",
+    "id": "AAMkAttachItem003=",
+    "name": "FW: Budget",
+    "contentType": None,
+    "size": 32_768,
+    "isInline": False,
+    "lastModifiedDateTime": "2025-12-15T10:30:00Z",
+}
+
+SAMPLE_REFERENCE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.referenceAttachment",
+    "id": "AAMkAttachRef004=",
+    "name": "Q4 Plan.docx",
+    "contentType": None,
+    "size": 0,
+    "isInline": False,
+    "sourceUrl": "https://contoso.sharepoint.com/:w:/s/team/Q4Plan",
+}
+
+SAMPLE_ATTACHMENTS_RESPONSE = {
+    "value": [SAMPLE_FILE_ATTACHMENT, SAMPLE_INLINE_ATTACHMENT, SAMPLE_REFERENCE_ATTACHMENT]
+}
+
+SAMPLE_ATTACHMENTS_NEXT_LINK = (
+    "https://graph.microsoft.com/v1.0/me/messages/AAMkAGI2TG93AAA%3D/attachments"
+    "?$skiptoken=attach%2Bskip"
+)
+
+SAMPLE_ATTACHMENTS_PAGE_NEXT = {
+    "value": [SAMPLE_FILE_ATTACHMENT],
+    "@odata.nextLink": SAMPLE_ATTACHMENTS_NEXT_LINK,
+}
+
+SAMPLE_ATTACHMENTS_PAGE_FINAL = {"value": [SAMPLE_REFERENCE_ATTACHMENT]}
+
+SAMPLE_CREATED_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAttachNew005=",
+    "name": "notes.txt",
+    "contentType": "text/plain",
+    "size": 11,
+}
+
+# Outlook attachment upload sessions live on outlook.office.com and are
+# pre-authenticated; OneDrive sessions live on an up.*.1drv.com host.
+SAMPLE_ATTACHMENT_UPLOAD_URL = (
+    "https://outlook.office.com/api/v2.0/Users('user-id-001')/Messages('msg-1')"
+    "/AttachmentSessions('sess-1')?authtoken=abc"
+)
+
+SAMPLE_ATTACHMENT_UPLOAD_SESSION = {
+    "uploadUrl": SAMPLE_ATTACHMENT_UPLOAD_URL,
+    "expirationDateTime": "2025-12-16T10:30:00Z",
+    "nextExpectedRanges": ["0"],
+}
+
+SAMPLE_ATTACHMENT_LOCATION = (
+    "https://outlook.office.com/api/v2.0/Users('user-id-001')/Messages('msg-1')"
+    "/Attachments('AAMkAttachBig006%3D')"
+)
+
+SAMPLE_DRIVE_UPLOAD_URL = "https://sn3302.up.1drv.com/up/abcdef0123456789"
+
+SAMPLE_DRIVE_UPLOAD_SESSION = {
+    "uploadUrl": SAMPLE_DRIVE_UPLOAD_URL,
+    "expirationDateTime": "2025-12-16T10:30:00Z",
+}
+
+SAMPLE_DRAFT_MESSAGE = {
+    "id": "AAMkAGI2draft777=",
+    "isDraft": True,
+    "subject": "Hello",
+    "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft777",
+}
