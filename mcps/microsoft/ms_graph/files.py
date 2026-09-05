@@ -1147,24 +1147,35 @@ def _check_thumbnail_size(size: str) -> None:
         raise ValueError(f"size must be 'small', 'medium', or 'large'; got {size!r}")
 
 
-def resolve_sharing_link_bytes(client: GraphClient, url: str) -> tuple[dict[str, Any], bytes]:
+def resolve_sharing_link_bytes(
+    client: GraphClient, url: str, item: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], bytes]:
     """Resolve a sharing URL and download the file's raw bytes.
 
     Returns (item_metadata, raw_bytes). Unlike resolve_sharing_link_content this
     does not care whether the file is text — attachments are frequently binary.
+    Pass ``item`` when the caller already fetched the driveItem (to decide size
+    or folder before downloading): the metadata GET is then skipped, but the
+    folder and size guards still run.
     """
     token = _encode_sharing_url(url.strip())
-    item = client.get(f"/shares/{token}/driveItem")
+    if item is None:
+        item = client.get(f"/shares/{token}/driveItem")
     _check_shared_item(item)
     return item, client.get_bytes(f"/shares/{token}/driveItem/content")
 
 
 async def aresolve_sharing_link_bytes(
-    client: AsyncGraphClient, url: str
+    client: AsyncGraphClient, url: str, item: dict[str, Any] | None = None
 ) -> tuple[dict[str, Any], bytes]:
-    """Resolve a sharing URL and download the file's raw bytes (async)."""
+    """Resolve a sharing URL and download the file's raw bytes (async).
+
+    ``item`` reuses a driveItem the caller already fetched instead of asking
+    Graph for it twice; the folder and size guards still run against it.
+    """
     token = _encode_sharing_url(url.strip())
-    item = await client.get(f"/shares/{token}/driveItem")
+    if item is None:
+        item = await client.get(f"/shares/{token}/driveItem")
     _check_shared_item(item)
     return item, await client.get_bytes(f"/shares/{token}/driveItem/content")
 

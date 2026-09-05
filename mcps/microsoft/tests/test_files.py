@@ -32,6 +32,7 @@ from .conftest import (
     SAMPLE_SHARED_TEXT_FILE,
     SAMPLE_SITE,
     SAMPLE_SITES_RESPONSE,
+    SAMPLE_TEAMS_DRIVE_ITEM,
     SAMPLE_UPLOADED_FILE,
 )
 
@@ -1618,6 +1619,55 @@ class TestSharingLinkBytes:
             item, data = files.resolve_sharing_link_bytes(client, SAMPLE_SHARING_URL)
 
         assert (item["name"], data) == ("notes.md", b"# notes")
+
+
+class TestSharingLinkBytesWithKnownItem:
+    """A caller that already fetched the driveItem must not pay for it twice."""
+
+    @respx.mock
+    async def test_async_skips_the_metadata_request(self):
+        meta = respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_TEAMS_DRIVE_ITEM)
+        )
+        respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=b"PPTXBYTES")
+        )
+        async with AsyncGraphClient("tok") as client:
+            item, data = await files.aresolve_sharing_link_bytes(
+                client, SAMPLE_SHARING_URL, item=SAMPLE_TEAMS_DRIVE_ITEM
+            )
+
+        assert not meta.called
+        assert (item, data) == (SAMPLE_TEAMS_DRIVE_ITEM, b"PPTXBYTES")
+
+    @respx.mock
+    def test_sync_skips_the_metadata_request(self):
+        meta = respx.get(url__regex=r"/shares/u!.*/driveItem$").mock(
+            return_value=httpx.Response(200, json=SAMPLE_TEAMS_DRIVE_ITEM)
+        )
+        respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=b"PPTXBYTES")
+        )
+        with GraphClient("tok") as client:
+            item, data = files.resolve_sharing_link_bytes(
+                client, SAMPLE_SHARING_URL, item=SAMPLE_TEAMS_DRIVE_ITEM
+            )
+
+        assert not meta.called
+        assert (item, data) == (SAMPLE_TEAMS_DRIVE_ITEM, b"PPTXBYTES")
+
+    @respx.mock
+    async def test_a_supplied_folder_is_still_refused(self):
+        content = respx.get(url__regex=r"/shares/u!.*/driveItem/content$").mock(
+            return_value=httpx.Response(200, content=b"never")
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="folder"):
+                await files.aresolve_sharing_link_bytes(
+                    client, SAMPLE_SHARING_URL, item=SAMPLE_DRIVE_ITEM_FOLDER
+                )
+
+        assert not content.called
 
 
 class TestSharingLinkThumbnail:

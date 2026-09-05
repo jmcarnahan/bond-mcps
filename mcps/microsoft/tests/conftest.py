@@ -887,6 +887,126 @@ SAMPLE_CHAT_MESSAGES_PAGE = {
 
 
 # ---------------------------------------------------------------------------
+# Teams attachments (shared files, inline images, cards)
+# ---------------------------------------------------------------------------
+
+TEAMS_FILE_ATTACHMENT_ID = "6a1b2c3d-1111-2222-3333-444455556666"
+TEAMS_FILE_URL = (
+    "https://contoso-my.sharepoint.com/personal/alice_contoso_com/Documents/"
+    "Microsoft Teams Chat Files/roadmap.pptx"
+)
+TEAMS_HOSTED_ID = "aWQ9eF8wLWN1cy1kMS0xMjM0NTY3ODkwLHR5cGU9MQ"
+TEAMS_HOSTED_URL = (
+    "https://graph.microsoft.com/v1.0/chats/chat-1on1-001/messages/"
+    f"chat-msg-image-001/hostedContents/{TEAMS_HOSTED_ID}/$value"
+)
+TEAMS_PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+# A file shared into a chat: Graph carries it as a "reference" attachment and
+# the body holds a matching <attachment> tag with no visible text of its own.
+SAMPLE_CHAT_MESSAGE_WITH_FILE = {
+    "id": "chat-msg-file-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T10:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T10:00:00Z",
+    "from": {"user": {"id": "user-id-002", "displayName": "Alice Smith"}, "application": None},
+    "body": {
+        "contentType": "html",
+        "content": (
+            f'<p>Here is the deck</p><attachment id="{TEAMS_FILE_ATTACHMENT_ID}"></attachment>'
+        ),
+    },
+    "attachments": [
+        {
+            "id": TEAMS_FILE_ATTACHMENT_ID,
+            "contentType": "reference",
+            "contentUrl": TEAMS_FILE_URL,
+            "name": "roadmap.pptx",
+            "thumbnailUrl": None,
+            "content": None,
+        }
+    ],
+}
+
+# Inline images are not attachments at all — only the body's <img> tag names them.
+SAMPLE_CHAT_MESSAGE_WITH_IMAGE = {
+    "id": "chat-msg-image-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T11:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T11:00:00Z",
+    "from": {"user": {"id": "user-id-002", "displayName": "Alice Smith"}, "application": None},
+    "body": {
+        "contentType": "html",
+        "content": f'<p>Look:</p><img src="{TEAMS_HOSTED_URL}" width="250" height="250">',
+    },
+    "attachments": [],
+}
+
+SAMPLE_CHAT_MESSAGE_WITH_CARD = {
+    "id": "chat-msg-card-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T12:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T12:00:00Z",
+    "from": {"user": None, "application": {"id": "app-id-001", "displayName": "Power Automate"}},
+    "body": {"contentType": "html", "content": ""},
+    "attachments": [
+        {
+            "id": "card-att-001",
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": (
+                '{"type":"AdaptiveCard","body":[{"type":"TextBlock","text":"Deploy finished"}]}'
+            ),
+        }
+    ],
+}
+
+# Graph never sends these shapes; the parser walks them anyway so one bad entry
+# cannot sink a page. The real file entry LAST proves the walk kept going.
+SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS = {
+    "id": "chat-msg-junk-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T13:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T13:00:00Z",
+    "from": {"user": {"id": "user-id-002", "displayName": "Alice Smith"}, "application": None},
+    "body": {"contentType": "html", "content": "<p>Mixed bag</p>"},
+    "attachments": [
+        "not-a-dict",
+        None,
+        {"id": None, "contentType": None},
+        {"id": "ref-001", "contentType": "messageReference", "content": '{"messageId":"123"}'},
+        {"id": "img-att", "contentType": "image/png", "contentUrl": "https://x/y.png"},
+        {
+            "id": TEAMS_FILE_ATTACHMENT_ID,
+            "contentType": "reference",
+            "contentUrl": TEAMS_FILE_URL,
+            "name": "roadmap.pptx",
+        },
+    ],
+}
+
+# The driveItem behind TEAMS_FILE_URL, resolved through /shares/{token}/driveItem.
+SAMPLE_TEAMS_DRIVE_ITEM = {
+    "id": "teams-file-001",
+    "name": "roadmap.pptx",
+    "size": 2048,
+    "file": {"mimeType": TEAMS_PPTX_MIME},
+    "webUrl": TEAMS_FILE_URL,
+    "lastModifiedDateTime": "2026-02-01T10:00:00Z",
+    "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-id-002"}},
+    "parentReference": {"driveId": "drive-ext-001"},
+}
+
+SAMPLE_CHAT_MESSAGES_PAGE_WITH_ATTACHMENTS = {
+    "value": [
+        SAMPLE_CHAT_MESSAGE_WITH_FILE,
+        SAMPLE_CHAT_MESSAGE_WITH_IMAGE,
+        SAMPLE_CHAT_MESSAGE_WITH_CARD,
+        SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS,
+    ]
+}
+
+
+# ---------------------------------------------------------------------------
 # Attachments (mail attachment metadata, upload sessions, sink payloads)
 # ---------------------------------------------------------------------------
 

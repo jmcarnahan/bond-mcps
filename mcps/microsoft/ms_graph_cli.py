@@ -30,6 +30,8 @@ Usage:
     ms-graph-cli teams chats [--type oneOnOne|group|meeting] [--top 20]
     ms-graph-cli teams read --chat-id <chat_id> [--top 20]
     ms-graph-cli teams read --team-id <team_id> --channel-id <channel_id> [--top 20]
+    ms-graph-cli teams attachment <message_id> <attachment_id> --chat-id <chat_id> [--out PATH]
+    ms-graph-cli teams attachment <message_id> <attachment_id> --team-id <team_id> --channel-id <channel_id> [--out PATH]
     ms-graph-cli teams send <message> --chat-id <chat_id>
     ms-graph-cli teams send <message> --team-id <team_id> --channel-id <channel_id>
     ms-graph-cli teams activity [--hours 24]
@@ -52,6 +54,7 @@ Usage:
 """
 
 import argparse
+import mimetypes
 import os
 import sys
 from pathlib import Path
@@ -646,6 +649,58 @@ def cmd_teams_read(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_teams_attachment(args: argparse.Namespace) -> None:
+    if not args.chat_id and not (args.team_id and args.channel_id):
+        print("Error: provide --chat-id, or both --team-id and --channel-id.", file=sys.stderr)
+        sys.exit(1)
+
+    kw = (
+        {"chat_id": args.chat_id}
+        if args.chat_id
+        else {"team_id": args.team_id, "channel_id": args.channel_id}
+    )
+
+    token = get_local_token()
+    with GraphClient(token) as client:
+        msg = teams.get_message(client, args.message_id, **kw)
+        entries = teams.parse_message_attachments(msg)
+        entry = next((e for e in entries if e["id"] == args.attachment_id), None)
+        if entry is None:
+            available = ", ".join(f"{e['kind']}: {e['id']}" for e in entries if e["id"]) or "(none)"
+            print(
+                f"Error: no attachment '{args.attachment_id}' on this message. "
+                f"Available: {available}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        kind = entry["kind"]
+        if kind == "card":
+            print(
+                f"Card ({entry['content_type']}): " f"{entry['card_text'] or '(no readable text)'}"
+            )
+            return
+        if kind not in ("file", "image"):
+            print(f"Nothing to download: this attachment is a {kind}.")
+            return
+
+        if kind == "file":
+            if not entry["content_url"]:
+                print("Error: this file attachment has no content URL.", file=sys.stderr)
+                sys.exit(1)
+            item, data = files.resolve_sharing_link_bytes(client, entry["content_url"])
+            name = entry["name"] or item.get("name") or "attachment"
+            ctype = (item.get("file") or {}).get("mimeType", "")
+        else:
+            data, ctype = teams.get_hosted_content(client, args.message_id, entry["id"], **kw)
+            ext = mimetypes.guess_extension(ctype.split(";")[0].strip()) or ".bin"
+            name = f"image-{entry['id'][:12]}{ext}"
+
+    out = args.out or _default_attachment_filename(name, "file")
+    Path(out).write_bytes(data)
+    print(f"Saved {len(data)} bytes to {out} ({ctype})")
+
+
 def cmd_teams_send(args: argparse.Namespace) -> None:
     if not args.chat_id and not (args.team_id and args.channel_id):
         print("Error: provide --chat-id, or both --team-id and --channel-id.", file=sys.stderr)
@@ -1134,6 +1189,17 @@ def main() -> None:
     p.add_argument("--chat-id", dest="chat_id", default="")
     p.add_argument("--top", type=int, default=20)
     p.set_defaults(func=cmd_teams_read)
+
+    p = teams_sub.add_parser(
+        "attachment", help="Download a file or inline image from a Teams message"
+    )
+    p.add_argument("message_id")
+    p.add_argument("attachment_id")
+    p.add_argument("--team-id", dest="team_id", default="")
+    p.add_argument("--channel-id", dest="channel_id", default="")
+    p.add_argument("--chat-id", dest="chat_id", default="")
+    p.add_argument("--out", default="", help="Output path (default: the attachment's own name)")
+    p.set_defaults(func=cmd_teams_attachment)
 
     p = teams_sub.add_parser("send", help="Send a message to a channel or chat")
     p.add_argument("message")

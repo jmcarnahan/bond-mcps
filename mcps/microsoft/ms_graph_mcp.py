@@ -13,20 +13,21 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (42 tools):
+Tool summary (45 tools):
   Email     : get_user_profile, list_emails, read_email, get_email_attachment, send_email,
               manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
-  Teams     : list_teams, list_chats, read_teams_messages, send_teams_message, get_teams_activity
+  Teams     : list_teams, list_chats, read_teams_messages, get_teams_attachment,
+              send_teams_message, get_teams_activity
   Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, edit_document, manage_file
   Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
   Desktop JSON : get_profile_json, list_mail_delta, get_mail_detail, get_mail_attachment_json,
                  create_reply_draft_json, update_draft_body, add_draft_attachment_json,
                  send_draft, mark_mail_read_json, list_chats_page, get_chat_members_json,
-                 list_chat_messages_page, mark_chat_read_json, send_chat_message_json,
-                 connection_status
+                 list_chat_messages_page, get_chat_attachment_json, mark_chat_read_json,
+                 send_chat_message_json, inspect_file_json, connection_status
 
-The 27 markdown tools above render prose for an LLM to read. The Desktop JSON
+The 28 markdown tools above render prose for an LLM to read. The Desktop JSON
 namespace is for programmatic clients (the desktop mail app) and follows a
 different convention: every tool returns a ``dict``, which FastMCP surfaces as
 structuredContent. Parameters stay ``str``/``int`` only (empty string = absent)
@@ -37,6 +38,7 @@ import base64
 import binascii
 import html as html_mod
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1381,6 +1383,82 @@ async def list_chats(chat_type: str = "", top: int = 50, options: str = "") -> s
     return output
 
 
+_THUMBNAIL_WORDS = ("small", "medium", "large")
+
+
+def _teams_attachment_column(entries: list[dict]) -> str:
+    """The attachments column read_teams_messages writes, one row's worth.
+
+    Files read ``name [file:<id>]``, inline images ``[image:<id>]``, cards
+    ``[card]``. Quoted-message references and unknown kinds carry nothing to
+    fetch, so they are left out rather than advertised as ids.
+    """
+    parts: list[str] = []
+    for entry in entries:
+        kind = entry["kind"]
+        if kind == "file" and entry["id"]:
+            name = entry["name"]
+            parts.append(f"{name} [file:{entry['id']}]" if name else f"[file:{entry['id']}]")
+        elif kind == "image" and entry["id"]:
+            parts.append(f"[image:{entry['id']}]")
+        elif kind == "card":
+            parts.append("[card]")
+    return "; ".join(parts)
+
+
+def _hosted_image_name(hosted_content_id: str, content_type: str) -> str:
+    """Inline images carry no name; derive one from the id and the MIME type."""
+    ext = mimetypes.guess_extension(content_type) or ".bin"
+    return f"image-{hosted_content_id[:12]}{ext}"
+
+
+def _mime_from_header(header: str, fallback: str) -> str:
+    """'image/png; charset=utf-8' -> 'image/png'; an empty header -> fallback."""
+    mime = (header or "").split(";")[0].strip()
+    return mime or fallback
+
+
+def _teams_entry_summary(
+    entry: dict, name: str | None, content_type: str | None, size: int
+) -> dict:
+    """The summary shape _attachment_header renders, built from a Teams entry.
+
+    Teams has no inline/content-id concept for shared files, so those two keys
+    are constant here; they exist because mail attachments carry them.
+    """
+    return {
+        "id": entry["id"],
+        "name": name,
+        "content_type": content_type,
+        "size": size,
+        "is_inline": False,
+        "content_id": None,
+    }
+
+
+async def _find_teams_attachment(
+    client,
+    message_id: str,
+    attachment_id: str,
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+) -> tuple[dict | None, list[dict]]:
+    """Fetch one message and locate an attachment on it by id.
+
+    Returns (entry_or_None, all_entries) — the full list so a caller can tell
+    the user what ids the message actually has.
+    """
+    msg = await teams_ops.aget_message(
+        client, message_id, chat_id=chat_id, team_id=team_id, channel_id=channel_id
+    )
+    entries = teams_ops.parse_message_attachments(msg)
+    for entry in entries:
+        if entry["id"] == attachment_id:
+            return entry, entries
+    return None, entries
+
+
 @mcp.tool()
 async def read_teams_messages(
     team_id: str = "",
@@ -1410,6 +1488,11 @@ async def read_teams_messages(
                 Only works with chat_id (channels don't support per-user read state).
             {"max_content_length": -1}  — max characters per message body. Default -1
                 (no limit). Set a positive integer to truncate long messages.
+
+    Each row's attachments column lists shared files as `name [file:<id>]`, inline
+    images as `[image:<id>]`, and cards as `[card]`; pass a file or image id to
+    get_teams_attachment to read or download it. The content column also carries
+    `[File: name]` / `[Image]` markers.
     """
     import csv
     import io
@@ -1462,7 +1545,7 @@ async def read_teams_messages(
 
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(["timestamp", "sender", "content", "id"])
+    writer.writerow(["timestamp", "sender", "content", "attachments", "id"])
     for msg in messages:
         sender = extract_message_sender(msg)
         content = extract_message_text(msg, max_length=max_content_length)
@@ -1471,6 +1554,7 @@ async def read_teams_messages(
                 msg.get("createdDateTime", ""),
                 sender,
                 content or "(empty)",
+                _teams_attachment_column(teams_ops.parse_message_attachments(msg)),
                 msg.get("id", ""),
             ]
         )
@@ -1479,6 +1563,188 @@ async def read_teams_messages(
     if should_mark:
         result += "\n---\n*Chat marked as read.*"
     return result
+
+
+@mcp.tool()
+async def get_teams_attachment(
+    message_id: str,
+    attachment_id: str,
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+    mode: str = "text",
+    options: str = "",
+) -> str:
+    """
+    Read, download, or save one file or inline image from a Teams message.
+
+    The ids come from read_teams_messages' attachments column: a shared file
+    shows as `name [file:<id>]` and an inline image as `[image:<id>]`. Pass the
+    id inside the brackets.
+
+    Provide either:
+    - chat_id to read from a 1:1, group, or meeting chat (from list_chats)
+    - team_id + channel_id to read from a team channel (from list_teams)
+
+    Args:
+        message_id: The message ID (the id column of read_teams_messages).
+        attachment_id: The file or image ID from that row's attachments column.
+        chat_id: Chat ID (from list_chats). Takes priority over team/channel.
+        team_id: Team ID (from list_teams with no team_id).
+        channel_id: Channel ID (from list_teams with team_id).
+        mode: How to return the attachment.
+            "text" (default) — extract the text: Word, PowerPoint, Excel, and PDF
+                documents are parsed, plain-text files are decoded, and binaries
+                (images, archives) report their type and size instead.
+            "base64" — the raw bytes, base64-encoded. Only for attachments under
+                1 MB; anything larger is refused, so use "onedrive" for those.
+            "onedrive" — save a copy to your OneDrive and return the link.
+        options: JSON string with optional fields:
+            {"folder_path": "Attachments"}  — OneDrive folder for mode "onedrive"
+                (default "Attachments"; created if missing).
+            {"site_id": ""}  — save to this SharePoint site's drive instead of OneDrive.
+
+    Notes:
+        A card attachment renders its text here rather than downloading. A quoted
+        message reference has nothing to download. A file shared in Teams that
+        your account cannot open reports access denied — the owner has to
+        re-share it with you.
+    """
+    opts, err = parse_options(options)
+    if err:
+        return err
+
+    mode = mode.strip().lower() or "text"
+    if mode not in ("text", "base64", "onedrive"):
+        return f"mode must be one of: text, base64, onedrive; got {mode!r}"
+
+    if not chat_id and not (team_id and channel_id):
+        return "Provide either chat_id, or both team_id and channel_id."
+    if chat_id:
+        # A chat wins over a team/channel pair, matching read_teams_messages —
+        # the ops layer refuses both at once, and that is not the caller's bug.
+        team_id = channel_id = ""
+
+    token = get_graph_token()
+    try:
+        async with AsyncGraphClient(token) as client:
+            entry, entries = await _find_teams_attachment(
+                client,
+                message_id,
+                attachment_id,
+                chat_id=chat_id,
+                team_id=team_id,
+                channel_id=channel_id,
+            )
+            if entry is None:
+                available = (
+                    "; ".join(f"{e['kind']}: {e['id']}" for e in entries if e["id"]) or "(none)"
+                )
+                return (
+                    f"No attachment with id `{attachment_id}` on message `{message_id}`.\n"
+                    f"Available: {available}"
+                )
+
+            kind = entry["kind"]
+            if kind == "card":
+                card_text = entry["card_text"] or "(no readable text)"
+                return f"**Card:** {entry['content_type']}\n\n{card_text}"
+            if kind == "message_reference":
+                return (
+                    "This attachment is a quoted message reference, not a file; "
+                    "there is nothing to download."
+                )
+            if kind == "other":
+                answer = (
+                    f"Attachment of type {entry['content_type'] or 'unknown'} "
+                    "cannot be fetched by this tool."
+                )
+                if entry["content_url"]:
+                    answer += f"\nURL: {entry['content_url']}"
+                return answer
+
+            if kind == "file":
+                url = entry["content_url"]
+                if not url:
+                    return "This file attachment has no content URL to resolve."
+                try:
+                    item = await files_ops.aresolve_sharing_link(client, url)
+                except GraphError as e:
+                    if e.status_code == 403:
+                        return (
+                            "**Access denied:** the file was shared in Teams but your "
+                            "account cannot open it. The owner may need to re-share it "
+                            "with you."
+                        )
+                    if e.status_code == 404:
+                        return (
+                            "**Item not found** for this file's link. The link may have "
+                            "expired, been revoked, or the file was deleted."
+                        )
+                    if e.status_code == 400:
+                        return "**Invalid sharing link.** Could not resolve this file's URL."
+                    raise
+
+                if "folder" in item:
+                    return "This attachment is a folder, not a file. Use list_files to browse it."
+
+                name = entry["name"] or item.get("name") or attachment_id
+                content_type = (item.get("file") or {}).get(
+                    "mimeType"
+                ) or attachment_ops.guess_content_type(name)
+                raw_size = item.get("size")
+                size = raw_size if isinstance(raw_size, int) else 0
+                summary = _teams_entry_summary(entry, name, content_type, size)
+                header = _attachment_header(summary)
+
+                # Decided from the driveItem metadata, so an oversized file is
+                # refused before its bytes ever cross the wire.
+                if mode == "text" and size > files_ops.MAX_DOCUMENT_DOWNLOAD_BYTES:
+                    return f"{header}\n\n{_ATTACHMENT_TOO_LARGE_TEXT}"
+                if mode == "base64" and size > attachment_ops.MAX_BASE64_RETURN_BYTES:
+                    limit = _format_size(attachment_ops.MAX_BASE64_RETURN_BYTES)
+                    return (
+                        f"{header}\n\nToo large to return as base64 (limit {limit}). "
+                        'Use mode "onedrive" or "text".'
+                    )
+
+                try:
+                    _, data = await files_ops.aresolve_sharing_link_bytes(client, url, item=item)
+                except ValueError as e:
+                    return f"{header}\n\n{e}"
+                att = attachment_ops.ResolvedAttachment(
+                    name=name, data=data, content_type=content_type
+                )
+            else:
+                # hostedContents advertises no size before $value, so there is
+                # nothing to pre-check; the sink refuses oversize base64 itself.
+                data, header_type = await teams_ops.aget_hosted_content(
+                    client,
+                    message_id,
+                    entry["id"],
+                    chat_id=chat_id,
+                    team_id=team_id,
+                    channel_id=channel_id,
+                )
+                content_type = _mime_from_header(header_type, "application/octet-stream")
+                name = _hosted_image_name(entry["id"], content_type)
+                summary = _teams_entry_summary(entry, name, content_type, len(data))
+                header = _attachment_header(summary)
+                att = attachment_ops.ResolvedAttachment(
+                    name=name, data=data, content_type=content_type
+                )
+
+            result = await attachment_ops.adeliver_attachment(
+                client,
+                att,
+                mode,
+                folder_path=opt_str(opts.get("folder_path")) or "Attachments",
+                site_id=opt_str(opts.get("site_id")) or "",
+            )
+    except TeamsNotAvailableError:
+        return "Microsoft Teams is not available for this account."
+
+    return _render_attachment_result(header, result, mode)
 
 
 @mcp.tool()
@@ -2478,7 +2744,7 @@ async def export_report(
 # Desktop JSON tools
 #
 # A separate namespace for programmatic clients (the desktop mail app). Unlike
-# the 27 markdown tools above, these return dicts — FastMCP renders them as
+# the 28 markdown tools above, these return dicts — FastMCP renders them as
 # structuredContent. Parameters remain str/int only.
 #
 # Error contract: a missing Microsoft connection returns the not_connected
@@ -2486,9 +2752,12 @@ async def export_report(
 # a structured "teams_unavailable" error for the no-license 403, which is
 # permanent and must not be retried. The mail attachment tools likewise return
 # structured permanent errors — invalid_mode, too_large, reference, empty_name,
-# invalid_base64 — which must not be retried either. Everything else — Graph
-# 5xx, throttling, unexpected shapes — propagates so FastMCP raises a tool
-# error, which is the client's "transient, retry later" signal.
+# invalid_base64 — which must not be retried either. The Teams attachment
+# reader returns not_found, access_denied, no_thumbnail, invalid_thumbnail,
+# is_folder, and too_large; inspect_file_json returns missing_target,
+# access_denied, not_found, and invalid_link — all permanent. Everything
+# else — Graph 5xx, throttling, unexpected shapes — propagates so FastMCP
+# raises a tool error, which is the client's "transient, retry later" signal.
 # ---------------------------------------------------------------------------
 
 
@@ -2531,6 +2800,7 @@ def _chat_message_json(msg: dict) -> dict:
         "mentioned_user_ids": mentioned_user_ids,
         "created": msg.get("createdDateTime"),
         "last_modified": msg.get("lastModifiedDateTime"),
+        "attachments": teams_ops.parse_message_attachments(msg),
     }
 
 
@@ -3019,10 +3289,18 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
     For programmatic clients. Messages come back newest-first and flattened:
     id, message_type, from_user_id, from_user_display, from_application_id,
     body_content, body_content_type, mentioned_user_ids, created,
-    last_modified. System events have no sender, so the from_* fields are null.
-    mentioned_user_ids is the Graph user ids the message @mentions, in the
-    order they appear and empty when none. Returns next_cursor for the next
-    page, empty when there are no more.
+    last_modified, attachments. System events have no sender, so the from_*
+    fields are null. mentioned_user_ids is the Graph user ids the message
+    @mentions, in the order they appear and empty when none. Returns
+    next_cursor for the next page, empty when there are no more.
+
+    attachments: every file, inline image, card, or quoted-message reference on
+    the message as {id, kind, name, content_type, content_url, thumbnail_url,
+    card_text}; kind is one of file, image, card, message_reference, other;
+    empty when none. Fetch a file's or image's bytes with
+    get_chat_attachment_json. body_content is still the raw Graph body (the
+    client owns stripping), so a file-only message has an empty or tag-only
+    body — render the attachments list.
 
     Args:
         chat_id: The chat ID (from list_chats_page).
@@ -3041,6 +3319,119 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
     return {
         "messages": [_chat_message_json(m) for m in data.get("value", [])],
         "next_cursor": data.get("@odata.nextLink", ""),
+    }
+
+
+@mcp.tool()
+async def get_chat_attachment_json(
+    chat_id: str, message_id: str, attachment_id: str, thumbnail: str = ""
+) -> dict:
+    """
+    Get one Teams chat attachment's bytes as base64. Returns structured JSON.
+
+    For programmatic clients. The ids come from list_chat_messages_page's
+    attachments list: pass the entry's id for a shared file or an inline image.
+
+    thumbnail: empty (default) returns the full bytes. "small", "medium", or
+    "large" returns the file's driveItem thumbnail instead — files only; inline
+    images are already small and ignore it.
+
+    Returns kind, name, content_type, size, and content_base64, where size is
+    the byte count of what was returned.
+
+    Permanent errors, which must not be retried: invalid_thumbnail (not one of
+    the three size words; checked before any request), not_found (the id is not
+    on the message, or it is a card, a quoted reference, an unknown kind, or a
+    file entry with no URL), access_denied (Graph 403 resolving the file's
+    sharing link), no_thumbnail (the file has no thumbnail at that size),
+    is_folder (the shared item is a folder), too_large (with size and limit —
+    decided from the driveItem size before downloading a file, or from the byte
+    count after fetching an image or a thumbnail), teams_unavailable (403 on
+    the message itself), and not_connected. A Graph 404 for an unknown chat or
+    message, throttling, and 5xx propagate as tool errors instead.
+
+    Args:
+        chat_id: The chat ID (from list_chats_page).
+        message_id: The message ID (from list_chat_messages_page).
+        attachment_id: The attachment entry's id from that message.
+        thumbnail: "", "small", "medium", or "large".
+    """
+    thumb = thumbnail.strip().lower()
+    if thumb and thumb not in _THUMBNAIL_WORDS:
+        return {"error": "invalid_thumbnail"}
+
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            entry, _ = await _find_teams_attachment(
+                client, message_id, attachment_id, chat_id=chat_id
+            )
+            if entry is None or entry["kind"] not in ("file", "image"):
+                return {"error": "not_found"}
+
+            if entry["kind"] == "image":
+                data, header_type = await teams_ops.aget_hosted_content(
+                    client, message_id, entry["id"], chat_id=chat_id
+                )
+                content_type = _mime_from_header(header_type, "application/octet-stream")
+                name = _hosted_image_name(entry["id"], content_type)
+            else:
+                url = entry["content_url"]
+                if not url:
+                    return {"error": "not_found"}
+                try:
+                    if thumb:
+                        found = await files_ops.aget_sharing_link_thumbnail(client, url, size=thumb)
+                        if found is None:
+                            return {"error": "no_thumbnail"}
+                        data, header_type = found
+                        content_type = _mime_from_header(header_type, "image/jpeg")
+                        name = entry["name"]
+                    else:
+                        item = await files_ops.aresolve_sharing_link(client, url)
+                        if "folder" in item:
+                            return {"error": "is_folder"}
+                        size = item.get("size", 0)
+                        if (
+                            isinstance(size, int)
+                            and size > attachment_ops.MAX_JSON_ATTACHMENT_BYTES
+                        ):
+                            return {
+                                "error": "too_large",
+                                "size": size,
+                                "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+                            }
+                        _, data = await files_ops.aresolve_sharing_link_bytes(
+                            client, url, item=item
+                        )
+                        name = entry["name"] or item.get("name")
+                        content_type = (item.get("file") or {}).get(
+                            "mimeType"
+                        ) or attachment_ops.guess_content_type(name or "")
+                except GraphError as e:
+                    if e.status_code == 403:
+                        return {"error": "access_denied"}
+                    raise
+    except PermissionError as e:
+        return _not_connected(e)
+    except TeamsNotAvailableError:
+        return {"error": "teams_unavailable"}
+
+    # Images and thumbnails announce no size up front, so the cap is enforced
+    # again here on what actually arrived.
+    if len(data) > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+        return {
+            "error": "too_large",
+            "size": len(data),
+            "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+        }
+
+    return {
+        "kind": entry["kind"],
+        "name": name,
+        "content_type": content_type,
+        "size": len(data),
+        "content_base64": base64.b64encode(data).decode("ascii"),
     }
 
 
@@ -3094,6 +3485,14 @@ async def send_chat_message_json(chat_id: str, text: str) -> dict:
     store its own reply without waiting for the next pull. Requires
     Chat.ReadWrite.
 
+    attachments: every file, inline image, card, or quoted-message reference on
+    the message as {id, kind, name, content_type, content_url, thumbnail_url,
+    card_text}; kind is one of file, image, card, message_reference, other;
+    empty when none. Fetch a file's or image's bytes with
+    get_chat_attachment_json. body_content is still the raw Graph body (the
+    client owns stripping), so a file-only message has an empty or tag-only
+    body — render the attachments list.
+
     On failure message is null and error says why ("teams_unavailable" when the
     account has no Teams license).
 
@@ -3116,6 +3515,108 @@ async def send_chat_message_json(chat_id: str, text: str) -> dict:
         return {"message": None, "error": "teams_unavailable"}
 
     return {"message": _chat_message_json(created)}
+
+
+def _drive_item_json(item: dict) -> dict:
+    """Flatten a driveItem for programmatic clients."""
+    size = item.get("size")
+    file_facet = item.get("file") or {}
+    return {
+        "item_id": item.get("id"),
+        "name": item.get("name"),
+        "size": size if isinstance(size, int) else 0,
+        "content_type": file_facet.get("mimeType") if isinstance(file_facet, dict) else None,
+        "web_url": item.get("webUrl"),
+        "modified": item.get("lastModifiedDateTime"),
+        "is_folder": "folder" in item,
+    }
+
+
+@mcp.tool()
+async def inspect_file_json(
+    item_id: str = "", url: str = "", read_content: str = "false", site_id: str = ""
+) -> dict:
+    """
+    Get a file's metadata, and optionally its text, as structured JSON.
+
+    The JSON sibling of inspect_file, for programmatic clients. This is how a
+    client resolves a Teams attachment's content_url or a mail link
+    attachment's source_url into something it can show or read.
+
+    Accepts either a drive item id (from list_files) or a SharePoint/OneDrive
+    sharing URL. An item_id that looks like a sharing URL is treated as one,
+    the same way inspect_file does.
+
+    Returns item_id, name, size, content_type, web_url, modified, and
+    is_folder. With read_content "true" it also returns text — extracted from
+    Word, PowerPoint, Excel, and PDF documents, or decoded for text files, and
+    null when the content is binary, a folder, or over the size limits.
+
+    Permanent errors: missing_target (neither an id nor a url was given), and
+    for sharing URLs access_denied (403), not_found (404), and invalid_link
+    (400); plus not_connected. Everything else, including a 404 for an unknown
+    item id, propagates as a tool error.
+
+    Args:
+        item_id: A drive item ID (from list_files), or a sharing URL.
+        url: A SharePoint/OneDrive sharing URL. Wins over item_id.
+        read_content: "true" to also download and return the text.
+        site_id: SharePoint site ID. Leave empty for OneDrive. Ignored for URLs.
+    """
+    sharing_url = url.strip()
+    if not sharing_url and item_id and files_ops.is_sharing_url(item_id):
+        sharing_url = item_id.strip()
+    if not sharing_url and not item_id.strip():
+        return {"error": "missing_target"}
+
+    read = read_content.strip().lower() in ("true", "1", "yes")
+
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            if sharing_url:
+                try:
+                    if read:
+                        item, content = await files_ops.aresolve_sharing_link_content(
+                            client, sharing_url
+                        )
+                        if content is None:
+                            (
+                                item,
+                                content,
+                            ) = await files_ops.aresolve_sharing_link_extracted_content(
+                                client, sharing_url, item=item
+                            )
+                    else:
+                        item = await files_ops.aresolve_sharing_link(client, sharing_url)
+                        content = None
+                except GraphError as e:
+                    if e.status_code == 403:
+                        return {"error": "access_denied"}
+                    if e.status_code == 404:
+                        return {"error": "not_found"}
+                    if e.status_code == 400:
+                        return {"error": "invalid_link"}
+                    raise
+            else:
+                if read:
+                    item, content = await files_ops.aget_drive_item_content(
+                        client, item_id, site_id=site_id
+                    )
+                    if content is None:
+                        item, content = await files_ops.aget_drive_item_extracted_content(
+                            client, item_id, site_id=site_id, item=item
+                        )
+                else:
+                    item = await files_ops.aget_drive_item(client, item_id, site_id=site_id)
+                    content = None
+    except PermissionError as e:
+        return _not_connected(e)
+
+    result = _drive_item_json(item)
+    if read:
+        result["text"] = content
+    return result
 
 
 @mcp.tool()

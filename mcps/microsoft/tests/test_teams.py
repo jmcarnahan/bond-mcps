@@ -10,13 +10,16 @@ from ms_graph import teams
 from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
 from ms_graph.teams import (
     TeamsNotAvailableError,
+    _message_base,
     _prepare_teams_body,
     extract_message_sender,
     extract_message_text,
+    parse_message_attachments,
 )
 
 from .conftest import (
     GRAPH_ERROR_403,
+    GRAPH_ERROR_404,
     SAMPLE_CHANNEL_MESSAGE,
     SAMPLE_CHANNEL_MESSAGE_BOT,
     SAMPLE_CHANNEL_MESSAGE_USER,
@@ -24,12 +27,20 @@ from .conftest import (
     SAMPLE_CHANNELS_RESPONSE,
     SAMPLE_CHAT_MEMBERS_RESPONSE,
     SAMPLE_CHAT_MESSAGE_SENT,
+    SAMPLE_CHAT_MESSAGE_WITH_CARD,
+    SAMPLE_CHAT_MESSAGE_WITH_FILE,
+    SAMPLE_CHAT_MESSAGE_WITH_IMAGE,
+    SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS,
     SAMPLE_CHAT_MESSAGES_PAGE,
     SAMPLE_CHAT_MESSAGES_RESPONSE,
     SAMPLE_CHATS_PAGE,
     SAMPLE_CHATS_PAGE_NEXT_LINK,
     SAMPLE_CHATS_RESPONSE,
     SAMPLE_TEAMS_RESPONSE,
+    TEAMS_FILE_ATTACHMENT_ID,
+    TEAMS_FILE_URL,
+    TEAMS_HOSTED_ID,
+    TEAMS_HOSTED_URL,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,6 +111,254 @@ class TestExtractMessageText:
             ],
         }
         assert extract_message_text(msg) == ""
+
+    def test_file_marker_when_body_has_only_attachment_tag(self):
+        """A file-only message used to render as "(empty)"."""
+        msg = {
+            **SAMPLE_CHAT_MESSAGE_WITH_FILE,
+            "body": {
+                "contentType": "html",
+                "content": f'<attachment id="{TEAMS_FILE_ATTACHMENT_ID}"></attachment>',
+            },
+        }
+        assert extract_message_text(msg) == "[File: roadmap.pptx]"
+
+    def test_image_marker_appended(self):
+        assert extract_message_text(SAMPLE_CHAT_MESSAGE_WITH_IMAGE) == "Look: [Image]"
+
+    def test_markers_survive_truncation(self):
+        """max_length caps the body a person wrote, not the attachment marker."""
+        msg = {
+            "body": {"contentType": "text", "content": "x" * 600},
+            "attachments": SAMPLE_CHAT_MESSAGE_WITH_FILE["attachments"],
+        }
+        result = extract_message_text(msg, max_length=100)
+
+        assert result.endswith("... [File: roadmap.pptx]")
+        assert len(result.split(" [File:")[0]) == 103
+
+    def test_unnamed_file_marker(self):
+        msg = {
+            "body": {"contentType": "html", "content": ""},
+            "attachments": [{"id": "a1", "contentType": "reference", "contentUrl": "https://x"}],
+        }
+        assert extract_message_text(msg) == "[File: (unnamed)]"
+
+
+class TestParseMessageAttachments:
+    """One unified list: Graph attachments first, then body images."""
+
+    def test_file_entry(self):
+        assert parse_message_attachments(SAMPLE_CHAT_MESSAGE_WITH_FILE) == [
+            {
+                "id": TEAMS_FILE_ATTACHMENT_ID,
+                "kind": "file",
+                "name": "roadmap.pptx",
+                "content_type": "reference",
+                "content_url": TEAMS_FILE_URL,
+                "thumbnail_url": None,
+                "card_text": None,
+            }
+        ]
+
+    def test_image_entry_is_parsed_from_the_body(self):
+        assert parse_message_attachments(SAMPLE_CHAT_MESSAGE_WITH_IMAGE) == [
+            {
+                "id": TEAMS_HOSTED_ID,
+                "kind": "image",
+                "name": None,
+                "content_type": None,
+                "content_url": TEAMS_HOSTED_URL,
+                "thumbnail_url": None,
+                "card_text": None,
+            }
+        ]
+
+    def test_graph_entries_precede_body_images(self):
+        msg = {
+            **SAMPLE_CHAT_MESSAGE_WITH_FILE,
+            "body": {
+                "contentType": "html",
+                "content": f'<p>deck</p><img src="{TEAMS_HOSTED_URL}">',
+            },
+        }
+        assert [e["kind"] for e in parse_message_attachments(msg)] == ["file", "image"]
+
+    def test_card_entry_carries_its_text(self):
+        entry = parse_message_attachments(SAMPLE_CHAT_MESSAGE_WITH_CARD)[0]
+
+        assert entry["kind"] == "card"
+        assert entry["card_text"] == "Deploy finished"
+
+    def test_message_reference_kind(self):
+        msg = {"attachments": [{"id": "r1", "contentType": "messageReference"}]}
+        assert parse_message_attachments(msg)[0]["kind"] == "message_reference"
+
+    def test_unknown_content_type_is_other(self):
+        msg = {"attachments": [{"id": "i1", "contentType": "image/png"}]}
+        assert parse_message_attachments(msg)[0]["kind"] == "other"
+
+    def test_junk_entries_are_skipped_and_the_walk_keeps_going(self):
+        entries = parse_message_attachments(SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS)
+
+        assert [e["kind"] for e in entries] == ["other", "message_reference", "other", "file"]
+        # The id-less, type-less dict is still a dict, so it survives as "other"
+        # with every field None.
+        assert entries[0] == {
+            "id": None,
+            "kind": "other",
+            "name": None,
+            "content_type": None,
+            "content_url": None,
+            "thumbnail_url": None,
+            "card_text": None,
+        }
+        assert entries[2]["content_url"] == "https://x/y.png"
+        assert entries[3]["name"] == "roadmap.pptx"
+
+    def test_duplicate_img_tags_yield_one_entry(self):
+        msg = {
+            "body": {
+                "contentType": "html",
+                "content": f'<img src="{TEAMS_HOSTED_URL}"><img src="{TEAMS_HOSTED_URL}">',
+            }
+        }
+        assert len(parse_message_attachments(msg)) == 1
+
+    def test_thumbnail_url_passes_through(self):
+        msg = {
+            "attachments": [
+                {
+                    "id": "f1",
+                    "contentType": "reference",
+                    "thumbnailUrl": "https://thumb/x.png",
+                }
+            ]
+        }
+        assert parse_message_attachments(msg)[0]["thumbnail_url"] == "https://thumb/x.png"
+
+    @pytest.mark.parametrize("msg", [{}, {"body": None}, {"attachments": "nope"}])
+    def test_malformed_messages_yield_nothing(self, msg):
+        assert parse_message_attachments(msg) == []
+
+
+class TestMessageBase:
+    """One helper decides chat vs channel, and refuses to guess."""
+
+    def test_chat_path(self):
+        assert _message_base(chat_id="chat-1") == "/chats/chat-1/messages"
+
+    def test_channel_path(self):
+        assert _message_base(team_id="t1", channel_id="c1") == "/teams/t1/channels/c1/messages"
+
+    def test_ids_are_percent_encoded(self):
+        assert _message_base(chat_id="19:abc/def") == "/chats/19%3Aabc%2Fdef/messages"
+
+    def test_neither_target_is_refused(self):
+        with pytest.raises(ValueError, match="Provide chat_id"):
+            _message_base()
+
+    def test_both_targets_are_refused(self):
+        with pytest.raises(ValueError, match="not both"):
+            _message_base(chat_id="chat-1", team_id="t1", channel_id="c1")
+
+
+class TestGetMessage:
+    """Fetching one message by id, in a chat or a channel."""
+
+    @respx.mock
+    def test_sync_chat_message(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/messages/chat-msg-file-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
+        )
+        with GraphClient("tok") as client:
+            msg = teams.get_message(client, "chat-msg-file-001", chat_id="chat-1on1-001")
+
+        assert route.called
+        assert msg["id"] == "chat-msg-file-001"
+
+    @respx.mock
+    async def test_async_chat_message(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/messages/chat-msg-file-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            msg = await teams.aget_message(client, "chat-msg-file-001", chat_id="chat-1on1-001")
+
+        assert route.called
+        assert msg["id"] == "chat-msg-file-001"
+
+    @respx.mock
+    async def test_channel_form(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/teams/t1/channels/c1/messages/msg-1").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await teams.aget_message(client, "msg-1", team_id="t1", channel_id="c1")
+
+        assert route.called
+
+    @respx.mock
+    async def test_403_means_teams_is_unavailable(self):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                await teams.aget_message(client, "m1", chat_id="chat-1")
+
+    @respx.mock
+    async def test_404_propagates(self):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await teams.aget_message(client, "m1", chat_id="chat-1")
+
+        assert exc.value.status_code == 404
+
+
+class TestGetHostedContent:
+    """Inline image bytes come only from $value."""
+
+    HOSTED_PATH = (
+        f"{GRAPH_BASE_URL}/chats/chat-1on1-001/messages/chat-msg-image-001"
+        f"/hostedContents/{TEAMS_HOSTED_ID}/$value"
+    )
+
+    @respx.mock
+    def test_sync_returns_bytes_and_type(self):
+        respx.get(self.HOSTED_PATH).mock(
+            return_value=httpx.Response(
+                200, content=b"\x89PNG...", headers={"Content-Type": "image/png"}
+            )
+        )
+        with GraphClient("tok") as client:
+            assert teams.get_hosted_content(
+                client, "chat-msg-image-001", TEAMS_HOSTED_ID, chat_id="chat-1on1-001"
+            ) == (b"\x89PNG...", "image/png")
+
+    @respx.mock
+    async def test_async_returns_bytes_and_type(self):
+        respx.get(self.HOSTED_PATH).mock(
+            return_value=httpx.Response(
+                200, content=b"\x89PNG...", headers={"Content-Type": "image/png"}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert await teams.aget_hosted_content(
+                client, "chat-msg-image-001", TEAMS_HOSTED_ID, chat_id="chat-1on1-001"
+            ) == (b"\x89PNG...", "image/png")
+
+    @respx.mock
+    async def test_403_means_teams_is_unavailable(self):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                await teams.aget_hosted_content(client, "m1", "hosted-1", chat_id="chat-1")
 
 
 class TestExtractMessageSender:

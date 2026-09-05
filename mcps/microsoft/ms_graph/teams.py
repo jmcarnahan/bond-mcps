@@ -123,6 +123,120 @@ def _extract_adaptive_card_text(card_json: str) -> str:
     return " | ".join(texts)
 
 
+# Inline images do not arrive as Graph ``attachments`` entries at all: the body
+# HTML carries them as
+# <img src="https://graph.microsoft.com/v1.0/chats/{chat}/messages/{msg}/hostedContents/{id}/$value">.
+HOSTED_CONTENT_RE = re.compile(r'(https?://[^"\'<>\s]*?/hostedContents/([^/"\'<>\s]+)/\$value)')
+
+_CARD_CONTENT_TYPE_PREFIX = "application/vnd.microsoft.card."
+
+# Every kind parse_message_attachments can report. Documentation for callers.
+ATTACHMENT_KINDS = ("file", "image", "card", "message_reference", "other")
+
+
+def _str_or_none(value: Any) -> str | None:
+    """Keep a non-empty string; everything else (None, ints, dicts) becomes None."""
+    return value if isinstance(value, str) and value else None
+
+
+def _extract_hosted_contents(msg: dict[str, Any]) -> list[tuple[str, str]]:
+    """Ordered, de-duplicated (hosted_content_id, url) pairs from the body HTML.
+
+    A message that shows the same image twice carries two identical <img> tags;
+    the pair is emitted once, in the order it first appears.
+    """
+    body = msg.get("body")
+    content = body.get("content") if isinstance(body, dict) else None
+    if not isinstance(content, str) or not content:
+        return []
+
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for url, hosted_id in HOSTED_CONTENT_RE.findall(content):
+        if hosted_id in seen:
+            continue
+        seen.add(hosted_id)
+        found.append((hosted_id, url))
+    return found
+
+
+def _attachment_kind(content_type: Any) -> str:
+    """Map a Graph attachment contentType onto one of ATTACHMENT_KINDS."""
+    if content_type == "reference":
+        return "file"
+    if isinstance(content_type, str) and content_type.startswith(_CARD_CONTENT_TYPE_PREFIX):
+        return "card"
+    if content_type == "messageReference":
+        return "message_reference"
+    return "other"
+
+
+def parse_message_attachments(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """ONE unified list describing everything attached to a Teams message.
+
+    Each entry is
+    ``{"id", "kind", "name", "content_type", "content_url", "thumbnail_url", "card_text"}``.
+    Graph ``attachments`` entries come first, in Graph order; inline images
+    parsed out of the body HTML follow, in body order, as kind ``image`` whose
+    ``id`` is the hosted content id and whose ``content_type`` is unknown until
+    the bytes are fetched.
+
+    Every level is type-checked rather than trusted: one malformed entry must
+    not sink a whole page of messages, so this never raises.
+    """
+    entries: list[dict[str, Any]] = []
+
+    raw = msg.get("attachments")
+    if isinstance(raw, list):
+        for att in raw:
+            if not isinstance(att, dict):
+                continue
+            content_type = att.get("contentType")
+            kind = _attachment_kind(content_type)
+            card_text = None
+            if kind == "card":
+                content = att.get("content")
+                if isinstance(content, str):
+                    card_text = _extract_adaptive_card_text(content) or None
+            entries.append(
+                {
+                    "id": _str_or_none(att.get("id")),
+                    "kind": kind,
+                    "name": _str_or_none(att.get("name")),
+                    "content_type": content_type if isinstance(content_type, str) else None,
+                    "content_url": _str_or_none(att.get("contentUrl")),
+                    "thumbnail_url": _str_or_none(att.get("thumbnailUrl")),
+                    "card_text": card_text,
+                }
+            )
+
+    for hosted_id, url in _extract_hosted_contents(msg):
+        entries.append(
+            {
+                "id": hosted_id,
+                "kind": "image",
+                "name": None,
+                "content_type": None,
+                "content_url": url,
+                "thumbnail_url": None,
+                "card_text": None,
+            }
+        )
+
+    return entries
+
+
+def _attachment_markers(msg: dict[str, Any]) -> str:
+    """Trailing markers so a file-only or image-only message is not "(empty)"."""
+    markers: list[str] = []
+    for entry in parse_message_attachments(msg):
+        if entry["kind"] == "file":
+            markers.append(f"[File: {entry['name'] or '(unnamed)'}]")
+        elif entry["kind"] == "image":
+            markers.append("[Image]")
+    return " ".join(markers)
+
+
 def extract_message_text(msg: dict[str, Any], max_length: int = -1) -> str:
     """Extract readable text from a Teams message.
 
@@ -137,19 +251,26 @@ def extract_message_text(msg: dict[str, Any], max_length: int = -1) -> str:
 
     # If body is empty, try adaptive card attachments
     if not content.strip():
-        for att in msg.get("attachments") or []:
+        raw = msg.get("attachments")
+        for att in raw if isinstance(raw, list) else []:
+            if not isinstance(att, dict):
+                continue
             if att.get("contentType") == "application/vnd.microsoft.card.adaptive":
                 card_text = _extract_adaptive_card_text(att.get("content", ""))
                 if card_text:
                     content = f"[Card] {card_text}"
                     break
 
+    # Markers are appended AFTER truncation: max_length caps the body a person
+    # wrote, not the evidence that a file came with it.
+    markers = _attachment_markers(msg)
+
     if not content.strip():
-        return ""
+        return markers
 
     if max_length > 0 and len(content) > max_length:
         content = content[:max_length] + "..."
-    return content
+    return f"{content} {markers}" if markers else content
 
 
 def extract_message_sender(msg: dict[str, Any]) -> str:
@@ -163,6 +284,57 @@ def extract_message_sender(msg: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Synchronous
 # ---------------------------------------------------------------------------
+
+
+def _message_base(chat_id: str = "", team_id: str = "", channel_id: str = "") -> str:
+    """The messages collection for a chat or a channel, with IDs percent-encoded.
+
+    Raises ValueError when neither target or both targets are given — the
+    caller must decide which conversation it means.
+    """
+    if chat_id and (team_id or channel_id):
+        raise ValueError("Provide chat_id or team_id and channel_id, not both.")
+    if chat_id:
+        return f"/chats/{_safe_id(chat_id)}/messages"
+    if team_id and channel_id:
+        return f"/teams/{_safe_id(team_id)}/channels/{_safe_id(channel_id)}/messages"
+    raise ValueError("Provide chat_id, or both team_id and channel_id.")
+
+
+def get_message(
+    client: GraphClient,
+    message_id: str,
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+) -> dict[str, Any]:
+    """Fetch ONE chat or channel message. Top-level messages only, not replies."""
+    base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
+    try:
+        return client.get(f"{base}/{_safe_id(message_id)}")
+    except GraphError as e:
+        _check_teams_access(e)
+
+
+def get_hosted_content(
+    client: GraphClient,
+    message_id: str,
+    hosted_content_id: str,
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+) -> tuple[bytes, str]:
+    """Raw bytes plus Content-Type of one inline image.
+
+    Only ``$value`` carries the bytes — the JSON form returns a null
+    ``contentBytes``.
+    """
+    base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
+    path = f"{base}/{_safe_id(message_id)}/hostedContents/{_safe_id(hosted_content_id)}/$value"
+    try:
+        return client.get_bytes_with_type(path)
+    except GraphError as e:
+        _check_teams_access(e)
 
 
 def list_joined_teams(client: GraphClient) -> list[dict[str, Any]]:
@@ -290,6 +462,38 @@ def send_chat_message(
 # ---------------------------------------------------------------------------
 # Asynchronous
 # ---------------------------------------------------------------------------
+
+
+async def aget_message(
+    client: AsyncGraphClient,
+    message_id: str,
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+) -> dict[str, Any]:
+    """Fetch ONE chat or channel message (async)."""
+    base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
+    try:
+        return await client.get(f"{base}/{_safe_id(message_id)}")
+    except GraphError as e:
+        _check_teams_access(e)
+
+
+async def aget_hosted_content(
+    client: AsyncGraphClient,
+    message_id: str,
+    hosted_content_id: str,
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+) -> tuple[bytes, str]:
+    """Raw bytes plus Content-Type of one inline image (async)."""
+    base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
+    path = f"{base}/{_safe_id(message_id)}/hostedContents/{_safe_id(hosted_content_id)}/$value"
+    try:
+        return await client.get_bytes_with_type(path)
+    except GraphError as e:
+        _check_teams_access(e)
 
 
 async def alist_joined_teams(client: AsyncGraphClient) -> list[dict[str, Any]]:

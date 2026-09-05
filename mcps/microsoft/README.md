@@ -235,7 +235,7 @@ If the browser path fails (SSH, headless), MSAL falls back to device code flow �
 poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
-### Available Tools (42)
+### Available Tools (45)
 
 | Tool | Description |
 |------|-------------|
@@ -252,7 +252,8 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 | `check_availability` | Check free/busy availability for one or more people |
 | `list_teams` | List joined Microsoft Teams, or list channels within a specific team |
 | `list_chats` | List Teams chats (1:1, group, meeting) with last message preview |
-| `read_teams_messages` | Read recent messages from a Teams channel or chat |
+| `read_teams_messages` | Read recent messages from a Teams channel or chat, with an attachments column |
+| `get_teams_attachment` | Read, download (base64), or save to OneDrive a file or inline image from a Teams message |
 | `send_teams_message` | Send a message to a Teams channel or chat |
 | `get_teams_activity` | Get recent Teams activity across all channels and chats as a CSV digest |
 | `list_sharepoint_sites` | Search for SharePoint sites, or list followed sites |
@@ -277,20 +278,22 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 | `mark_mail_read_json` | Mark messages read or unread in bulk, best effort per message |
 | `list_chats_page` | Fetch one page of the user's Teams chats, newest activity first |
 | `get_chat_members_json` | List a chat's members (user IDs and display names) |
-| `list_chat_messages_page` | Fetch one page of a chat's messages, flattened |
+| `list_chat_messages_page` | Fetch one page of a chat's messages, flattened, with attachments |
+| `get_chat_attachment_json` | Get a chat attachment's bytes, or a file's thumbnail, as base64 |
 | `mark_chat_read_json` | Mark a Teams chat read for the signed-in user |
 | `send_chat_message_json` | Send a plain-text message to a Teams chat |
+| `inspect_file_json` | Get a drive item's or sharing link's metadata (and optionally text) as structured JSON |
 | `connection_status` | Report whether Microsoft is connected, and with which scopes |
 
 All parameters use simple `str`/`int` types for Bedrock compatibility. Teams tools return a friendly message when Teams is not available for the account (personal MSA accounts). File tools work with both OneDrive (consumer) and SharePoint (organizational). Power BI tools require an organizational tenant and use a separate token scope.
 
 ### Desktop JSON tools
 
-The last fifteen tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
+The last seventeen tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
 
-The 27 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
+The 28 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
 
-A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. The Teams write tools (`mark_chat_read_json`, `send_chat_message_json`) also return a structured `"teams_unavailable"` error for the permanent no-Teams-license 403, which a client must not retry. The mail attachment tools (`get_mail_attachment_json`, `add_draft_attachment_json`) likewise return structured permanent errors — `invalid_mode`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `get_mail_attachment_json` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
+A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. The Teams write tools (`mark_chat_read_json`, `send_chat_message_json`) also return a structured `"teams_unavailable"` error for the permanent no-Teams-license 403, which a client must not retry. The mail attachment tools (`get_mail_attachment_json`, `add_draft_attachment_json`) likewise return structured permanent errors — `invalid_mode`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `get_mail_attachment_json` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. The Teams attachment reader (`get_chat_attachment_json`) returns `not_found`, `access_denied`, `no_thumbnail`, `invalid_thumbnail`, `is_folder`, and `too_large` — it shares the same 10 MB cap, decided from the driveItem size before a file is downloaded — and `inspect_file_json` returns `missing_target`, `access_denied`, `not_found`, and `invalid_link`; all of these are permanent too. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
 
 ## Bond AI Integration
 
