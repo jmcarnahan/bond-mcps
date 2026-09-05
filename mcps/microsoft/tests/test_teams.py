@@ -1497,6 +1497,8 @@ CHAT_UPLOAD_URL = (
     f"{GRAPH_BASE_URL}/me/drive/root:/Microsoft%20Teams%20Chat%20Files/notes.txt:/content"
 )
 UPLOADED_ITEM_URL = f"{GRAPH_BASE_URL}/me/drive/items/teams-upload-001"
+# Cleanup addresses the item through its own drive (parentReference.driveId).
+UPLOADED_ITEM_DRIVE_URL = f"{GRAPH_BASE_URL}/drives/drive-001/items/teams-upload-001"
 CHAT_MEMBERS_URL = f"{GRAPH_BASE_URL}/chats/chat-1on1-001/members"
 INVITE_URL = f"{GRAPH_BASE_URL}/me/drive/items/teams-upload-001/invite"
 CHAT_MESSAGES_URL = f"{GRAPH_BASE_URL}/chats/chat-1on1-001/messages"
@@ -1580,6 +1582,16 @@ class TestMemberEmails:
 
     def test_an_empty_roster_is_no_emails(self):
         assert _member_emails({}) == []
+
+    def test_the_sender_is_left_out_by_user_id(self):
+        """The signed-in user owns the file; inviting the owner can sink the whole invite."""
+        assert _member_emails(SAMPLE_CHAT_MEMBERS_RESPONSE, "user-id-001") == ["alice@example.com"]
+
+    def test_an_unknown_user_id_excludes_nobody(self):
+        assert _member_emails(SAMPLE_CHAT_MEMBERS_RESPONSE, "someone-else") == [
+            "user@example.com",
+            "alice@example.com",
+        ]
 
 
 class TestHostedContents:
@@ -1821,11 +1833,102 @@ class TestSendChatFile:
     async def test_a_403_on_the_message_itself_is_still_a_teams_problem(self):
         _mock_chat_upload()
         respx.post(CHAT_MESSAGES_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        removed = respx.delete(UPLOADED_ITEM_DRIVE_URL).mock(return_value=httpx.Response(204))
         async with AsyncGraphClient("tok") as client:
             with pytest.raises(TeamsNotAvailableError):
                 await teams.asend_message_with_files(
                     client, content="here", files=[NOTES], chat_id="chat-1on1-001"
                 )
+
+        assert removed.call_count == 1
+
+    @respx.mock
+    async def test_a_failed_post_removes_the_uploaded_file(self):
+        """Otherwise a retry re-uploads under a renamed copy; the drive fills with duplicates."""
+        _mock_chat_upload()
+        respx.post(CHAT_MESSAGES_URL).mock(
+            return_value=httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        )
+        removed = respx.delete(UPLOADED_ITEM_DRIVE_URL).mock(return_value=httpx.Response(204))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError, match="503"):
+                await teams.asend_message_with_files(
+                    client, content="here", files=[NOTES], chat_id="chat-1on1-001"
+                )
+
+        assert removed.call_count == 1
+        assert _call_trail()[-1] == ("DELETE", "/v1.0/drives/drive-001/items/teams-upload-001")
+
+    @respx.mock
+    async def test_a_failed_second_upload_removes_the_first(self):
+        _mock_chat_upload()
+        respx.put(url__startswith=CHAT_UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(201, json=SAMPLE_TEAMS_UPLOAD_RESPONSE),
+                httpx.Response(403, json=GRAPH_ERROR_403),
+            ]
+        )
+        removed = respx.delete(UPLOADED_ITEM_DRIVE_URL).mock(return_value=httpx.Response(204))
+        post = respx.post(CHAT_MESSAGES_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(FilesScopeMissingError):
+                await teams.asend_message_with_files(
+                    client, content="here", files=[NOTES, NOTES], chat_id="chat-1on1-001"
+                )
+
+        assert removed.call_count == 1
+        assert not post.called
+
+    @respx.mock
+    async def test_a_cleanup_failure_does_not_mask_the_real_error(self):
+        _mock_chat_upload()
+        respx.post(CHAT_MESSAGES_URL).mock(
+            return_value=httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        )
+        respx.delete(UPLOADED_ITEM_DRIVE_URL).mock(return_value=httpx.Response(500))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError, match="503"):
+                await teams.asend_message_with_files(
+                    client, content="here", files=[NOTES], chat_id="chat-1on1-001"
+                )
+
+    @respx.mock
+    async def test_the_sender_is_not_invited_to_their_own_file(self):
+        _mock_chat_upload()
+        invite = respx.post(INVITE_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_INVITE_RESPONSE)
+        )
+        respx.post(CHAT_MESSAGES_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await teams.asend_message_with_files(
+                client,
+                content="here",
+                files=[NOTES],
+                chat_id="chat-1on1-001",
+                exclude_user_id="user-id-001",
+            )
+
+        recipients = json.loads(invite.calls[0].request.content)["recipients"]
+        assert recipients == [{"email": "alice@example.com"}]
+
+    @respx.mock
+    def test_sync_failed_post_removes_the_uploaded_file(self):
+        _mock_chat_upload()
+        respx.post(CHAT_MESSAGES_URL).mock(
+            return_value=httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        )
+        removed = respx.delete(UPLOADED_ITEM_DRIVE_URL).mock(return_value=httpx.Response(204))
+        with GraphClient("tok") as client:
+            with pytest.raises(GraphError, match="503"):
+                teams.send_message_with_files(
+                    client, content="here", files=[NOTES], chat_id="chat-1on1-001"
+                )
+
+        assert removed.call_count == 1
 
     @respx.mock
     def test_sync_twin_walks_the_same_path(self):
@@ -1858,6 +1961,28 @@ class TestSendChannelFile:
         respx.get(
             url__startswith=f"{GRAPH_BASE_URL}/drives/drive-team-001/items/teams-upload-001"
         ).mock(return_value=httpx.Response(200, json=SAMPLE_TEAMS_UPLOADED_ITEM))
+
+    @respx.mock
+    async def test_a_failed_post_removes_the_file_from_the_channel_drive(self):
+        """Channel files live in the team drive, so cleanup must address that drive."""
+        self._mock_channel_upload()
+        respx.post(f"{GRAPH_BASE_URL}/teams/team-001/channels/channel-001/messages").mock(
+            return_value=httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        )
+        removed = respx.delete(f"{GRAPH_BASE_URL}/drives/drive-001/items/teams-upload-001").mock(
+            return_value=httpx.Response(204)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError, match="503"):
+                await teams.asend_message_with_files(
+                    client,
+                    content="deck",
+                    files=[NOTES],
+                    team_id="team-001",
+                    channel_id="channel-001",
+                )
+
+        assert removed.call_count == 1
 
     @respx.mock
     async def test_uploads_under_the_channel_drive_and_posts_to_the_channel(self):

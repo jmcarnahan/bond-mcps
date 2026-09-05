@@ -1915,6 +1915,7 @@ async def send_teams_message(
                         chat_id=chat_id,
                         team_id="" if chat_id else team_id,
                         channel_id="" if chat_id else channel_id,
+                        exclude_user_id=teams_ops.decode_token_claims(token).get("oid", ""),
                     )
                 except ValueError as e:
                     return str(e)
@@ -3668,6 +3669,7 @@ async def send_chat_message_json(chat_id: str, text: str, attachments: str = "")
                     content_type="text",
                     files=sent_files,
                     chat_id=chat_id,
+                    exclude_user_id=teams_ops.decode_token_claims(token).get("oid", ""),
                 )
             else:
                 created = await teams_ops.asend_chat_message(

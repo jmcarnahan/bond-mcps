@@ -141,6 +141,20 @@ TEAMS_SEND_MEMBERS_URL = f"{GRAPH_BASE_URL}/chats/{TEAMS_CHAT_ID}/members"
 TEAMS_SEND_INVITE_URL = f"{TEAMS_SEND_ITEM_URL}/invite"
 
 
+def _token_with_oid(oid: str) -> str:
+    """An unsigned JWT whose payload carries the given oid claim."""
+    payload = base64.urlsafe_b64encode(json.dumps({"oid": oid}).encode()).rstrip(b"=")
+    return f"eyJhbGciOiJub25lIn0.{payload.decode()}.sig"
+
+
+def _invite_recipients() -> list:
+    """The recipients of the one /invite call respx saw."""
+    for call in respx.calls:
+        if call.request.url.path.endswith("/invite"):
+            return json.loads(call.request.content)["recipients"]
+    raise AssertionError("no /invite request was made")
+
+
 def _mock_chat_file_upload() -> None:
     """The four requests that put a file where a chat message can point at it."""
     respx.put(url__startswith=TEAMS_SEND_UPLOAD_URL).mock(
@@ -2121,6 +2135,51 @@ class TestMCPSendTeamsMessageFiles:
         assert base64.b64decode(payload["hostedContents"][0]["contentBytes"]) == PNG_BYTES
         assert '<img src="../hostedContents/1/$value">' in payload["body"]["content"]
         assert _get_text(result) == "Message sent to Teams chat with 1 inline image(s)."
+
+    @respx.mock
+    async def test_the_sender_from_the_token_is_not_invited(self, mcp_server):
+        """The token's oid identifies the sender; they own the file already."""
+        _mock_chat_file_upload()
+        respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token(_token_with_oid("user-id-001")):
+            await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "here you go",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": '{"attachments": [{"name": "notes.txt", "text": "hello"}]}',
+                },
+            )
+
+        assert _invite_recipients() == [{"email": "alice@example.com"}]
+
+    @respx.mock
+    async def test_a_failed_post_removes_the_uploaded_file(self, mcp_server):
+        _mock_chat_file_upload()
+        respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(503, json={"error": {"code": "ServiceUnavailable"}})
+        )
+        removed = respx.delete(f"{GRAPH_BASE_URL}/drives/drive-001/items/teams-upload-001").mock(
+            return_value=httpx.Response(204)
+        )
+        from fastmcp.exceptions import ToolError
+
+        with _mock_token():
+            with pytest.raises(ToolError, match="503"):
+                await _call(
+                    mcp_server,
+                    "send_teams_message",
+                    {
+                        "message": "here you go",
+                        "chat_id": TEAMS_CHAT_ID,
+                        "options": '{"attachments": [{"name": "notes.txt", "text": "hello"}]}',
+                    },
+                )
+
+        assert removed.call_count == 1
 
     @respx.mock
     async def test_files_and_images_are_both_named_in_the_confirmation(self, mcp_server):
@@ -5127,6 +5186,32 @@ class TestMCPSendChatMessageJson:
         attachment = _structured(result)["message"]["attachments"][0]
         assert attachment["kind"] == "file"
         assert attachment["name"] == "notes.txt"
+
+    @respx.mock
+    async def test_the_sender_from_the_token_is_not_invited(self, mcp_server):
+        _mock_chat_file_upload()
+        respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED_WITH_FILE)
+        )
+        with _mock_token(_token_with_oid("user-id-001")):
+            await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {
+                    "chat_id": TEAMS_CHAT_ID,
+                    "text": "notes attached",
+                    "attachments": json.dumps(
+                        [
+                            {
+                                "name": "notes.txt",
+                                "content_base64": base64.b64encode(b"hello").decode(),
+                            }
+                        ]
+                    ),
+                },
+            )
+
+        assert _invite_recipients() == [{"email": "alice@example.com"}]
 
     @respx.mock
     async def test_the_content_type_is_guessed_from_the_name(self, mcp_server):

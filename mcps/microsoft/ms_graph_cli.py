@@ -751,6 +751,7 @@ def cmd_teams_send(args: argparse.Namespace) -> None:
                 chat_id=args.chat_id,
                 team_id="" if args.chat_id else args.team_id,
                 channel_id="" if args.chat_id else args.channel_id,
+                exclude_user_id=teams.decode_token_claims(token).get("oid", ""),
             )
         except teams.FilesScopeMissingError as e:
             print(f"Error: {e}", file=sys.stderr)

@@ -768,12 +768,20 @@ def _attachment_from_drive_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _member_emails(members: dict[str, Any]) -> list[str]:
-    """Addressable e-mails from a chat member list, de-duplicated case-insensitively."""
+def _member_emails(members: dict[str, Any], exclude_user_id: str = "") -> list[str]:
+    """Addressable e-mails from a chat member list, de-duplicated case-insensitively.
+
+    ``exclude_user_id`` is the signed-in user's AAD object id (the token's
+    ``oid`` claim): the sender already owns the file, and inviting the owner
+    is at best a no-op and at worst the one recipient that makes Graph reject
+    the whole invite.
+    """
     emails: list[str] = []
     seen: set[str] = set()
     for member in members.get("value", []) or []:
         if not isinstance(member, dict):
+            continue
+        if exclude_user_id and member.get("userId") == exclude_user_id:
             continue
         raw = member.get("email")
         if not isinstance(raw, str):
@@ -819,6 +827,7 @@ def upload_chat_file(
     client: GraphClient,
     chat_id: str,
     att: ResolvedAttachment,
+    exclude_user_id: str = "",
 ) -> dict[str, Any]:
     """Put one file where a chat can reference it, and let the chat read it.
 
@@ -840,7 +849,7 @@ def upload_chat_file(
         _raise_scope_missing(e)
     item = files_ops.get_drive_item(client, item["id"], select=files_ops.TEAMS_ITEM_SELECT)
     try:
-        emails = _member_emails(chat_members(client, chat_id))
+        emails = _member_emails(chat_members(client, chat_id), exclude_user_id)
         files_ops.invite_drive_item(client, item["id"], emails)
     except GraphError as e:
         logger.warning("Could not share %s with chat members: %s", att.name, e)
@@ -851,6 +860,7 @@ async def aupload_chat_file(
     client: AsyncGraphClient,
     chat_id: str,
     att: ResolvedAttachment,
+    exclude_user_id: str = "",
 ) -> dict[str, Any]:
     """Put one file where a chat can reference it (async). See upload_chat_file."""
     try:
@@ -866,7 +876,7 @@ async def aupload_chat_file(
         _raise_scope_missing(e)
     item = await files_ops.aget_drive_item(client, item["id"], select=files_ops.TEAMS_ITEM_SELECT)
     try:
-        emails = _member_emails(await achat_members(client, chat_id))
+        emails = _member_emails(await achat_members(client, chat_id), exclude_user_id)
         await files_ops.ainvite_drive_item(client, item["id"], emails)
     except GraphError as e:
         logger.warning("Could not share %s with chat members: %s", att.name, e)
@@ -957,6 +967,35 @@ def _files_payload(
     return payload
 
 
+def _uploaded_item_path(item: dict[str, Any]) -> str:
+    """Where an uploaded driveItem lives, for cleanup: its own drive when known."""
+    parent = item.get("parentReference")
+    drive_id = parent.get("driveId") if isinstance(parent, dict) else None
+    return f"{files_ops._drive_base(None, drive_id or None)}/items/{item['id']}"
+
+
+def _discard_uploads(client: GraphClient, items: list[dict[str, Any]]) -> None:
+    """Best-effort removal of files uploaded for a message that never posted.
+
+    Without this a retry uploads the same file again under a renamed copy. The
+    original failure is what the caller must see, so nothing here raises.
+    """
+    for item in items:
+        try:
+            client.delete(_uploaded_item_path(item))
+        except Exception:
+            logger.warning("Could not remove uploaded file %s after a failed send", item.get("id"))
+
+
+async def _adiscard_uploads(client: AsyncGraphClient, items: list[dict[str, Any]]) -> None:
+    """Best-effort removal of orphaned uploads (async)."""
+    for item in items:
+        try:
+            await client.delete(_uploaded_item_path(item))
+        except Exception:
+            logger.warning("Could not remove uploaded file %s after a failed send", item.get("id"))
+
+
 def send_message_with_files(
     client: GraphClient,
     *,
@@ -968,26 +1007,34 @@ def send_message_with_files(
     chat_id: str = "",
     team_id: str = "",
     channel_id: str = "",
+    exclude_user_id: str = "",
 ) -> dict[str, Any]:
     """Send one message carrying uploaded files and/or inline images.
 
     The target and the images are validated before anything is uploaded, so a
-    bad request costs no writes.
+    bad request costs no writes. If a later upload or the post itself fails,
+    the files already uploaded are removed again (best effort) so a retry does
+    not leave renamed duplicates behind. ``exclude_user_id`` is the sender's
+    AAD object id, kept out of the chat share list.
     """
     base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
     hosted = _hosted_contents(images)
-    items = [
-        upload_chat_file(client, chat_id, att)
-        if chat_id
-        else upload_channel_file(client, team_id, channel_id, att)
-        for att in files
-    ]
-    attachments = [_attachment_from_drive_item(item) for item in items]
-    payload = _files_payload(content, content_type, mentions, attachments, hosted)
+    items: list[dict[str, Any]] = []
     try:
-        result = client.post(base, json_data=payload)
-    except GraphError as e:
-        _check_teams_access(e)
+        for att in files:
+            if chat_id:
+                items.append(upload_chat_file(client, chat_id, att, exclude_user_id))
+            else:
+                items.append(upload_channel_file(client, team_id, channel_id, att))
+        attachments = [_attachment_from_drive_item(item) for item in items]
+        payload = _files_payload(content, content_type, mentions, attachments, hosted)
+        try:
+            result = client.post(base, json_data=payload)
+        except GraphError as e:
+            _check_teams_access(e)
+    except Exception:
+        _discard_uploads(client, items)
+        raise
     return result or {}
 
 
@@ -1002,22 +1049,30 @@ async def asend_message_with_files(
     chat_id: str = "",
     team_id: str = "",
     channel_id: str = "",
+    exclude_user_id: str = "",
 ) -> dict[str, Any]:
-    """Send one message carrying files and/or inline images (async)."""
+    """Send one message carrying files and/or inline images (async).
+
+    See send_message_with_files for the cleanup and exclude_user_id rules.
+    """
     base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
     hosted = _hosted_contents(images)
-    items = []
-    for att in files:
-        if chat_id:
-            items.append(await aupload_chat_file(client, chat_id, att))
-        else:
-            items.append(await aupload_channel_file(client, team_id, channel_id, att))
-    attachments = [_attachment_from_drive_item(item) for item in items]
-    payload = _files_payload(content, content_type, mentions, attachments, hosted)
+    items: list[dict[str, Any]] = []
     try:
-        result = await client.post(base, json_data=payload)
-    except GraphError as e:
-        _check_teams_access(e)
+        for att in files:
+            if chat_id:
+                items.append(await aupload_chat_file(client, chat_id, att, exclude_user_id))
+            else:
+                items.append(await aupload_channel_file(client, team_id, channel_id, att))
+        attachments = [_attachment_from_drive_item(item) for item in items]
+        payload = _files_payload(content, content_type, mentions, attachments, hosted)
+        try:
+            result = await client.post(base, json_data=payload)
+        except GraphError as e:
+            _check_teams_access(e)
+    except Exception:
+        await _adiscard_uploads(client, items)
+        raise
     return result or {}
 
 
