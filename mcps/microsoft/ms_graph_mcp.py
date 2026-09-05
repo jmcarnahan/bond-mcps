@@ -13,18 +13,20 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (39 tools):
-  Email     : get_user_profile, list_emails, read_email, send_email, manage_inbox_rules, manage_mail_folders
+Tool summary (42 tools):
+  Email     : get_user_profile, list_emails, read_email, get_email_attachment, send_email,
+              manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
   Teams     : list_teams, list_chats, read_teams_messages, send_teams_message, get_teams_activity
   Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, edit_document, manage_file
   Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
-  Desktop JSON : get_profile_json, list_mail_delta, get_mail_detail, create_reply_draft_json,
-                 update_draft_body, send_draft, mark_mail_read_json, list_chats_page,
-                 get_chat_members_json, list_chat_messages_page, mark_chat_read_json,
-                 send_chat_message_json, connection_status
+  Desktop JSON : get_profile_json, list_mail_delta, get_mail_detail, get_mail_attachment_json,
+                 create_reply_draft_json, update_draft_body, add_draft_attachment_json,
+                 send_draft, mark_mail_read_json, list_chats_page, get_chat_members_json,
+                 list_chat_messages_page, mark_chat_read_json, send_chat_message_json,
+                 connection_status
 
-The 26 markdown tools above render prose for an LLM to read. The Desktop JSON
+The 27 markdown tools above render prose for an LLM to read. The Desktop JSON
 namespace is for programmatic clients (the desktop mail app) and follows a
 different convention: every tool returns a ``dict``, which FastMCP surfaces as
 structuredContent. Parameters stay ``str``/``int`` only (empty string = absent)
@@ -32,6 +34,7 @@ for Bedrock compatibility, as everywhere else in this server.
 """
 
 import base64
+import binascii
 import html as html_mod
 import logging
 import os
@@ -44,6 +47,7 @@ from starlette.responses import JSONResponse
 
 load_dotenv(Path(__file__).parent / ".env")
 
+from ms_graph import attachments as attachment_ops
 from ms_graph import calendar as calendar_ops
 from ms_graph import document_create, document_edit, workbook_edit
 from ms_graph import files as files_ops
@@ -279,6 +283,10 @@ async def list_emails(
             Full Access delegation on the shared mailbox.
         options: JSON string with optional fields:
             {"mark_as_read": ["id1", "id2"]}  — mark specified message IDs as read after listing.
+
+    Returns:
+        Pipe-delimited CSV. The has_attachments column flags messages that carry
+        attachments; read_email lists them and get_email_attachment reads one.
     """
     import csv
     import io
@@ -287,7 +295,7 @@ async def list_emails(
     if err:
         return err
 
-    _SELECT = "id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview"
+    _SELECT = "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview"
 
     mb = mailbox or None
     token = get_graph_token()
@@ -333,7 +341,17 @@ async def list_emails(
 
     writer = csv.writer(output, delimiter="|", quoting=csv.QUOTE_MINIMAL)
     writer.writerow(
-        ["date", "from_name", "from_address", "to", "subject", "is_read", "body_preview", "id"]
+        [
+            "date",
+            "from_name",
+            "from_address",
+            "to",
+            "subject",
+            "is_read",
+            "body_preview",
+            "has_attachments",
+            "id",
+        ]
     )
     for msg in messages:
         sender = msg.get("from", {}).get("emailAddress", {})
@@ -349,6 +367,7 @@ async def list_emails(
                 msg.get("subject", ""),
                 msg.get("isRead", ""),
                 msg.get("bodyPreview", ""),
+                msg.get("hasAttachments", ""),
                 msg.get("id", ""),
             ]
         )
@@ -359,10 +378,48 @@ async def list_emails(
     return output.getvalue()
 
 
+def _attachment_line(summary: dict, show_inline: bool) -> str:
+    """Render one attachment summary as a markdown bullet."""
+    name = summary["name"] or "(unnamed)"
+    suffix = " (inline)" if show_inline and summary["is_inline"] else ""
+    if summary["kind"] == "reference":
+        detail = f"link: {summary['source_url'] or '(no URL)'}"
+    elif summary["kind"] == "item":
+        detail = f"attached message, {_format_size(summary['size'])}"
+    else:
+        content_type = summary["content_type"] or "unknown type"
+        detail = f"{content_type}, {_format_size(summary['size'])}"
+    return f"- {name} — {detail}{suffix} — id: `{summary['id']}`"
+
+
+def _format_attachment_section(attachments: list[dict], include_inline: bool) -> str:
+    """Render the attachment block appended to a read email.
+
+    Inline images (embedded signatures, logos) are noise in a body an LLM is
+    reading, so they are counted and hidden unless explicitly asked for.
+    """
+    summaries = [attachment_ops.attachment_summary(att) for att in attachments]
+    hidden = 0 if include_inline else sum(1 for s in summaries if s["is_inline"])
+    shown = summaries if include_inline else [s for s in summaries if not s["is_inline"]]
+
+    lines = [f"\n\n**Attachments ({len(shown)}):**"]
+    lines.extend(_attachment_line(s, include_inline) for s in shown)
+    if hidden:
+        plural = "image" if hidden == 1 else "images"
+        lines.append(
+            f'(+{hidden} inline {plural} not shown; pass options {{"include_inline": true}})'
+        )
+    return "\n".join(lines)
+
+
 @mcp.tool()
 async def read_email(message_id: str, mailbox: str = "", options: str = "") -> str:
     """
     Read a single email message by its ID.
+
+    When the message has attachments they are listed under the body with their
+    names, types, sizes, and IDs. Pass an ID to get_email_attachment to read,
+    download, or save one.
 
     Args:
         message_id: The Graph API message ID (from list_emails output).
@@ -373,17 +430,30 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
             {"mark_as_read": true/false}  — mark the email read (or unread) after reading.
             {"max_content_length": -1}  — max characters for the email body. Default -1
                 (no limit). Set a positive integer to truncate long emails.
+            {"include_inline": true}  — also list inline images (embedded logos and
+                signatures). Default false: they are counted, not listed.
     """
     opts, err = parse_options(options)
     if err:
         return err
 
     max_content_length = opt_int(opts.get("max_content_length"), -1)
+    include_inline = opt_bool(opts.get("include_inline"), False)
 
     mb = mailbox or None
     token = get_graph_token()
+    attachments: list[dict] = []
+    attachments_note = ""
     async with AsyncGraphClient(token) as client:
         msg = await mail_ops.aget_message(client, message_id, mailbox=mb)
+        has_attachments = bool(msg.get("hasAttachments"))
+        if has_attachments:
+            try:
+                attachments = await attachment_ops.alist_message_attachments(
+                    client, message_id, mailbox=mb
+                )
+            except GraphError as e:
+                attachments_note = f"*(could not list attachments: {e})*"
         mark = opts.get("mark_as_read")
         if mark is not None:
             await mail_ops.amark_read(client, message_id, opt_bool(mark, True), mailbox=mb)
@@ -408,11 +478,193 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
         f"{content}"
     )
 
+    if attachments_note:
+        result += f"\n\n{attachments_note}"
+    elif has_attachments:
+        result += _format_attachment_section(attachments, include_inline)
+
     if mark is not None:
         state = "read" if opt_bool(mark, True) else "unread"
         result += f"\n\n---\n*Marked as {state}.*"
 
     return result
+
+
+_ATTACHMENT_TOO_LARGE_TEXT = (
+    'This attachment is too large for text extraction (limit: 50 MB). Use mode "onedrive".'
+)
+
+
+def _attachment_header(summary: dict) -> str:
+    """The identity block every get_email_attachment answer opens with."""
+    header = (
+        f"**Name:** {summary['name'] or '(unnamed)'}\n"
+        f"**Type:** {summary['content_type'] or 'unknown'} ({_format_size(summary['size'])})\n"
+        f"**ID:** `{summary['id']}`"
+    )
+    if summary["is_inline"]:
+        header += f"\n**Inline:** yes (content id {summary['content_id'] or 'none'})"
+    return header
+
+
+def _format_attached_message(item: dict) -> str:
+    """Render an item attachment's inner message as readable markdown."""
+    sender = (item.get("from") or {}).get("emailAddress") or {}
+    body = item.get("body") or {}
+    if body.get("contentType") == "text":
+        rendered = body.get("content", "")
+    else:
+        content = body.get("content", "")
+        rendered = item.get("bodyPreview", "")
+        rendered += f"\n[HTML body, {len(content)} chars — preview only]"
+    return (
+        "\n\n---\n**Attached message**\n"
+        f"**Subject:** {item.get('subject', '(no subject)')}\n"
+        f"**From:** {sender.get('name', '?')} <{sender.get('address', '?')}>\n"
+        f"**Date:** {item.get('receivedDateTime', '?')}\n\n"
+        f"{rendered}"
+    )
+
+
+def _render_attachment_result(header: str, result: dict, mode: str) -> str:
+    """Turn one sink result into the markdown the tool returns."""
+    if mode == "text":
+        if result.get("text") is not None:
+            body = f"{header}\n\n---\n{result['text']}"
+            if result.get("truncated"):
+                body += "\n\n*(content truncated)*"
+            return body
+        reason = result.get("reason")
+        if reason == "binary":
+            return (
+                f"{header}\n\nThis is a binary file and cannot be displayed as text. "
+                'Use mode "onedrive" to save it, or "base64" if it is under 1 MB.'
+            )
+        if reason == "too_large":
+            return f"{header}\n\n{_ATTACHMENT_TOO_LARGE_TEXT}"
+        return f"{header}\n\nCould not extract text from this document."
+    if mode == "base64":
+        if result.get("error") == "too_large":
+            limit = _format_size(attachment_ops.MAX_BASE64_RETURN_BYTES)
+            return (
+                f"{header}\n\nToo large to return as base64 (limit {limit}). "
+                'Use mode "onedrive" or "text".'
+            )
+        return f"{header}\n\n**Base64 ({result['size']} bytes):**\n{result['base64']}"
+    return (
+        f"{header}\n\n**Saved to OneDrive:** {result['web_url']}\n"
+        f"**Item ID:** `{result['item_id']}`"
+    )
+
+
+@mcp.tool()
+async def get_email_attachment(
+    message_id: str, attachment_id: str, mode: str = "text", mailbox: str = "", options: str = ""
+) -> str:
+    """
+    Read, download, or save one attachment from an email message.
+
+    Get the IDs from read_email, which lists a message's attachments.
+
+    Args:
+        message_id: The Graph API message ID (from list_emails output).
+        attachment_id: The attachment ID (from read_email's attachment list).
+        mode: How to return the attachment.
+            "text" (default) — extract the text: Word, PowerPoint, Excel, and PDF
+                documents are parsed, plain-text files are decoded, and binaries
+                (images, archives) say so instead.
+            "base64" — the raw bytes, base64-encoded. Only for attachments under
+                1 MB; anything larger is refused, so use "onedrive" for those.
+            "onedrive" — save a copy to your OneDrive and return the link.
+        mailbox: Shared mailbox email address (e.g. "support@company.com"). Leave empty
+            to access your own mailbox. Requires Mail.Read.Shared permission and Exchange
+            Full Access delegation on the shared mailbox.
+        options: JSON string with optional fields:
+            {"folder_path": "Attachments"}  — OneDrive folder for mode "onedrive"
+                (default "Attachments"; created if missing).
+            {"site_id": ""}  — save to this SharePoint site's drive instead of OneDrive.
+
+    Notes:
+        An attached email (item attachment) renders its subject, sender, date, and
+        body in "text" mode, and downloads as a .eml file in the other modes. A link
+        attachment (a file shared by reference) has no bytes to return: every mode
+        gives back its URL, which inspect_file can then read.
+    """
+    opts, err = parse_options(options)
+    if err:
+        return err
+
+    mode = mode.strip().lower() or "text"
+    if mode not in ("text", "base64", "onedrive"):
+        return f"mode must be one of: text, base64, onedrive; got {mode!r}"
+
+    mb = mailbox or None
+    token = get_graph_token()
+    async with AsyncGraphClient(token) as client:
+        meta = await attachment_ops.aget_attachment_metadata(
+            client, message_id, attachment_id, mailbox=mb
+        )
+        summary = attachment_ops.attachment_summary(meta)
+        header = _attachment_header(summary)
+
+        if summary["kind"] == "reference":
+            return (
+                f"{header}\n**Link:** {summary['source_url'] or '(no URL)'}\n\n"
+                "This is a link attachment; open the URL (or use inspect_file with it) "
+                "to read the file."
+            )
+
+        # Decide from the metadata size, so an oversized attachment is refused
+        # before its bytes cross the wire. Attached messages are downloaded as
+        # .eml in base64 mode, so the same ceiling applies to them.
+        if mode == "base64" and summary["size"] > attachment_ops.MAX_BASE64_RETURN_BYTES:
+            limit = _format_size(attachment_ops.MAX_BASE64_RETURN_BYTES)
+            return (
+                f"{header}\n\nToo large to return as base64 (limit {limit}). "
+                'Use mode "onedrive" or "text".'
+            )
+
+        if summary["kind"] == "item":
+            if mode == "text":
+                expanded = await attachment_ops.aget_item_attachment(
+                    client, message_id, attachment_id, mailbox=mb
+                )
+                return header + _format_attached_message(expanded.get("item") or {})
+            data, header_type = await attachment_ops.aget_attachment_bytes(
+                client, message_id, attachment_id, mailbox=mb
+            )
+            name = summary["name"] or attachment_id
+            att = attachment_ops.ResolvedAttachment(
+                name=name if name.lower().endswith(".eml") else f"{name}.eml",
+                data=data,
+                content_type="message/rfc822",
+            )
+        else:
+            if mode == "text" and summary["size"] > files_ops.MAX_DOCUMENT_DOWNLOAD_BYTES:
+                return f"{header}\n\n{_ATTACHMENT_TOO_LARGE_TEXT}"
+            data, header_type = await attachment_ops.aget_attachment_bytes(
+                client, message_id, attachment_id, mailbox=mb
+            )
+            name = summary["name"] or attachment_id
+            att = attachment_ops.ResolvedAttachment(
+                name=name,
+                data=data,
+                content_type=(
+                    summary["content_type"]
+                    or header_type
+                    or attachment_ops.guess_content_type(name)
+                ),
+            )
+
+        result = await attachment_ops.adeliver_attachment(
+            client,
+            att,
+            mode,
+            folder_path=opt_str(opts.get("folder_path")) or "Attachments",
+            site_id=opt_str(opts.get("site_id")) or "",
+        )
+
+    return _render_attachment_result(header, result, mode)
 
 
 @mcp.tool()
@@ -433,6 +685,26 @@ async def send_email(to: str, subject: str, body: str, mailbox: str = "", option
         options: JSON string with optional fields:
             {"body_type": "auto|HTML|Text", "cc": "a@b.com,c@d.com",
              "bcc": "x@y.com,z@w.com", "from_address": "alias@company.com"}
+            {"attachments": [...]}  — a JSON array of attachment specs. There is no
+             file system to read from, so each spec says where the bytes come from.
+             Use exactly one source key per spec:
+                {"name": "notes.txt", "text": "hello"}
+                    — literal text, saved under that name.
+                {"name": "report.docx", "text": "# Title\\n\\nbody"}
+                    — a .docx name converts the markdown into a Word document;
+                      a .xlsx name converts CSV text into a spreadsheet.
+                {"name": "img.png", "base64": "iVBOR..."}
+                    — raw bytes you already hold, base64-encoded.
+                {"drive_item_id": "01ABC...", "site_id": ""}
+                    — a file already in OneDrive or SharePoint (from list_files);
+                      site_id is optional and selects a SharePoint drive.
+                {"url": "https://contoso-my.sharepoint.com/:w:/p/..."}
+                    — a OneDrive/SharePoint sharing link.
+                {"message_id": "AAMk...", "attachment_id": "AAMk..."}
+                    — forward an attachment from another email (IDs from read_email).
+             "name" is required for text and base64, optional elsewhere (it defaults
+             to the source file's own name). Any spec may set "content_type" to
+             override the type guessed from the name.
     """
     opts, err = parse_options(options)
     if err:
@@ -448,7 +720,14 @@ async def send_email(to: str, subject: str, body: str, mailbox: str = "", option
     cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()] if cc else None
     bcc_list = [addr.strip() for addr in bcc.split(",") if addr.strip()] if bcc else None
 
+    resolved: list = []
     async with AsyncGraphClient(token) as client:
+        specs = opts.get("attachments")
+        if specs is not None:
+            try:
+                resolved = await attachment_ops.aresolve_attachment_sources(client, specs)
+            except ValueError as e:
+                return str(e)
         await mail_ops.asend_message(
             client,
             to=to_list,
@@ -459,12 +738,17 @@ async def send_email(to: str, subject: str, body: str, mailbox: str = "", option
             from_address=from_address or None,
             body_type=body_type,
             mailbox=mb,
+            attachments=resolved or None,
         )
 
     cc_note = f" (CC: {cc})" if cc else ""
     bcc_note = f" (BCC: {len(bcc_list)} recipients)" if bcc_list else ""
     source = f" from {mailbox}" if mb else ""
-    return f"Email sent to {to}{source}{cc_note}{bcc_note}."
+    attach_note = ""
+    if resolved:
+        listed = ", ".join(f"{a.name} ({_format_size(len(a.data))})" for a in resolved)
+        attach_note = f" with {len(resolved)} attachment(s): {listed}"
+    return f"Email sent to {to}{source}{cc_note}{bcc_note}{attach_note}."
 
 
 def _summarize_rule_keys(predicate: dict) -> str:
@@ -2194,15 +2478,17 @@ async def export_report(
 # Desktop JSON tools
 #
 # A separate namespace for programmatic clients (the desktop mail app). Unlike
-# the 23 markdown tools above, these return dicts — FastMCP renders them as
+# the 27 markdown tools above, these return dicts — FastMCP renders them as
 # structuredContent. Parameters remain str/int only.
 #
 # Error contract: a missing Microsoft connection returns the not_connected
 # payload (with a connect URL when one exists). The Teams write tools return
 # a structured "teams_unavailable" error for the no-license 403, which is
-# permanent and must not be retried. Everything else — Graph 5xx, throttling,
-# unexpected shapes — propagates so FastMCP raises a tool error, which is the
-# client's "transient, retry later" signal.
+# permanent and must not be retried. The mail attachment tools likewise return
+# structured permanent errors — invalid_mode, too_large, reference, empty_name,
+# invalid_base64 — which must not be retried either. Everything else — Graph
+# 5xx, throttling, unexpected shapes — propagates so FastMCP raises a tool
+# error, which is the client's "transient, retry later" signal.
 # ---------------------------------------------------------------------------
 
 
@@ -2334,12 +2620,18 @@ async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received:
 @mcp.tool()
 async def get_mail_detail(message_id: str) -> dict:
     """
-    Get a message's plain-text body and internet headers as structured JSON.
+    Get a message's plain-text body, internet headers, and attachment list.
 
     For programmatic clients. Exchange converts the body to text server-side,
     so the client never parses HTML. Returns body_text (the reply-relevant
     part only, without the quoted thread), headers (lowercased name → value;
     where a header repeats, the first occurrence wins), and has_attachments.
+
+    Also returns attachments: metadata only — id, name, content_type, size (in
+    bytes), is_inline, content_id, kind (file | item | reference | unknown), and
+    source_url for link attachments. No bytes are fetched here; pass an id to
+    get_mail_attachment_json for content. At most 50 attachments are listed,
+    while attachment_count reports the true number.
 
     Args:
         message_id: The Graph message ID.
@@ -2357,11 +2649,137 @@ async def get_mail_detail(message_id: str) -> dict:
         if name and name not in headers:
             headers[name] = header.get("value")
 
+    # aget_message_detail already $expands the attachments, so the list costs
+    # no extra round trip.
+    raw = msg.get("attachments") or []
     return {
         "body_text": (msg.get("uniqueBody") or {}).get("content") or "",
         "headers": headers,
         "has_attachments": bool(msg.get("hasAttachments")),
+        "attachments": [
+            attachment_ops.attachment_summary(a)
+            for a in raw[: attachment_ops.MAX_LISTED_ATTACHMENTS]
+        ],
+        "attachment_count": len(raw),
     }
+
+
+async def _attachment_json_text(
+    client: AsyncGraphClient, message_id: str, attachment_id: str, summary: dict
+) -> dict:
+    """text mode for get_mail_attachment_json: extract, decode, or explain."""
+    if summary["kind"] == "reference":
+        return {**summary, "text": None, "truncated": False, "reason": "reference"}
+    if summary["kind"] == "item":
+        expanded = await attachment_ops.aget_item_attachment(client, message_id, attachment_id)
+        item = expanded.get("item") or {}
+        body = item.get("body") or {}
+        is_text = body.get("contentType") == "text"
+        return {
+            **summary,
+            **_attachment_item_fields(item),
+            "text": body.get("content", "") if is_text else item.get("bodyPreview", ""),
+            "truncated": not is_text,
+        }
+    if summary["size"] > files_ops.MAX_DOCUMENT_DOWNLOAD_BYTES:
+        return {**summary, "text": None, "truncated": False, "reason": "too_large"}
+
+    data, header_type = await attachment_ops.aget_attachment_bytes(
+        client, message_id, attachment_id
+    )
+    name = summary["name"] or attachment_id
+    content_type = summary["content_type"] or header_type or attachment_ops.guess_content_type(name)
+    summary["content_type"] = summary["content_type"] or content_type
+    att = attachment_ops.ResolvedAttachment(name=name, data=data, content_type=content_type)
+    result = await attachment_ops.adeliver_attachment(client, att, "text")
+    out = {**summary, "text": result["text"], "truncated": result["truncated"]}
+    if "reason" in result:
+        out["reason"] = result["reason"]
+    return out
+
+
+def _attachment_item_fields(item: dict) -> dict:
+    """The inner-message fields an item attachment contributes to a JSON result."""
+    sender = (item.get("from") or {}).get("emailAddress") or {}
+    return {
+        "item_subject": item.get("subject"),
+        "item_from": sender.get("address"),
+        "item_received": item.get("receivedDateTime"),
+    }
+
+
+@mcp.tool()
+async def get_mail_attachment_json(
+    message_id: str, attachment_id: str, mode: str = "bytes"
+) -> dict:
+    """
+    Get one email attachment's metadata, extracted text, or raw bytes.
+
+    For programmatic clients. Get the IDs from get_mail_detail, which lists a
+    message's attachments.
+
+    Args:
+        message_id: The Graph message ID.
+        attachment_id: The attachment ID (from get_mail_detail).
+        mode: "bytes" (default) returns content_base64 alongside the metadata,
+            for attachments up to 10 MB. "metadata" returns the summary only and
+            fetches no content. "text" returns extracted text (Word, PowerPoint,
+            Excel, PDF) or decoded text, with truncated and, when there is no
+            text, reason ("binary" | "unsupported" | "too_large" | "reference").
+
+    Returns:
+        The attachment summary (id, name, content_type, size, is_inline,
+        content_id, kind, source_url) plus whatever the mode adds. An attached
+        message (kind "item") also carries item_subject, item_from, and
+        item_received in metadata and text modes, and downloads as .eml bytes.
+
+        Permanent errors, which must not be retried: invalid_mode (mode was not
+        one of the three), too_large (with size and limit; bytes mode only,
+        decided from the metadata so nothing is downloaded), reference (with
+        source_url; a link attachment has no bytes), not_connected (with
+        connect_url when one exists). Everything else — a Graph 404 for an
+        unknown message or attachment, throttling, 5xx — propagates as a tool
+        error, which is the client's "transient, retry later" signal.
+    """
+    mode = mode.strip().lower() or "bytes"
+    if mode not in ("metadata", "text", "bytes"):
+        return {"error": "invalid_mode"}
+
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            meta = await attachment_ops.aget_attachment_metadata(client, message_id, attachment_id)
+            summary = attachment_ops.attachment_summary(meta)
+
+            if mode == "metadata":
+                if summary["kind"] != "item":
+                    return summary
+                expanded = await attachment_ops.aget_item_attachment(
+                    client, message_id, attachment_id
+                )
+                return {**summary, **_attachment_item_fields(expanded.get("item") or {})}
+
+            if mode == "text":
+                return await _attachment_json_text(client, message_id, attachment_id, summary)
+
+            if summary["kind"] == "reference":
+                return {"error": "reference", "source_url": summary["source_url"]}
+            if summary["size"] > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+                return {
+                    "error": "too_large",
+                    "size": summary["size"],
+                    "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+                }
+            data, header_type = await attachment_ops.aget_attachment_bytes(
+                client, message_id, attachment_id
+            )
+    except PermissionError as e:
+        return _not_connected(e)
+
+    if not summary["content_type"]:
+        fallback = "message/rfc822" if summary["kind"] == "item" else ""
+        summary["content_type"] = header_type or fallback
+    return {**summary, "content_base64": base64.b64encode(data).decode("ascii")}
 
 
 @mcp.tool()
@@ -2406,6 +2824,61 @@ async def update_draft_body(draft_id: str, text: str) -> dict:
     except PermissionError as e:
         return _not_connected(e)
     return {"ok": True}
+
+
+@mcp.tool()
+async def add_draft_attachment_json(
+    draft_id: str, name: str, content_base64: str, content_type: str = ""
+) -> dict:
+    """
+    Attach a file to an existing draft. Returns structured JSON.
+
+    For programmatic clients. Call this on a draft from create_reply_draft_json,
+    after update_draft_body and before send_draft; a sent message can no longer
+    take attachments. The server has no file system, so the bytes arrive
+    base64-encoded. Files up to 150 MB are accepted — anything at or above 3 MB
+    goes through a chunked upload session automatically, which takes longer.
+
+    Args:
+        draft_id: The draft message ID (from create_reply_draft_json).
+        name: The file name shown in the message (e.g. "notes.txt"). Required.
+        content_base64: The file's bytes, base64-encoded.
+        content_type: MIME type. Empty guesses it from the name's extension.
+
+    Returns:
+        attachment_id — the new attachment's Graph ID.
+
+        Permanent errors, which must not be retried: empty_name, invalid_base64
+        (content_base64 was not valid base64, or decoded to nothing), too_large
+        (with size and limit), not_connected (with connect_url when one exists).
+        Everything else propagates as a tool error, signalling a retry.
+    """
+    name = name.strip()
+    if not name:
+        return {"error": "empty_name"}
+    try:
+        data = base64.b64decode(content_base64, validate=True)
+    except (binascii.Error, ValueError):
+        return {"error": "invalid_base64"}
+    if not data:
+        return {"error": "invalid_base64"}
+    if len(data) > attachment_ops.MAX_ATTACHMENT_BYTES:
+        return {
+            "error": "too_large",
+            "size": len(data),
+            "limit": attachment_ops.MAX_ATTACHMENT_BYTES,
+        }
+    ctype = content_type.strip() or attachment_ops.guess_content_type(name)
+
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            attachment_id = await attachment_ops.aadd_file_attachment(
+                client, draft_id, name, data, ctype
+            )
+    except PermissionError as e:
+        return _not_connected(e)
+    return {"attachment_id": attachment_id}
 
 
 @mcp.tool()

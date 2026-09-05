@@ -801,27 +801,15 @@ GRAPH_ERROR_400 = {
 # ops percent-encode them into the path.
 SAMPLE_AWKWARD_MESSAGE_ID = "AAMkA/GI2+TG93AAA="
 
-SAMPLE_MESSAGE_DETAIL = {
-    "id": SAMPLE_MESSAGE["id"],
-    "hasAttachments": True,
-    "uniqueBody": {
-        "contentType": "text",
-        "content": "Here is the weekly report.\n\nBest,\nAlice",
-    },
-    "internetMessageHeaders": [
-        {"name": "Message-ID", "value": "<abc123@example.com>"},
-        {"name": "In-Reply-To", "value": "<parent@example.com>"},
-        {"name": "Received", "value": "from mx1.example.com"},
-        # Duplicate header — the first occurrence is the one that wins.
-        {"name": "received", "value": "from mx2.example.com"},
-    ],
-}
+SAMPLE_MESSAGE_WITH_ATTACHMENTS = {**SAMPLE_MESSAGE, "hasAttachments": True}
 
 SAMPLE_MESSAGE_DETAIL_NO_BODY = {
     "id": SAMPLE_MESSAGE["id"],
     "hasAttachments": False,
     "internetMessageHeaders": [],
 }
+
+# SAMPLE_MESSAGE_DETAIL lives below, with the attachment samples it $expands.
 
 SAMPLE_REPLY_DRAFT = {
     "id": "AAMkAGI2draft001=",
@@ -946,6 +934,29 @@ SAMPLE_REFERENCE_ATTACHMENT = {
 
 SAMPLE_ATTACHMENTS_RESPONSE = {
     "value": [SAMPLE_FILE_ATTACHMENT, SAMPLE_INLINE_ATTACHMENT, SAMPLE_REFERENCE_ATTACHMENT]
+}
+
+# get_mail_detail $expands attachments, so one request returns body, headers,
+# and this list together.
+SAMPLE_MESSAGE_DETAIL = {
+    "id": SAMPLE_MESSAGE["id"],
+    "hasAttachments": True,
+    "uniqueBody": {
+        "contentType": "text",
+        "content": "Here is the weekly report.\n\nBest,\nAlice",
+    },
+    "internetMessageHeaders": [
+        {"name": "Message-ID", "value": "<abc123@example.com>"},
+        {"name": "In-Reply-To", "value": "<parent@example.com>"},
+        {"name": "Received", "value": "from mx1.example.com"},
+        # Duplicate header — the first occurrence is the one that wins.
+        {"name": "received", "value": "from mx2.example.com"},
+    ],
+    "attachments": [
+        SAMPLE_FILE_ATTACHMENT,
+        SAMPLE_INLINE_ATTACHMENT,
+        SAMPLE_REFERENCE_ATTACHMENT,
+    ],
 }
 
 SAMPLE_ATTACHMENTS_NEXT_LINK = (

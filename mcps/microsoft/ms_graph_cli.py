@@ -15,7 +15,8 @@ Usage:
     ms-graph-cli email list [--folder inbox] [--top 10]
     ms-graph-cli email list --query "budget report" [--top 10]
     ms-graph-cli email read <message_id>
-    ms-graph-cli email send <to> <subject> <body> [--from <address>] [--cc <address>]
+    ms-graph-cli email attachment <message_id> <attachment_id> [--out PATH]
+    ms-graph-cli email send <to> <subject> <body> [--from <address>] [--cc <address>] [--attach PATH ...]
 
     # Calendar
     ms-graph-cli calendar list [--start <iso8601>] [--end <iso8601>] [--top 10]
@@ -53,6 +54,7 @@ Usage:
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -62,6 +64,7 @@ from auth import log_discipline  # noqa: E402
 
 log_discipline.apply()
 
+from ms_graph import attachments as attachment_ops
 from ms_graph import calendar, files, mail, teams
 from ms_graph import power_bi as pbi_ops
 from ms_graph.graph_client import GraphClient
@@ -174,10 +177,40 @@ def cmd_email_list(args: argparse.Namespace) -> None:
         print()
 
 
+def _fmt_size(size_bytes: int) -> str:
+    """Human-readable byte count. The CLI keeps its own copy rather than
+    importing ms_graph_mcp, which would drag the whole server in."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _print_attachments(attachments: list[dict]) -> None:
+    """Print one line per attachment, mirroring read_email's markdown section."""
+    print("\nAttachments:")
+    for att in attachments:
+        summary = attachment_ops.attachment_summary(att)
+        if summary["kind"] == "reference":
+            detail = f"link: {summary['source_url'] or '(no URL)'}"
+        else:
+            parts = [summary["content_type"] or "unknown type", _fmt_size(summary["size"])]
+            if summary["is_inline"]:
+                parts.append("inline")
+            detail = ", ".join(parts)
+        print(f"  {summary['name'] or '(unnamed)'}  ({detail})  id: {summary['id']}")
+
+
 def cmd_email_read(args: argparse.Namespace) -> None:
     token = get_local_token()
+    attachments: list[dict] = []
     with GraphClient(token) as client:
         msg = mail.get_message(client, args.message_id)
+        if msg.get("hasAttachments"):
+            attachments = attachment_ops.list_message_attachments(client, args.message_id)
 
     sender = msg.get("from", {}).get("emailAddress", {})
     to_addrs = ", ".join(
@@ -196,11 +229,61 @@ def cmd_email_read(args: argparse.Namespace) -> None:
         print(f"[HTML body — {len(content)} chars]\n")
         print(content[:3000])
 
+    if attachments:
+        _print_attachments(attachments)
+
+
+def cmd_email_attachment(args: argparse.Namespace) -> None:
+    token = get_local_token()
+    with GraphClient(token) as client:
+        meta = attachment_ops.get_attachment_metadata(client, args.message_id, args.attachment_id)
+        summary = attachment_ops.attachment_summary(meta)
+        if summary["kind"] == "reference":
+            print(f"Link attachment: {summary['source_url'] or '(no URL)'}")
+            return
+        data, ctype = attachment_ops.get_attachment_bytes(
+            client, args.message_id, args.attachment_id
+        )
+
+    out = args.out or _default_attachment_filename(summary["name"], summary["kind"])
+    Path(out).write_bytes(data)
+    print(f"Saved {len(data)} bytes to {out} ({ctype})")
+
+
+def _default_attachment_filename(name: str, kind: str) -> str:
+    """The file name used when --out is not given.
+
+    The attachment name comes from the sender, so only its last path segment
+    is kept: a name like "../.ssh/authorized_keys" must not escape the
+    current directory. Attached messages get a .eml suffix when they have none.
+    """
+    base = Path(name or "").name
+    if base in ("", ".", ".."):
+        base = "attachment"
+    if kind == "item" and not Path(base).suffix:
+        base = f"{base}.eml"
+    return base
+
 
 def cmd_email_send(args: argparse.Namespace) -> None:
     token = get_local_token()
     from_addr = args.from_address or os.environ.get("MS_DEFAULT_FROM_ADDRESS") or None
     cc_list = [a.strip() for a in args.cc.split(",") if a.strip()] if args.cc else None
+
+    attachments = []
+    for path in args.attach:
+        source = Path(path)
+        if not source.is_file():
+            print(f"File not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        attachments.append(
+            attachment_ops.ResolvedAttachment(
+                name=source.name,
+                data=source.read_bytes(),
+                content_type=attachment_ops.guess_content_type(source.name),
+            )
+        )
+
     with GraphClient(token) as client:
         mail.send_message(
             client,
@@ -209,9 +292,11 @@ def cmd_email_send(args: argparse.Namespace) -> None:
             body=args.body,
             cc=cc_list,
             from_address=from_addr,
+            attachments=attachments or None,
         )
     cc_note = f" (CC: {args.cc})" if args.cc else ""
-    print(f"Email sent to {args.to}{cc_note}.")
+    attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
+    print(f"Email sent to {args.to}{cc_note}{attach_note}.")
 
 
 # ---------------------------------------------------------------------------
@@ -952,12 +1037,25 @@ def main() -> None:
     p.add_argument("message_id")
     p.set_defaults(func=cmd_email_read)
 
+    p = email_sub.add_parser("attachment", help="Download an email attachment to a file")
+    p.add_argument("message_id")
+    p.add_argument("attachment_id")
+    p.add_argument(
+        "--out",
+        default=None,
+        help="Output path (default: the attachment's own name in the current directory)",
+    )
+    p.set_defaults(func=cmd_email_attachment)
+
     p = email_sub.add_parser("send", help="Send an email")
     p.add_argument("to", help="Recipient email address")
     p.add_argument("subject")
     p.add_argument("body")
     p.add_argument("--from", dest="from_address", default=None, help="Sender alias address")
     p.add_argument("--cc", default="", help="CC recipients (comma-separated)")
+    p.add_argument(
+        "--attach", action="append", default=[], metavar="PATH", help="File to attach (repeatable)"
+    )
     p.set_defaults(func=cmd_email_send)
 
     # rules

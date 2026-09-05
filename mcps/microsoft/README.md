@@ -235,14 +235,15 @@ If the browser path fails (SSH, headless), MSAL falls back to device code flow �
 poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
-### Available Tools (36)
+### Available Tools (42)
 
 | Tool | Description |
 |------|-------------|
 | `get_user_profile` | Get the authenticated user's profile information |
 | `list_emails` | List recent emails or search email messages; optionally mark specific IDs as read |
-| `read_email` | Read a single email message by its ID; optionally mark as read/unread |
-| `send_email` | Send an email message |
+| `read_email` | Read a single email message by its ID; optionally mark as read/unread; lists attachments |
+| `get_email_attachment` | Read, download (base64), or save to OneDrive one email attachment |
+| `send_email` | Send an email message, optionally with attachments |
 | `manage_inbox_rules` | Manage Outlook inbox rules: list, get, create, update, delete |
 | `manage_mail_folders` | Manage Outlook mail folders: list, get, create, rename, move, delete |
 | `list_calendar_events` | List calendar events in a date range |
@@ -267,9 +268,11 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 | `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive |
 | `get_profile_json` | Get the signed-in user's identity as structured JSON |
 | `list_mail_delta` | Fetch one page of a mail folder's delta feed for incremental sync |
-| `get_mail_detail` | Get a message's plain-text body and internet headers |
+| `get_mail_detail` | Get a message's plain-text body, internet headers, and attachment list |
+| `get_mail_attachment_json` | Get one email attachment's metadata, extracted text, or base64 bytes |
 | `create_reply_draft_json` | Create a reply draft and return its ID and web link |
 | `update_draft_body` | Replace a draft's body with plain text |
+| `add_draft_attachment_json` | Attach a base64 file to a draft before sending |
 | `send_draft` | Send an existing draft |
 | `mark_mail_read_json` | Mark messages read or unread in bulk, best effort per message |
 | `list_chats_page` | Fetch one page of the user's Teams chats, newest activity first |
@@ -283,11 +286,11 @@ All parameters use simple `str`/`int` types for Bedrock compatibility. Teams too
 
 ### Desktop JSON tools
 
-The last thirteen tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
+The last fifteen tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
 
-The 26 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
+The 27 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
 
-A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. The Teams write tools (`mark_chat_read_json`, `send_chat_message_json`) also return a structured `"teams_unavailable"` error for the permanent no-Teams-license 403, which a client must not retry. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
+A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. The Teams write tools (`mark_chat_read_json`, `send_chat_message_json`) also return a structured `"teams_unavailable"` error for the permanent no-Teams-license 403, which a client must not retry. The mail attachment tools (`get_mail_attachment_json`, `add_draft_attachment_json`) likewise return structured permanent errors — `invalid_mode`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `get_mail_attachment_json` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
 
 ## Bond AI Integration
 

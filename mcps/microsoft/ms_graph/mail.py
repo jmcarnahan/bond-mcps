@@ -542,7 +542,7 @@ async def asearch_messages(
 # start and any future callers cannot drift apart.
 DELTA_SELECT = (
     "id,internetMessageId,conversationId,subject,from,toRecipients,"
-    "receivedDateTime,isRead,isDraft,bodyPreview"
+    "receivedDateTime,isRead,isDraft,hasAttachments,bodyPreview"
 )
 
 DETAIL_SELECT = "id,uniqueBody,internetMessageHeaders,hasAttachments"

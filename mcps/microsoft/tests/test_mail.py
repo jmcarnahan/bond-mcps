@@ -916,7 +916,7 @@ class TestBodyTypeParameterAsync:
 # select list has to be made deliberately in two places.
 EXPECTED_DELTA_SELECT = (
     "id%2CinternetMessageId%2CconversationId%2Csubject%2Cfrom%2CtoRecipients"
-    "%2CreceivedDateTime%2CisRead%2CisDraft%2CbodyPreview"
+    "%2CreceivedDateTime%2CisRead%2CisDraft%2ChasAttachments%2CbodyPreview"
 )
 
 DELTA_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta"
