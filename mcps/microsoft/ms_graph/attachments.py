@@ -226,15 +226,19 @@ def _created_attachment_id(created: dict[str, Any] | None) -> str:
 def list_message_attachments(
     client: GraphClient, message_id: str, mailbox: str | None = None
 ) -> list[dict[str, Any]]:
-    """List a message's attachments (metadata only, never contentBytes)."""
+    """List a message's attachments (metadata only, never contentBytes).
+
+    Follows nextLink up to MAX_ATTACHMENT_PAGES pages; the cap bounds the
+    number of requests, not just the number of pages kept.
+    """
     data = client.get(_attachments_path(message_id, mailbox), params=_list_select())
-    items: list[dict[str, Any]] = []
-    for _ in range(MAX_ATTACHMENT_PAGES):
-        items.extend(data.get("value", []))
+    items: list[dict[str, Any]] = list(data.get("value", []))
+    for _ in range(MAX_ATTACHMENT_PAGES - 1):
         next_link = data.get("@odata.nextLink", "")
         if not next_link:
             break
         data = client.get(next_link)
+        items.extend(data.get("value", []))
     return items
 
 
@@ -271,15 +275,15 @@ def get_item_attachment(
 async def alist_message_attachments(
     client: AsyncGraphClient, message_id: str, mailbox: str | None = None
 ) -> list[dict[str, Any]]:
-    """List a message's attachments (async)."""
+    """List a message's attachments (async). See list_message_attachments."""
     data = await client.get(_attachments_path(message_id, mailbox), params=_list_select())
-    items: list[dict[str, Any]] = []
-    for _ in range(MAX_ATTACHMENT_PAGES):
-        items.extend(data.get("value", []))
+    items: list[dict[str, Any]] = list(data.get("value", []))
+    for _ in range(MAX_ATTACHMENT_PAGES - 1):
         next_link = data.get("@odata.nextLink", "")
         if not next_link:
             break
         data = await client.get(next_link)
+        items.extend(data.get("value", []))
     return items
 
 
@@ -496,8 +500,15 @@ def _check_forwarded_kind(summary: dict[str, Any]) -> None:
 def _finalize(
     spec: dict[str, Any], name: str, data: bytes, content_type: str
 ) -> ResolvedAttachment:
-    """Apply the spec's content_type override and enforce the send ceiling."""
-    resolved_type = spec.get("content_type") or content_type or "application/octet-stream"
+    """Apply the spec's content_type override and enforce the send ceiling.
+
+    The override is honoured only when it is a non-empty string; anything else
+    (a number, an object) would otherwise be sent to Graph as the MIME type.
+    """
+    override = spec.get("content_type")
+    if override is not None and not isinstance(override, str):
+        raise ValueError(f"attachment '{name}': 'content_type' must be a string")
+    resolved_type = override or content_type or "application/octet-stream"
     _check_send_size(name, data)
     return ResolvedAttachment(name=name, data=data, content_type=resolved_type)
 

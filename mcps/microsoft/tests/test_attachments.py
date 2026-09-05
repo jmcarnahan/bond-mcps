@@ -146,6 +146,38 @@ class TestListAttachmentsAsync:
         assert next_page.call_count == 1
 
     @respx.mock
+    async def test_page_cap_bounds_the_requests(self, monkeypatch):
+        """At the cap the walk stops without fetching a page it would throw away."""
+        monkeypatch.setattr(attachments, "MAX_ATTACHMENT_PAGES", 2)
+        # Every page points onward; only the cap ends the walk.
+        next_page = respx.get(SAMPLE_ATTACHMENTS_NEXT_LINK).mock(
+            return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_PAGE_NEXT)
+        )
+        respx.get(url=ATTACHMENTS_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_PAGE_NEXT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            items = await attachments.alist_message_attachments(client, MSG_ID)
+
+        assert next_page.call_count == 1
+        assert len(items) == 2 * len(SAMPLE_ATTACHMENTS_PAGE_NEXT["value"])
+
+    @respx.mock
+    def test_sync_page_cap_bounds_the_requests(self, monkeypatch):
+        monkeypatch.setattr(attachments, "MAX_ATTACHMENT_PAGES", 2)
+        next_page = respx.get(SAMPLE_ATTACHMENTS_NEXT_LINK).mock(
+            return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_PAGE_NEXT)
+        )
+        respx.get(url=ATTACHMENTS_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_PAGE_NEXT)
+        )
+        with GraphClient("tok") as client:
+            items = attachments.list_message_attachments(client, MSG_ID)
+
+        assert next_page.call_count == 1
+        assert len(items) == 2 * len(SAMPLE_ATTACHMENTS_PAGE_NEXT["value"])
+
+    @respx.mock
     async def test_shared_mailbox_routes_through_users(self):
         route = respx.get(
             url__startswith=f"{GRAPH_BASE_URL}/users/shared@example.com/messages/"
@@ -609,6 +641,13 @@ class TestResolveSourceSpecs:
             )
 
         assert att.content_type == "text/csv"
+
+    async def test_non_string_content_type_override_is_refused(self):
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="content_type"):
+                await attachments.aresolve_attachment_source(
+                    client, {"text": "id,name", "name": "data.txt", "content_type": 7}
+                )
 
     async def test_over_the_hard_limit_is_refused(self, monkeypatch):
         monkeypatch.setattr(attachments, "MAX_ATTACHMENT_BYTES", 4)
