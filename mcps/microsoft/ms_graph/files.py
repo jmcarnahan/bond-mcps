@@ -30,6 +30,10 @@ MAX_SIMPLE_UPLOAD_BYTES = 4_000_000  # 4 MB (Graph simple upload limit)
 # Outlook wants each PUT under 4 MB, so one constant serves both session kinds.
 UPLOAD_CHUNK_BYTES = 3_932_160
 
+# Teams file cards need the eTag GUID and the webDavUrl, and Graph returns
+# webDavUrl only when it is asked for by name.
+TEAMS_ITEM_SELECT = "id,name,eTag,webUrl,webDavUrl,size,parentReference"
+
 _THUMBNAIL_SIZES = frozenset({"small", "medium", "large"})
 
 
@@ -218,10 +222,16 @@ def get_drive_item(
     item_id: str,
     site_id: str = "",
     drive_id: str = "",
+    select: str = "",
 ) -> dict[str, Any]:
-    """Get metadata for a single drive item by ID."""
+    """Get metadata for a single drive item by ID.
+
+    ``select`` narrows the response to named properties — some (webDavUrl)
+    are returned only when asked for explicitly.
+    """
     base = _drive_base(site_id or None, drive_id or None)
-    return client.get(f"{base}/items/{item_id}")
+    params = {"$select": select} if select else None
+    return client.get(f"{base}/items/{item_id}", params=params)
 
 
 def get_drive_item_content(
@@ -382,10 +392,12 @@ async def aget_drive_item(
     item_id: str,
     site_id: str = "",
     drive_id: str = "",
+    select: str = "",
 ) -> dict[str, Any]:
-    """Get metadata for a single drive item by ID (async)."""
+    """Get metadata for a single drive item by ID (async). See get_drive_item."""
     base = _drive_base(site_id or None, drive_id or None)
-    return await client.get(f"{base}/items/{item_id}")
+    params = {"$select": select} if select else None
+    return await client.get(f"{base}/items/{item_id}", params=params)
 
 
 async def aget_drive_item_content(
@@ -1119,6 +1131,84 @@ async def aupload_any(
         parent_id=parent_id,
         conflict_behavior=conflict_behavior,
     )
+
+
+# ---------------------------------------------------------------------------
+# Sharing a drive item, and the drive behind a Teams channel
+# ---------------------------------------------------------------------------
+
+
+def _invite_body(emails: list[str], roles: tuple[str, ...]) -> dict[str, Any]:
+    """Body for /invite: grant, do not email, and keep sign-in required."""
+    return {
+        "requireSignIn": True,
+        "sendInvitation": False,
+        "roles": list(roles),
+        "recipients": [{"email": email} for email in emails],
+    }
+
+
+def invite_drive_item(
+    client: GraphClient,
+    item_id: str,
+    emails: list[str],
+    roles: tuple[str, ...] = ("read",),
+    drive_id: str = "",
+) -> dict[str, Any]:
+    """Grant people access to a drive item without sending them mail.
+
+    Errors are deliberately not caught here: whether a failed share is fatal
+    depends on the caller (for a Teams file card it is not).
+    """
+    if not emails:
+        return {}
+    base = _drive_base(None, drive_id or None)
+    result = client.post(f"{base}/items/{item_id}/invite", json_data=_invite_body(emails, roles))
+    return result or {}
+
+
+async def ainvite_drive_item(
+    client: AsyncGraphClient,
+    item_id: str,
+    emails: list[str],
+    roles: tuple[str, ...] = ("read",),
+    drive_id: str = "",
+) -> dict[str, Any]:
+    """Grant people access to a drive item without sending them mail (async)."""
+    if not emails:
+        return {}
+    base = _drive_base(None, drive_id or None)
+    result = await client.post(
+        f"{base}/items/{item_id}/invite", json_data=_invite_body(emails, roles)
+    )
+    return result or {}
+
+
+def _files_folder_path(team_id: str, channel_id: str) -> str:
+    """Graph path for a channel's Files folder (a driveItem in the team drive)."""
+    return f"/teams/{quote(team_id, safe='')}/channels/{quote(channel_id, safe='')}/filesFolder"
+
+
+def get_channel_files_folder(
+    client: GraphClient,
+    team_id: str,
+    channel_id: str,
+) -> dict[str, Any]:
+    """The driveItem a Teams channel stores its files in.
+
+    Teams-specific error translation belongs to the Teams module, so a 403
+    propagates as a plain GraphError from here.
+    """
+    return client.get(_files_folder_path(team_id, channel_id))
+
+
+async def aget_channel_files_folder(
+    client: AsyncGraphClient,
+    team_id: str,
+    channel_id: str,
+) -> dict[str, Any]:
+    """The driveItem a Teams channel stores its files in (async)."""
+    return await client.get(_files_folder_path(team_id, channel_id))
 
 
 # ---------------------------------------------------------------------------

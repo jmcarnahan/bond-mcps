@@ -24,6 +24,7 @@ from .conftest import (
     GRAPH_ERROR_404,
     GRAPH_ERROR_410,
     SAMPLE_ATTACHMENTS_RESPONSE,
+    SAMPLE_CHANNEL_FILES_FOLDER,
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
     SAMPLE_CHAT_MEMBERS_RESPONSE,
@@ -57,6 +58,7 @@ from .conftest import (
     SAMPLE_DRIVE_ITEM_WORD,
     SAMPLE_FILE_ATTACHMENT,
     SAMPLE_INLINE_ATTACHMENT,
+    SAMPLE_INVITE_RESPONSE,
     SAMPLE_ITEM_ATTACHMENT,
     SAMPLE_MAIL_FOLDER,
     SAMPLE_MAIL_FOLDERS_RESPONSE,
@@ -85,6 +87,8 @@ from .conftest import (
     SAMPLE_SITES_RESPONSE,
     SAMPLE_TEAMS_DRIVE_ITEM,
     SAMPLE_TEAMS_RESPONSE,
+    SAMPLE_TEAMS_UPLOAD_RESPONSE,
+    SAMPLE_TEAMS_UPLOADED_ITEM,
     SAMPLE_UPLOADED_FILE,
     SAMPLE_USER_PROFILE,
     TEAMS_FILE_ATTACHMENT_ID,
@@ -92,6 +96,8 @@ from .conftest import (
     TEAMS_HOSTED_ID,
     TEAMS_HOSTED_URL,
     TEAMS_PPTX_MIME,
+    TEAMS_UPLOAD_GUID,
+    TEAMS_WEBDAV_URL,
 )
 
 MONITOR_URL = "https://api.onedrive.com/v1.0/monitor/copy-op-token"
@@ -125,6 +131,35 @@ TEAMS_SHARE_BASE = f"{GRAPH_BASE_URL}/shares/{_encode_sharing_url(TEAMS_FILE_URL
 TEAMS_SHARE_CONTENT_URL = f"{TEAMS_SHARE_BASE}/content"
 TEAMS_SHARE_THUMB_URL = f"{TEAMS_SHARE_BASE}/thumbnails/0/medium/content"
 PNG_BYTES = b"\x89PNG\r\n\x1a\n-fake-png"
+
+# Sending a file into a chat: OneDrive upload, re-fetch, roster, share.
+TEAMS_SEND_UPLOAD_URL = (
+    f"{GRAPH_BASE_URL}/me/drive/root:/Microsoft%20Teams%20Chat%20Files/notes.txt:/content"
+)
+TEAMS_SEND_ITEM_URL = f"{GRAPH_BASE_URL}/me/drive/items/teams-upload-001"
+TEAMS_SEND_MEMBERS_URL = f"{GRAPH_BASE_URL}/chats/{TEAMS_CHAT_ID}/members"
+TEAMS_SEND_INVITE_URL = f"{TEAMS_SEND_ITEM_URL}/invite"
+
+
+def _mock_chat_file_upload() -> None:
+    """The four requests that put a file where a chat message can point at it."""
+    respx.put(url__startswith=TEAMS_SEND_UPLOAD_URL).mock(
+        return_value=httpx.Response(201, json=SAMPLE_TEAMS_UPLOAD_RESPONSE)
+    )
+    respx.get(url__startswith=TEAMS_SEND_ITEM_URL).mock(
+        return_value=httpx.Response(200, json=SAMPLE_TEAMS_UPLOADED_ITEM)
+    )
+    respx.get(TEAMS_SEND_MEMBERS_URL).mock(
+        return_value=httpx.Response(200, json=SAMPLE_CHAT_MEMBERS_RESPONSE)
+    )
+    respx.post(TEAMS_SEND_INVITE_URL).mock(
+        return_value=httpx.Response(200, json=SAMPLE_INVITE_RESPONSE)
+    )
+
+
+def _graph_trail() -> list[tuple[str, str]]:
+    """(method, path) for every request respx saw, in order."""
+    return [(c.request.method, c.request.url.path) for c in respx.calls]
 
 
 def _docx_bytes() -> bytes:
@@ -2021,6 +2056,236 @@ class TestMCPTeamsTools:
                 )
 
         assert "only supported for chats" in _get_text(result)
+
+
+class TestMCPSendTeamsMessageFiles:
+    """send_teams_message with attachments and images in its options."""
+
+    @respx.mock
+    async def test_a_chat_file_is_uploaded_shared_then_posted(self, mcp_server):
+        _mock_chat_file_upload()
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "here you go",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": '{"attachments": [{"name": "notes.txt", "text": "hello"}]}',
+                },
+            )
+
+        assert _graph_trail() == [
+            ("PUT", "/v1.0/me/drive/root:/Microsoft Teams Chat Files/notes.txt:/content"),
+            ("GET", "/v1.0/me/drive/items/teams-upload-001"),
+            ("GET", f"/v1.0/chats/{TEAMS_CHAT_ID}/members"),
+            ("POST", "/v1.0/me/drive/items/teams-upload-001/invite"),
+            ("POST", f"/v1.0/chats/{TEAMS_CHAT_ID}/messages"),
+        ]
+        payload = json.loads(post.calls[0].request.content)
+        assert payload["attachments"] == [
+            {
+                "id": TEAMS_UPLOAD_GUID,
+                "contentType": "reference",
+                "contentUrl": TEAMS_WEBDAV_URL,
+                "name": "notes.txt",
+            }
+        ]
+        assert f'<attachment id="{TEAMS_UPLOAD_GUID}"></attachment>' in payload["body"]["content"]
+        assert _get_text(result) == ("Message sent to Teams chat with 1 file(s): notes.txt (5 B).")
+
+    @respx.mock
+    async def test_an_image_rides_inside_the_message_with_no_upload(self, mcp_server):
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        encoded = base64.b64encode(PNG_BYTES).decode()
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "look",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": json.dumps({"images": [{"name": "pic.png", "base64": encoded}]}),
+                },
+            )
+
+        assert [method for method, _ in _graph_trail()] == ["POST"]
+        payload = json.loads(post.calls[0].request.content)
+        assert payload["hostedContents"][0]["@microsoft.graph.temporaryId"] == "1"
+        assert payload["hostedContents"][0]["contentType"] == "image/png"
+        assert base64.b64decode(payload["hostedContents"][0]["contentBytes"]) == PNG_BYTES
+        assert '<img src="../hostedContents/1/$value">' in payload["body"]["content"]
+        assert _get_text(result) == "Message sent to Teams chat with 1 inline image(s)."
+
+    @respx.mock
+    async def test_files_and_images_are_both_named_in_the_confirmation(self, mcp_server):
+        _mock_chat_file_upload()
+        respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        encoded = base64.b64encode(PNG_BYTES).decode()
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "both",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": json.dumps(
+                        {
+                            "attachments": [{"name": "notes.txt", "text": "hello"}],
+                            "images": [{"name": "pic.png", "base64": encoded}],
+                        }
+                    ),
+                },
+            )
+
+        assert _get_text(result) == (
+            "Message sent to Teams chat with 1 file(s): notes.txt (5 B) and 1 inline image(s)."
+        )
+
+    @respx.mock
+    async def test_a_non_image_in_images_is_refused_before_anything_is_sent(self, mcp_server):
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "look",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": '{"images": [{"name": "notes.txt", "text": "hi"}]}',
+                },
+            )
+
+        assert "not an image" in _get_text(result)
+        assert not post.called
+
+    @respx.mock
+    async def test_a_bad_image_spec_is_reported_against_images_not_attachments(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "look",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": '{"images": [{"text": "no name"}]}',
+                },
+            )
+
+        text = _get_text(result)
+        assert text.startswith("images[0]:")
+        assert "attachments[" not in text
+
+    @respx.mock
+    async def test_a_bad_attachment_spec_names_its_index(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "hi",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": '{"attachments": [{"name": "a.txt", "text": "ok"}, {}]}',
+                },
+            )
+
+        assert _get_text(result).startswith("attachments[1]:")
+
+    @respx.mock
+    async def test_a_403_on_the_upload_explains_the_missing_permission(self, mcp_server):
+        respx.put(url__startswith=TEAMS_SEND_UPLOAD_URL).mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "here",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": '{"attachments": [{"name": "notes.txt", "text": "hello"}]}',
+                },
+            )
+
+        text = _get_text(result)
+        assert "Files permission missing" in text
+        assert "Files.ReadWrite" in text
+        assert not post.called
+
+    @respx.mock
+    async def test_a_channel_file_lands_in_the_channel_drive(self, mcp_server):
+        team_id = "team-id-001"
+        channel_id = "channel-id-001"
+        respx.get(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/filesFolder").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHANNEL_FILES_FOLDER)
+        )
+        respx.put(
+            url__startswith=(
+                f"{GRAPH_BASE_URL}/drives/drive-team-001/items/"
+                "folder-channel-001:/notes.txt:/content"
+            )
+        ).mock(return_value=httpx.Response(201, json=SAMPLE_TEAMS_UPLOAD_RESPONSE))
+        respx.get(
+            url__startswith=f"{GRAPH_BASE_URL}/drives/drive-team-001/items/teams-upload-001"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_TEAMS_UPLOADED_ITEM))
+        post = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "deck",
+                    "team_id": team_id,
+                    "channel_id": channel_id,
+                    "options": '{"attachments": [{"name": "notes.txt", "text": "hello"}]}',
+                },
+            )
+
+        assert _graph_trail() == [
+            ("GET", f"/v1.0/teams/{team_id}/channels/{channel_id}/filesFolder"),
+            ("PUT", "/v1.0/drives/drive-team-001/items/folder-channel-001:/notes.txt:/content"),
+            ("GET", "/v1.0/drives/drive-team-001/items/teams-upload-001"),
+            ("POST", f"/v1.0/teams/{team_id}/channels/{channel_id}/messages"),
+        ]
+        assert json.loads(post.calls[0].request.content)["attachments"][0]["name"] == "notes.txt"
+        assert _get_text(result).startswith("Message sent to Teams channel with 1 file(s)")
+
+    @respx.mock
+    async def test_an_empty_attachments_list_still_takes_the_file_path(self, mcp_server):
+        """An explicit [] means "no files", not "old code path" — and must still send."""
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "plain",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": '{"attachments": []}',
+                },
+            )
+
+        assert json.loads(post.calls[0].request.content) == {
+            "body": {"contentType": "html", "content": "plain"}
+        }
+        assert _get_text(result) == "Message sent to Teams chat."
 
 
 class TestMCPReadTeamsMessagesAttachments:
@@ -4666,6 +4931,25 @@ SAMPLE_CHAT_MESSAGE_CREATED = {
     "body": {"contentType": "text", "content": "on my way"},
 }
 
+# What Graph echoes back once the file card is on the message: the body is the
+# tag, and the reference attachment carries the name the desktop renders.
+SAMPLE_CHAT_MESSAGE_CREATED_WITH_FILE = {
+    **SAMPLE_CHAT_MESSAGE_CREATED,
+    "body": {
+        "contentType": "html",
+        "content": f'on my way<attachment id="{TEAMS_UPLOAD_GUID}"></attachment>',
+    },
+    "attachments": [
+        {
+            "id": TEAMS_UPLOAD_GUID,
+            "contentType": "reference",
+            "contentUrl": TEAMS_WEBDAV_URL,
+            "name": "notes.txt",
+            "thumbnailUrl": None,
+        }
+    ],
+}
+
 
 class TestMCPMarkChatReadJson:
     """mark_chat_read_json."""
@@ -4806,6 +5090,180 @@ class TestMCPSendChatMessageJson:
 
         assert _structured(result) == {"message": None, "error": "chat_id must not be empty"}
         assert route.call_count == 0
+
+    @respx.mock
+    async def test_an_attachment_is_uploaded_shared_and_comes_back_on_the_message(self, mcp_server):
+        _mock_chat_file_upload()
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED_WITH_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {
+                    "chat_id": TEAMS_CHAT_ID,
+                    "text": "on my way",
+                    "attachments": json.dumps(
+                        [
+                            {
+                                "name": "notes.txt",
+                                "content_base64": base64.b64encode(b"hello").decode(),
+                            }
+                        ]
+                    ),
+                },
+            )
+
+        assert _graph_trail() == [
+            ("PUT", "/v1.0/me/drive/root:/Microsoft Teams Chat Files/notes.txt:/content"),
+            ("GET", "/v1.0/me/drive/items/teams-upload-001"),
+            ("GET", f"/v1.0/chats/{TEAMS_CHAT_ID}/members"),
+            ("POST", "/v1.0/me/drive/items/teams-upload-001/invite"),
+            ("POST", f"/v1.0/chats/{TEAMS_CHAT_ID}/messages"),
+        ]
+        payload = json.loads(post.calls[0].request.content)
+        assert payload["attachments"][0]["contentUrl"] == TEAMS_WEBDAV_URL
+        attachment = _structured(result)["message"]["attachments"][0]
+        assert attachment["kind"] == "file"
+        assert attachment["name"] == "notes.txt"
+
+    @respx.mock
+    async def test_the_content_type_is_guessed_from_the_name(self, mcp_server):
+        _mock_chat_file_upload()
+        respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED_WITH_FILE)
+        )
+        with _mock_token():
+            await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {
+                    "chat_id": TEAMS_CHAT_ID,
+                    "text": "on my way",
+                    "attachments": json.dumps(
+                        [
+                            {
+                                "name": "notes.txt",
+                                "content_base64": base64.b64encode(b"hello").decode(),
+                            }
+                        ]
+                    ),
+                },
+            )
+
+        assert respx.calls[0].request.headers["Content-Type"] == "text/plain"
+
+    @respx.mock
+    async def test_a_file_can_travel_without_any_text(self, mcp_server):
+        _mock_chat_file_upload()
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED_WITH_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {
+                    "chat_id": TEAMS_CHAT_ID,
+                    "text": "",
+                    "attachments": json.dumps(
+                        [
+                            {
+                                "name": "notes.txt",
+                                "content_base64": base64.b64encode(b"hello").decode(),
+                            }
+                        ]
+                    ),
+                },
+            )
+
+        assert json.loads(post.calls[0].request.content)["body"]["content"] == (
+            f'<attachment id="{TEAMS_UPLOAD_GUID}"></attachment>'
+        )
+        assert _structured(result)["message"]["id"] == "chat-msg-sent-002"
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "attachments,reason",
+        [
+            ("not json", "attachments must be a JSON array"),
+            ('{"name": "a.txt"}', "attachments must be a JSON array"),
+            ("[42]", "attachments[0]: not an object"),
+            ('[{"content_base64": "aGk="}]', "attachments[0]: missing name"),
+            ('[{"name": "  ", "content_base64": "aGk="}]', "attachments[0]: missing name"),
+            ('[{"name": "a.txt"}]', "attachments[0]: missing content_base64"),
+            ('[{"name": "a.txt", "content_base64": "!!!"}]', "attachments[0]: invalid base64"),
+            ('[{"name": "a.txt", "content_base64": ""}]', "attachments[0]: invalid base64"),
+            (
+                '[{"name": "a.txt", "content_base64": "aGk=", "content_type": 7}]',
+                "attachments[0]: content_type must be a string",
+            ),
+        ],
+    )
+    async def test_a_bad_attachments_payload_makes_no_graph_call(
+        self, mcp_server, attachments, reason
+    ):
+        route = respx.route().mock(return_value=httpx.Response(200, json={}))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {"chat_id": TEAMS_CHAT_ID, "text": "hi", "attachments": attachments},
+            )
+
+        assert _structured(result) == {
+            "message": None,
+            "error": "invalid_attachments",
+            "reason": reason,
+        }
+        assert not route.called
+
+    @respx.mock
+    async def test_a_403_on_the_upload_is_a_permanent_scope_error(self, mcp_server):
+        respx.put(url__startswith=TEAMS_SEND_UPLOAD_URL).mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        post = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED_WITH_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {
+                    "chat_id": TEAMS_CHAT_ID,
+                    "text": "on my way",
+                    "attachments": json.dumps(
+                        [
+                            {
+                                "name": "notes.txt",
+                                "content_base64": base64.b64encode(b"hello").decode(),
+                            }
+                        ]
+                    ),
+                },
+            )
+
+        assert _structured(result) == {"message": None, "error": "files_scope_missing"}
+        assert not post.called
+
+    @respx.mock
+    async def test_an_empty_attachments_string_sends_exactly_as_before(self, mcp_server):
+        route = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_chat_message_json",
+                {"chat_id": TEAMS_CHAT_ID, "text": "on my way", "attachments": ""},
+            )
+
+        assert json.loads(route.calls[0].request.content) == {
+            "body": {"contentType": "text", "content": "on my way"}
+        }
+        assert _structured(result)["message"]["attachments"] == []
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():

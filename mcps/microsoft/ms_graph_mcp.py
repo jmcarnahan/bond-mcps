@@ -40,6 +40,7 @@ import html as html_mod
 import logging
 import mimetypes
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -61,7 +62,12 @@ from ms_graph.auth import get_graph_token, get_powerbi_token
 from ms_graph.graph_client import AsyncGraphClient, GraphError
 from ms_graph.local_auth import login_scopes
 from ms_graph.power_bi import AsyncPowerBIClient
-from ms_graph.teams import TeamsNotAvailableError, extract_message_sender, extract_message_text
+from ms_graph.teams import (
+    FilesScopeMissingError,
+    TeamsNotAvailableError,
+    extract_message_sender,
+    extract_message_text,
+)
 
 from auth.connect_routes import (
     ProviderConnectConfig,
@@ -1747,6 +1753,23 @@ async def get_teams_attachment(
     return _render_attachment_result(header, result, mode)
 
 
+def _teams_send_summary(
+    to_chat: bool,
+    sent_files: list,
+    sent_images: list,
+) -> str:
+    """Confirm what actually went out, naming each file so a wrong one is obvious."""
+    summary = "Message sent to Teams chat" if to_chat else "Message sent to Teams channel"
+    if sent_files:
+        listed = ", ".join(f"{f.name} ({_format_size(len(f.data))})" for f in sent_files)
+        summary += f" with {len(sent_files)} file(s): {listed}"
+        if sent_images:
+            summary += f" and {len(sent_images)} inline image(s)"
+    elif sent_images:
+        summary += f" with {len(sent_images)} inline image(s)"
+    return summary + "."
+
+
 @mcp.tool()
 async def send_teams_message(
     message: str,
@@ -1771,8 +1794,21 @@ async def send_teams_message(
         options: JSON string with optional fields:
             {"content_type": "auto|html|text",
              "mentions": [{"user_id": "aad-object-id", "name": "Display Name"}],
-             "mention_everyone": true}
+             "mention_everyone": true,
+             "attachments": [{"name": "notes.txt", "text": "..."}],
+             "images": [{"name": "chart.png", "base64": "..."}]}
             User IDs (AAD object IDs) can be found in list_teams or list_chats member lists.
+
+            attachments take the same source specs as send_email — {"name", "text"},
+            {"name", "base64"}, {"drive_item_id"}, {"url"} (a sharing link), or
+            {"message_id", "attachment_id"}. Teams cannot carry file bytes on a
+            message, so each file is uploaded to OneDrive first (a chat: the
+            "Microsoft Teams Chat Files" folder, shared read-only with that chat's
+            members; a channel: the channel's Files folder) and the message posts a
+            card pointing at it. That upload needs the Files.ReadWrite permission.
+
+            images use the same specs but must be image/* under 4 MB; they render
+            inline in the message body instead of appearing as files.
     """
     if not chat_id and not (team_id and channel_id):
         return "Provide either chat_id, or both team_id and channel_id."
@@ -1838,10 +1874,52 @@ async def send_teams_message(
     mentions_payload = graph_mentions if graph_mentions else None
 
     everyone_ignored = mention_everyone and chat_id and not (team_id and channel_id)
+    everyone_note = (
+        " (Note: mention_everyone only works in channels, ignored here.)"
+        if everyone_ignored
+        else ""
+    )
+
+    file_specs = opts.get("attachments")
+    image_specs = opts.get("images")
 
     token = get_graph_token()
     try:
         async with AsyncGraphClient(token) as client:
+            if file_specs is not None or image_specs is not None:
+                try:
+                    sent_files = (
+                        await attachment_ops.aresolve_attachment_sources(client, file_specs)
+                        if file_specs is not None
+                        else []
+                    )
+                except ValueError as e:
+                    return str(e)
+                try:
+                    sent_images = (
+                        await attachment_ops.aresolve_attachment_sources(client, image_specs)
+                        if image_specs is not None
+                        else []
+                    )
+                except ValueError as e:
+                    # The resolver names the key it was given; this list is "images".
+                    return re.sub(r"^attachments\b", "images", str(e))
+                try:
+                    await teams_ops.asend_message_with_files(
+                        client,
+                        content=message,
+                        content_type=content_type,
+                        mentions=mentions_payload,
+                        files=sent_files,
+                        images=sent_images,
+                        chat_id=chat_id,
+                        team_id="" if chat_id else team_id,
+                        channel_id="" if chat_id else channel_id,
+                    )
+                except ValueError as e:
+                    return str(e)
+                summary = _teams_send_summary(bool(chat_id), sent_files, sent_images)
+                return f"{summary}{everyone_note}"
             if chat_id:
                 await teams_ops.asend_chat_message(
                     client,
@@ -1850,12 +1928,7 @@ async def send_teams_message(
                     content_type=content_type,
                     mentions=mentions_payload,
                 )
-                note = (
-                    " (Note: mention_everyone only works in channels, ignored here.)"
-                    if everyone_ignored
-                    else ""
-                )
-                return f"Message sent to Teams chat.{note}"
+                return f"Message sent to Teams chat.{everyone_note}"
             else:
                 await teams_ops.asend_channel_message(
                     client,
@@ -1868,6 +1941,13 @@ async def send_teams_message(
                 return "Message sent to Teams channel."
     except TeamsNotAvailableError:
         return "Microsoft Teams is not available for this account."
+    except FilesScopeMissingError:
+        return (
+            "**Files permission missing:** sending files into Teams uploads them to "
+            "OneDrive first, which needs the Files.ReadWrite permission. This connection "
+            "can only read files (org tenants: ask the admin to consent to "
+            "Files.ReadWrite). Plain messages still work."
+        )
 
 
 @mcp.tool()
@@ -2755,7 +2835,9 @@ async def export_report(
 # invalid_base64 — which must not be retried either. The Teams attachment
 # reader returns not_found, access_denied, no_thumbnail, invalid_thumbnail,
 # is_folder, and too_large; inspect_file_json returns missing_target,
-# access_denied, not_found, and invalid_link — all permanent. Everything
+# access_denied, not_found, and invalid_link — all permanent.
+# send_chat_message_json returns invalid_attachments and files_scope_missing
+# (the account's connection lacks Files.ReadWrite) — both permanent. Everything
 # else — Graph 5xx, throttling, unexpected shapes — propagates so FastMCP
 # raises a tool error, which is the client's "transient, retry later" signal.
 # ---------------------------------------------------------------------------
@@ -3473,10 +3555,58 @@ async def mark_chat_read_json(chat_id: str) -> dict:
     return {"ok": True}
 
 
-@mcp.tool()
-async def send_chat_message_json(chat_id: str, text: str) -> dict:
+def _desktop_attachments(raw: str) -> tuple[list, str]:
+    """Turn the desktop's attachments JSON into files to send, or say what is wrong.
+
+    Returns ``(files, reason)``; a non-empty reason means nothing should be
+    sent. The bytes arrive base64-encoded because the server has no file
+    system the desktop can hand it a path into.
     """
-    Send a plain-text message to a Teams chat. Returns structured JSON.
+    import json
+
+    if not raw.strip():
+        return [], ""
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return [], "attachments must be a JSON array"
+    if not isinstance(parsed, list):
+        return [], "attachments must be a JSON array"
+
+    resolved = []
+    for index, entry in enumerate(parsed):
+        if not isinstance(entry, dict):
+            return [], f"attachments[{index}]: not an object"
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return [], f"attachments[{index}]: missing name"
+        encoded = entry.get("content_base64")
+        if not isinstance(encoded, str):
+            return [], f"attachments[{index}]: missing content_base64"
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return [], f"attachments[{index}]: invalid base64"
+        if not data:
+            return [], f"attachments[{index}]: invalid base64"
+        content_type = entry.get("content_type")
+        if content_type is not None and not isinstance(content_type, str):
+            return [], f"attachments[{index}]: content_type must be a string"
+        resolved.append(
+            attachment_ops.ResolvedAttachment(
+                name=name.strip(),
+                data=data,
+                content_type=(content_type or "").strip()
+                or attachment_ops.guess_content_type(name),
+            )
+        )
+    return resolved, ""
+
+
+@mcp.tool()
+async def send_chat_message_json(chat_id: str, text: str, attachments: str = "") -> dict:
+    """
+    Send a plain-text message, optionally with files, to a Teams chat. Returns JSON.
 
     The content type is explicitly "text", not "auto": the desktop composer is
     a plain-text field, and auto-detection would read a typed "<" as markup —
@@ -3493,26 +3623,62 @@ async def send_chat_message_json(chat_id: str, text: str) -> dict:
     client owns stripping), so a file-only message has an empty or tag-only
     body — render the attachments list.
 
-    On failure message is null and error says why ("teams_unavailable" when the
-    account has no Teams license).
+    Teams cannot carry file bytes on a message, so each attachment is uploaded
+    to the sender's OneDrive "Microsoft Teams Chat Files" folder, shared
+    read-only with the chat's members, and the message posts a card pointing at
+    it. That upload needs the Files.ReadWrite permission. The created message
+    comes back with the file in its attachments list, kind "file". Inline
+    images are not supported here yet; every entry is sent as a file.
+
+    On failure message is null and error says why.
 
     Args:
         chat_id: The chat ID (from list_chats_page).
-        text: The message body, sent as typed.
+        text: The message body, sent as typed. May be empty when attachments
+            carry the message.
+        attachments: JSON array of files, e.g.
+            [{"name": "notes.txt", "content_base64": "...", "content_type": "text/plain"}].
+            content_type is optional and guessed from the name when absent.
+            Empty string sends no files.
+
+    Returns:
+        message — the created message, flattened as above.
+
+        Permanent errors, which must not be retried: invalid_attachments (with
+        reason, e.g. "attachments[1]: invalid base64"), files_scope_missing (the
+        connection cannot write to OneDrive, so no file can be sent),
+        teams_unavailable (the account has no Teams license), not_connected
+        (with connect_url when one exists).
     """
     if not chat_id.strip():
         return {"message": None, "error": "chat_id must not be empty"}
-    if not text.strip():
+    sent_files, reason = _desktop_attachments(attachments)
+    if reason:
+        return {"message": None, "error": "invalid_attachments", "reason": reason}
+    if not text.strip() and not sent_files:
         return {"message": None, "error": "text must not be empty"}
 
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
-            created = await teams_ops.asend_chat_message(client, chat_id, text, content_type="text")
+            if sent_files:
+                created = await teams_ops.asend_message_with_files(
+                    client,
+                    content=text,
+                    content_type="text",
+                    files=sent_files,
+                    chat_id=chat_id,
+                )
+            else:
+                created = await teams_ops.asend_chat_message(
+                    client, chat_id, text, content_type="text"
+                )
     except PermissionError as e:
         return _not_connected(e)
     except TeamsNotAvailableError:
         return {"message": None, "error": "teams_unavailable"}
+    except FilesScopeMissingError:
+        return {"message": None, "error": "files_scope_missing"}
 
     return {"message": _chat_message_json(created)}
 

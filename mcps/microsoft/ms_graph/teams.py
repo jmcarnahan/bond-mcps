@@ -10,10 +10,13 @@ import html as html_mod
 import json
 import logging
 import re
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
+from . import files as files_ops
+from .attachments import ResolvedAttachment
 from .graph_client import AsyncGraphClient, GraphClient, GraphError
 from .mail import _detect_body_type
 from .pagination import apaginate, apaginate_until_date
@@ -43,6 +46,23 @@ def _check_teams_access(e: GraphError) -> None:
     raise e
 
 
+class FilesScopeMissingError(Exception):
+    """Raised when a Teams file send fails because the connection cannot write files."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Sending files into Teams uploads them to OneDrive first, which needs "
+            "the Files.ReadWrite permission. This connection can only read files."
+        )
+
+
+def _raise_scope_missing(e: GraphError) -> None:
+    """Translate a 403 on the OneDrive upload into a scope problem, not a Teams one."""
+    if e.status_code == 403:
+        raise FilesScopeMissingError() from e
+    raise e
+
+
 def decode_token_claims(token: str) -> dict[str, str]:
     """Extract oid and tid from a Microsoft Graph access token (JWT).
 
@@ -65,29 +85,52 @@ def decode_token_claims(token: str) -> dict[str, str]:
 _VALID_CONTENT_TYPES = frozenset({"html", "text", "auto"})
 
 
-def _prepare_teams_body(content: str, content_type: str = "auto") -> dict[str, str]:
+def _plain_to_html(content: str) -> str:
+    """Escape plain text and turn its newlines into line breaks."""
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    return html_mod.escape(normalized, quote=False).replace("\n", "<br>")
+
+
+def _prepare_teams_body(
+    content: str,
+    content_type: str = "auto",
+    attachment_ids: Sequence[str] = (),
+    image_count: int = 0,
+) -> dict[str, str]:
     """Prepare a Teams message body dict with appropriate contentType.
 
     In "auto" mode (default), HTML content is detected and newlines are
     converted to <br>; plain text also has entities escaped before conversion.
+
+    File cards and inline images are referenced from the body itself, so a
+    message carrying either is always HTML — a "text" body would show the
+    ``<attachment>`` and ``<img>`` tags as literal text instead of rendering
+    the file card and the picture.
     """
     content_type = content_type.lower()
     if content_type not in _VALID_CONTENT_TYPES:
         raise ValueError(f"content_type must be 'auto', 'html', or 'text'; got {content_type!r}")
 
-    if content_type == "text":
+    has_extras = bool(attachment_ids) or image_count > 0
+    if content_type == "text" and not has_extras:
         return {"contentType": "text", "content": content}
+
     if content_type == "html":
-        return {"contentType": "html", "content": content}
+        html = content
+    elif content_type == "text":
+        html = _plain_to_html(content)
+    else:
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        if _detect_body_type(normalized) == "HTML":
+            html = normalized.replace("\n", "<br>")
+        else:
+            html = _plain_to_html(normalized)
 
-    # Normalize CRLF/CR to LF before converting newlines
-    content = content.replace("\r\n", "\n").replace("\r", "\n")
-
-    # Auto: detect HTML or convert plain text
-    if _detect_body_type(content) == "HTML":
-        return {"contentType": "html", "content": content.replace("\n", "<br>")}
-    escaped = html_mod.escape(content, quote=False)
-    return {"contentType": "html", "content": escaped.replace("\n", "<br>")}
+    for attachment_id in attachment_ids:
+        html += f'<attachment id="{attachment_id}"></attachment>'
+    for index in range(1, image_count + 1):
+        html += f'<img src="../hostedContents/{index}/$value">'
+    return {"contentType": "html", "content": html}
 
 
 # ---------------------------------------------------------------------------
@@ -362,12 +405,18 @@ def send_channel_message(
     content: str,
     content_type: str = "auto",
     mentions: list[dict[str, Any]] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    hosted_contents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a Teams channel."""
     body = _prepare_teams_body(content, content_type)
     payload: dict[str, Any] = {"body": body}
     if mentions:
         payload["mentions"] = mentions
+    if attachments:
+        payload["attachments"] = attachments
+    if hosted_contents:
+        payload["hostedContents"] = hosted_contents
     try:
         result = client.post(
             f"/teams/{_safe_id(team_id)}/channels/{_safe_id(channel_id)}/messages",
@@ -443,12 +492,18 @@ def send_chat_message(
     content: str,
     content_type: str = "auto",
     mentions: list[dict[str, Any]] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    hosted_contents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a chat."""
     body = _prepare_teams_body(content, content_type)
     payload: dict[str, Any] = {"body": body}
     if mentions:
         payload["mentions"] = mentions
+    if attachments:
+        payload["attachments"] = attachments
+    if hosted_contents:
+        payload["hostedContents"] = hosted_contents
     try:
         result = client.post(
             f"/chats/{_safe_id(chat_id)}/messages",
@@ -521,12 +576,18 @@ async def asend_channel_message(
     content: str,
     content_type: str = "auto",
     mentions: list[dict[str, Any]] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    hosted_contents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a Teams channel (async)."""
     body = _prepare_teams_body(content, content_type)
     payload: dict[str, Any] = {"body": body}
     if mentions:
         payload["mentions"] = mentions
+    if attachments:
+        payload["attachments"] = attachments
+    if hosted_contents:
+        payload["hostedContents"] = hosted_contents
     try:
         result = await client.post(
             f"/teams/{_safe_id(team_id)}/channels/{_safe_id(channel_id)}/messages",
@@ -648,17 +709,313 @@ async def asend_chat_message(
     content: str,
     content_type: str = "auto",
     mentions: list[dict[str, Any]] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    hosted_contents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Send a message to a chat (async)."""
     body = _prepare_teams_body(content, content_type)
     payload: dict[str, Any] = {"body": body}
     if mentions:
         payload["mentions"] = mentions
+    if attachments:
+        payload["attachments"] = attachments
+    if hosted_contents:
+        payload["hostedContents"] = hosted_contents
     try:
         result = await client.post(
             f"/chats/{_safe_id(chat_id)}/messages",
             json_data=payload,
         )
+    except GraphError as e:
+        _check_teams_access(e)
+    return result or {}
+
+
+# ---------------------------------------------------------------------------
+# Sending files and inline images
+#
+# Teams does not accept file bytes on a message. A file is uploaded to a drive
+# first (a chat: the sender's OneDrive; a channel: the channel's Files folder),
+# and the message then carries a "reference" attachment pointing at it plus an
+# <attachment> tag in the body. Small pictures can instead ride along as
+# hostedContents and render inline.
+# ---------------------------------------------------------------------------
+
+# The attachment id Teams expects is the GUID inside the driveItem's eTag,
+# which arrives wrapped as '"{GUID},N"'.
+ETAG_GUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+# Teams itself puts chat files here, and members are given read access per file.
+TEAMS_CHAT_FILES_FOLDER = "Microsoft Teams Chat Files"
+
+# hostedContents travel base64 inside the message payload, so they stay small.
+MAX_HOSTED_IMAGE_BYTES = 4_000_000
+
+
+def _attachment_from_drive_item(item: dict[str, Any]) -> dict[str, Any]:
+    """The Graph attachment entry that turns an uploaded file into a Teams card."""
+    name = item.get("name") or ""
+    match = ETAG_GUID_RE.search(str(item.get("eTag") or ""))
+    if not match:
+        raise ValueError(f"Uploaded file {name!r} has no eTag GUID; Teams cannot reference it.")
+    return {
+        "id": match.group(0),
+        "contentType": "reference",
+        "contentUrl": item.get("webDavUrl") or item.get("webUrl") or "",
+        "name": name,
+    }
+
+
+def _member_emails(members: dict[str, Any]) -> list[str]:
+    """Addressable e-mails from a chat member list, de-duplicated case-insensitively."""
+    emails: list[str] = []
+    seen: set[str] = set()
+    for member in members.get("value", []) or []:
+        if not isinstance(member, dict):
+            continue
+        raw = member.get("email")
+        if not isinstance(raw, str):
+            continue
+        email = raw.strip()
+        if not email or email.lower() in seen:
+            continue
+        seen.add(email.lower())
+        emails.append(email)
+    return emails
+
+
+def _hosted_contents(images: Sequence[ResolvedAttachment]) -> list[dict[str, Any]]:
+    """Inline-image payload entries, numbered from 1 to match the body's <img> tags."""
+    hosted: list[dict[str, Any]] = []
+    for index, image in enumerate(images, 1):
+        if not image.content_type.startswith("image/"):
+            raise ValueError(f"Inline image {image.name!r} is {image.content_type}, not an image")
+        if len(image.data) > MAX_HOSTED_IMAGE_BYTES:
+            raise ValueError(
+                f"Inline image {image.name!r} is {len(image.data)} bytes; "
+                f"the limit is {MAX_HOSTED_IMAGE_BYTES:,}"
+            )
+        hosted.append(
+            {
+                "@microsoft.graph.temporaryId": str(index),
+                "contentBytes": base64.b64encode(image.data).decode("ascii"),
+                "contentType": image.content_type,
+            }
+        )
+    return hosted
+
+
+def _channel_folder_target(folder: dict[str, Any]) -> tuple[str, str]:
+    """(drive_id, parent_item_id) for a channel's Files folder."""
+    try:
+        return folder["parentReference"]["driveId"], folder["id"]
+    except (KeyError, TypeError) as e:
+        raise GraphError(500, "NoFilesFolder", "Channel files folder has no drive") from e
+
+
+def upload_chat_file(
+    client: GraphClient,
+    chat_id: str,
+    att: ResolvedAttachment,
+) -> dict[str, Any]:
+    """Put one file where a chat can reference it, and let the chat read it.
+
+    The re-fetch is not redundant: an upload response carries no webDavUrl, and
+    that is the URL a Teams file card needs. A failed share — whether listing
+    the members or granting them access — is logged, never fatal: members who
+    already have access still see the file, and the upload has already happened.
+    """
+    try:
+        item = files_ops.upload_any(
+            client,
+            TEAMS_CHAT_FILES_FOLDER,
+            att.name,
+            att.data,
+            att.content_type,
+            conflict_behavior="rename",
+        )
+    except GraphError as e:
+        _raise_scope_missing(e)
+    item = files_ops.get_drive_item(client, item["id"], select=files_ops.TEAMS_ITEM_SELECT)
+    try:
+        emails = _member_emails(chat_members(client, chat_id))
+        files_ops.invite_drive_item(client, item["id"], emails)
+    except GraphError as e:
+        logger.warning("Could not share %s with chat members: %s", att.name, e)
+    return item
+
+
+async def aupload_chat_file(
+    client: AsyncGraphClient,
+    chat_id: str,
+    att: ResolvedAttachment,
+) -> dict[str, Any]:
+    """Put one file where a chat can reference it (async). See upload_chat_file."""
+    try:
+        item = await files_ops.aupload_any(
+            client,
+            TEAMS_CHAT_FILES_FOLDER,
+            att.name,
+            att.data,
+            att.content_type,
+            conflict_behavior="rename",
+        )
+    except GraphError as e:
+        _raise_scope_missing(e)
+    item = await files_ops.aget_drive_item(client, item["id"], select=files_ops.TEAMS_ITEM_SELECT)
+    try:
+        emails = _member_emails(await achat_members(client, chat_id))
+        await files_ops.ainvite_drive_item(client, item["id"], emails)
+    except GraphError as e:
+        logger.warning("Could not share %s with chat members: %s", att.name, e)
+    return item
+
+
+def upload_channel_file(
+    client: GraphClient,
+    team_id: str,
+    channel_id: str,
+    att: ResolvedAttachment,
+) -> dict[str, Any]:
+    """Put one file in a channel's Files folder, where the whole team can read it."""
+    try:
+        folder = files_ops.get_channel_files_folder(client, team_id, channel_id)
+    except GraphError as e:
+        _check_teams_access(e)
+    drive_id, parent_id = _channel_folder_target(folder)
+    try:
+        item = files_ops.upload_any(
+            client,
+            "",
+            att.name,
+            att.data,
+            att.content_type,
+            drive_id=drive_id,
+            parent_id=parent_id,
+            conflict_behavior="rename",
+        )
+    except GraphError as e:
+        _raise_scope_missing(e)
+    return files_ops.get_drive_item(
+        client, item["id"], drive_id=drive_id, select=files_ops.TEAMS_ITEM_SELECT
+    )
+
+
+async def aupload_channel_file(
+    client: AsyncGraphClient,
+    team_id: str,
+    channel_id: str,
+    att: ResolvedAttachment,
+) -> dict[str, Any]:
+    """Put one file in a channel's Files folder (async). See upload_channel_file."""
+    try:
+        folder = await files_ops.aget_channel_files_folder(client, team_id, channel_id)
+    except GraphError as e:
+        _check_teams_access(e)
+    drive_id, parent_id = _channel_folder_target(folder)
+    try:
+        item = await files_ops.aupload_any(
+            client,
+            "",
+            att.name,
+            att.data,
+            att.content_type,
+            drive_id=drive_id,
+            parent_id=parent_id,
+            conflict_behavior="rename",
+        )
+    except GraphError as e:
+        _raise_scope_missing(e)
+    return await files_ops.aget_drive_item(
+        client, item["id"], drive_id=drive_id, select=files_ops.TEAMS_ITEM_SELECT
+    )
+
+
+def _files_payload(
+    content: str,
+    content_type: str,
+    mentions: list[dict[str, Any]] | None,
+    attachments: list[dict[str, Any]],
+    hosted: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The message payload for a send that carries files, images, or both."""
+    body = _prepare_teams_body(
+        content,
+        content_type,
+        attachment_ids=[a["id"] for a in attachments],
+        image_count=len(hosted),
+    )
+    payload: dict[str, Any] = {"body": body}
+    if mentions:
+        payload["mentions"] = mentions
+    if attachments:
+        payload["attachments"] = attachments
+    if hosted:
+        payload["hostedContents"] = hosted
+    return payload
+
+
+def send_message_with_files(
+    client: GraphClient,
+    *,
+    content: str,
+    content_type: str = "auto",
+    mentions: list[dict[str, Any]] | None = None,
+    files: Sequence[ResolvedAttachment] = (),
+    images: Sequence[ResolvedAttachment] = (),
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+) -> dict[str, Any]:
+    """Send one message carrying uploaded files and/or inline images.
+
+    The target and the images are validated before anything is uploaded, so a
+    bad request costs no writes.
+    """
+    base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
+    hosted = _hosted_contents(images)
+    items = [
+        upload_chat_file(client, chat_id, att)
+        if chat_id
+        else upload_channel_file(client, team_id, channel_id, att)
+        for att in files
+    ]
+    attachments = [_attachment_from_drive_item(item) for item in items]
+    payload = _files_payload(content, content_type, mentions, attachments, hosted)
+    try:
+        result = client.post(base, json_data=payload)
+    except GraphError as e:
+        _check_teams_access(e)
+    return result or {}
+
+
+async def asend_message_with_files(
+    client: AsyncGraphClient,
+    *,
+    content: str,
+    content_type: str = "auto",
+    mentions: list[dict[str, Any]] | None = None,
+    files: Sequence[ResolvedAttachment] = (),
+    images: Sequence[ResolvedAttachment] = (),
+    chat_id: str = "",
+    team_id: str = "",
+    channel_id: str = "",
+) -> dict[str, Any]:
+    """Send one message carrying files and/or inline images (async)."""
+    base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
+    hosted = _hosted_contents(images)
+    items = []
+    for att in files:
+        if chat_id:
+            items.append(await aupload_chat_file(client, chat_id, att))
+        else:
+            items.append(await aupload_channel_file(client, team_id, channel_id, att))
+    attachments = [_attachment_from_drive_item(item) for item in items]
+    payload = _files_payload(content, content_type, mentions, attachments, hosted)
+    try:
+        result = await client.post(base, json_data=payload)
     except GraphError as e:
         _check_teams_access(e)
     return result or {}

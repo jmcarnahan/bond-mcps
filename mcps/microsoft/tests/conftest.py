@@ -996,6 +996,48 @@ SAMPLE_TEAMS_DRIVE_ITEM = {
     "parentReference": {"driveId": "drive-ext-001"},
 }
 
+# ---------------------------------------------------------------------------
+# Sending files into Teams: the upload, the re-fetch, and the channel folder
+# ---------------------------------------------------------------------------
+
+# Teams keys a file card off the GUID inside the driveItem's eTag, and Graph
+# writes that GUID in upper case.
+TEAMS_UPLOAD_GUID = "7A5C1C2E-3B4D-4E5F-8A9B-0C1D2E3F4A5B"
+TEAMS_WEBDAV_URL = (
+    "https://contoso-my.sharepoint.com/personal/user_contoso_com/Documents/"
+    "Microsoft Teams Chat Files/notes.txt"
+)
+
+# What a $select re-fetch returns: eTag and webDavUrl, the two the card needs.
+SAMPLE_TEAMS_UPLOADED_ITEM = {
+    "id": "teams-upload-001",
+    "name": "notes.txt",
+    "size": 5,
+    "eTag": f'"{{{TEAMS_UPLOAD_GUID}}},2"',
+    "webUrl": "https://contoso-my.sharepoint.com/personal/user_contoso_com/notes.txt",
+    "webDavUrl": TEAMS_WEBDAV_URL,
+    "parentReference": {"driveId": "drive-001"},
+}
+
+# The upload PUT itself answers without eTag or webDavUrl — hence the re-fetch.
+SAMPLE_TEAMS_UPLOAD_RESPONSE = {
+    "id": "teams-upload-001",
+    "name": "notes.txt",
+    "size": 5,
+    "webUrl": "https://contoso-my.sharepoint.com/personal/user_contoso_com/notes.txt",
+    "parentReference": {"driveId": "drive-001"},
+}
+
+SAMPLE_CHANNEL_FILES_FOLDER = {
+    "id": "folder-channel-001",
+    "name": "General",
+    "webUrl": "https://contoso.sharepoint.com/sites/eng/Shared%20Documents/General",
+    "parentReference": {"driveId": "drive-team-001"},
+}
+
+SAMPLE_INVITE_RESPONSE = {"value": [{"id": "perm-001", "roles": ["read"]}]}
+
+
 SAMPLE_CHAT_MESSAGES_PAGE_WITH_ATTACHMENTS = {
     "value": [
         SAMPLE_CHAT_MESSAGE_WITH_FILE,

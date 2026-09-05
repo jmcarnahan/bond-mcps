@@ -14,6 +14,7 @@ from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient,
 from .conftest import (
     GRAPH_ERROR_403,
     GRAPH_ERROR_404,
+    SAMPLE_CHANNEL_FILES_FOLDER,
     SAMPLE_COPY_COMPLETED,
     SAMPLE_COPY_FAILED,
     SAMPLE_COPY_IN_PROGRESS,
@@ -25,6 +26,7 @@ from .conftest import (
     SAMPLE_DRIVE_ITEM_WORD,
     SAMPLE_DRIVE_UPLOAD_SESSION,
     SAMPLE_DRIVE_UPLOAD_URL,
+    SAMPLE_INVITE_RESPONSE,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_EMPTY,
     SAMPLE_SHARED_DRIVE_ITEM,
@@ -33,6 +35,7 @@ from .conftest import (
     SAMPLE_SITE,
     SAMPLE_SITES_RESPONSE,
     SAMPLE_TEAMS_DRIVE_ITEM,
+    SAMPLE_TEAMS_UPLOADED_ITEM,
     SAMPLE_UPLOADED_FILE,
 )
 
@@ -1764,3 +1767,134 @@ class TestUploadPathEncoding:
             "Shared%20Documents/Sub",
             "x%2Fy.txt",
         )
+
+
+# ---------------------------------------------------------------------------
+# Teams-facing drive helpers: $select, /invite, and a channel's Files folder
+# ---------------------------------------------------------------------------
+
+
+class TestGetDriveItemSelect:
+    """get_drive_item asks for named properties only when told to."""
+
+    @respx.mock
+    async def test_select_is_sent_as_a_query_option(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/drive/items/item-1").mock(
+            return_value=httpx.Response(200, json=SAMPLE_TEAMS_UPLOADED_ITEM)
+        )
+        async with AsyncGraphClient("tok") as client:
+            item = await files.aget_drive_item(client, "item-1", select=files.TEAMS_ITEM_SELECT)
+
+        assert item["webDavUrl"] == SAMPLE_TEAMS_UPLOADED_ITEM["webDavUrl"]
+        expected = files.TEAMS_ITEM_SELECT.replace(",", "%2C")
+        assert f"%24select={expected}" in str(route.calls[0].request.url)
+
+    @respx.mock
+    def test_no_select_sends_a_bare_url(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/drive/items/item-1").mock(
+            return_value=httpx.Response(200, json=SAMPLE_TEAMS_UPLOADED_ITEM)
+        )
+        with GraphClient("tok") as client:
+            files.get_drive_item(client, "item-1")
+
+        assert str(route.calls[0].request.url) == f"{GRAPH_BASE_URL}/me/drive/items/item-1"
+
+    @respx.mock
+    def test_sync_select_reaches_a_named_drive(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/drives/drive-9/items/item-1").mock(
+            return_value=httpx.Response(200, json=SAMPLE_TEAMS_UPLOADED_ITEM)
+        )
+        with GraphClient("tok") as client:
+            files.get_drive_item(client, "item-1", drive_id="drive-9", select="id,name")
+
+        assert "%24select=id%2Cname" in str(route.calls[0].request.url)
+
+
+class TestInviteDriveItem:
+    """invite_drive_item grants read access without mailing anyone."""
+
+    @respx.mock
+    async def test_payload_grants_read_and_sends_no_invitation(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/me/drive/items/item-1/invite").mock(
+            return_value=httpx.Response(200, json=SAMPLE_INVITE_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await files.ainvite_drive_item(
+                client, "item-1", ["a@example.com", "b@example.com"]
+            )
+
+        assert result == SAMPLE_INVITE_RESPONSE
+        assert json.loads(route.calls[0].request.content) == {
+            "requireSignIn": True,
+            "sendInvitation": False,
+            "roles": ["read"],
+            "recipients": [{"email": "a@example.com"}, {"email": "b@example.com"}],
+        }
+
+    @respx.mock
+    def test_drive_id_routes_to_that_drive_and_roles_pass_through(self):
+        route = respx.post(f"{GRAPH_BASE_URL}/drives/drive-9/items/item-1/invite").mock(
+            return_value=httpx.Response(200, json=SAMPLE_INVITE_RESPONSE)
+        )
+        with GraphClient("tok") as client:
+            files.invite_drive_item(
+                client, "item-1", ["a@example.com"], roles=("write",), drive_id="drive-9"
+            )
+
+        assert json.loads(route.calls[0].request.content)["roles"] == ["write"]
+
+    @respx.mock
+    async def test_no_recipients_makes_no_request(self):
+        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/drive").mock(
+            return_value=httpx.Response(200, json=SAMPLE_INVITE_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert await files.ainvite_drive_item(client, "item-1", []) == {}
+            with GraphClient("tok") as sync_client:
+                assert files.invite_drive_item(sync_client, "item-1", []) == {}
+
+        assert not route.called
+
+    @respx.mock
+    async def test_a_204_answer_becomes_an_empty_dict(self):
+        respx.post(f"{GRAPH_BASE_URL}/me/drive/items/item-1/invite").mock(
+            return_value=httpx.Response(204)
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert await files.ainvite_drive_item(client, "item-1", ["a@example.com"]) == {}
+
+
+class TestChannelFilesFolder:
+    """get_channel_files_folder finds the drive behind a Teams channel."""
+
+    @respx.mock
+    async def test_path_and_shape(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/teams/team-1/channels/channel-1/filesFolder").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHANNEL_FILES_FOLDER)
+        )
+        async with AsyncGraphClient("tok") as client:
+            folder = await files.aget_channel_files_folder(client, "team-1", "channel-1")
+
+        assert route.called
+        assert folder["parentReference"]["driveId"] == "drive-team-001"
+
+    @respx.mock
+    def test_sync_percent_encodes_the_ids(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/teams/team%2F1/channels/ch%20b/filesFolder").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHANNEL_FILES_FOLDER)
+        )
+        with GraphClient("tok") as client:
+            files.get_channel_files_folder(client, "team/1", "ch b")
+
+        assert route.called
+
+    @respx.mock
+    async def test_403_is_left_for_the_caller_to_translate(self):
+        respx.get(f"{GRAPH_BASE_URL}/teams/team-1/channels/channel-1/filesFolder").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await files.aget_channel_files_folder(client, "team-1", "channel-1")
+
+        assert exc.value.status_code == 403

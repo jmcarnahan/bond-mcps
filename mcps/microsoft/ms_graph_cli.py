@@ -32,8 +32,8 @@ Usage:
     ms-graph-cli teams read --team-id <team_id> --channel-id <channel_id> [--top 20]
     ms-graph-cli teams attachment <message_id> <attachment_id> --chat-id <chat_id> [--out PATH]
     ms-graph-cli teams attachment <message_id> <attachment_id> --team-id <team_id> --channel-id <channel_id> [--out PATH]
-    ms-graph-cli teams send <message> --chat-id <chat_id>
-    ms-graph-cli teams send <message> --team-id <team_id> --channel-id <channel_id>
+    ms-graph-cli teams send <message> --chat-id <chat_id> [--attach PATH ...] [--image PATH ...]
+    ms-graph-cli teams send <message> --team-id <team_id> --channel-id <channel_id> [--attach PATH ...] [--image PATH ...]
     ms-graph-cli teams activity [--hours 24]
 
     # Files
@@ -701,19 +701,64 @@ def cmd_teams_attachment(args: argparse.Namespace) -> None:
     print(f"Saved {len(data)} bytes to {out} ({ctype})")
 
 
+def _read_attachments(paths: list[str]) -> list:
+    """Read local files into attachments, or exit naming the one that is missing."""
+    resolved = []
+    for path in paths:
+        source = Path(path)
+        if not source.is_file():
+            print(f"File not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        resolved.append(
+            attachment_ops.ResolvedAttachment(
+                name=source.name,
+                data=source.read_bytes(),
+                content_type=attachment_ops.guess_content_type(source.name),
+            )
+        )
+    return resolved
+
+
 def cmd_teams_send(args: argparse.Namespace) -> None:
     if not args.chat_id and not (args.team_id and args.channel_id):
         print("Error: provide --chat-id, or both --team-id and --channel-id.", file=sys.stderr)
         sys.exit(1)
 
+    files = _read_attachments(args.attach)
+    images = _read_attachments(args.image)
+    target = "chat" if args.chat_id else "channel"
+    notes = ""
+    if files:
+        notes += f" with {len(files)} file(s)"
+    if images:
+        notes += f" and {len(images)} image(s)" if files else f" with {len(images)} image(s)"
+
     token = get_local_token()
     with GraphClient(token) as client:
-        if args.chat_id:
-            teams.send_chat_message(client, args.chat_id, args.message)
-            print("Message sent to chat.")
-        else:
-            teams.send_channel_message(client, args.team_id, args.channel_id, args.message)
-            print("Message sent to channel.")
+        if not files and not images:
+            if args.chat_id:
+                teams.send_chat_message(client, args.chat_id, args.message)
+            else:
+                teams.send_channel_message(client, args.team_id, args.channel_id, args.message)
+            print(f"Message sent to {target}.")
+            return
+        try:
+            teams.send_message_with_files(
+                client,
+                content=args.message,
+                files=files,
+                images=images,
+                chat_id=args.chat_id,
+                team_id="" if args.chat_id else args.team_id,
+                channel_id="" if args.chat_id else args.channel_id,
+            )
+        except teams.FilesScopeMissingError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    print(f"Message sent to {target}{notes}.")
 
 
 def cmd_teams_activity(args: argparse.Namespace) -> None:
@@ -1206,6 +1251,16 @@ def main() -> None:
     p.add_argument("--team-id", dest="team_id", default="")
     p.add_argument("--channel-id", dest="channel_id", default="")
     p.add_argument("--chat-id", dest="chat_id", default="")
+    p.add_argument(
+        "--attach", action="append", default=[], metavar="PATH", help="File to send (repeatable)"
+    )
+    p.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Image shown inline in the message (repeatable, image/* under 4 MB)",
+    )
     p.set_defaults(func=cmd_teams_send)
 
     p = teams_sub.add_parser("activity", help="Recent Teams activity digest")
