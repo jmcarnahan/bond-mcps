@@ -48,7 +48,10 @@ poetry run pytest tests/ -v
    - `Team.ReadBasic.All` -- Read teams
    - `Channel.ReadBasic.All` -- Read channels
    - `ChannelMessage.Send` -- Send channel messages
-5. Click **Add permissions**
+   - `Chat.ReadWrite` -- Read, send, and create Teams chats (admin consent in most tenants)
+5. For directory search (the recipient typeahead in the desktop client):
+   - `User.ReadBasic.All` -- Read every user's basic profile; see "Directory search rollout" below for the consent order
+6. Click **Add permissions**
 
 **Corporate environments**: If permissions require admin consent, an Azure AD admin must click **Grant admin consent for [tenant]** on the API permissions page.
 
@@ -115,7 +118,7 @@ One environment variable, `MS_MAIL_ALLOWED_SENDER_DOMAINS`, hides mail that arri
 **Deliberately not gated.**
 
 - `mark_mail_read_json` and `list_emails`' `mark_as_read` — writes against ids the caller already holds, returning counts only.
-- `update_draft_body`, `send_draft`, `add_draft_attachment_json` — draft ids only, which Exchange rejects on anything that is not a draft.
+- `update_draft_body`, `send_draft`, `add_draft_attachment_json` — draft ids only, which Exchange rejects on anything that is not a draft — and `create_draft_json`, which composes an outbound draft of the user's own and reads no message.
 - `manage_mail_folders` — folder metadata, not mail.
 - Teams, calendar, files, and Power BI tools — out of scope for a mail policy.
 
@@ -130,6 +133,15 @@ One environment variable, `MS_MAIL_ALLOWED_SENDER_DOMAINS`, hides mail that arri
 3. **Check the id surfaces.** With the id of an external message noted before you turned the policy on: `read_email` refuses, `get_email_attachment` refuses, `create_reply_draft_json` returns `external_sender`, and `manage_inbox_rules` refuses a create carrying `forwardTo`.
 4. **Check the status probe.** `connection_status` reports `mail_policy.enabled == true`.
 5. **Deploy it.** Add the same value to `ms_graph.extra_env` in `deployment/terraform-existing-vpc/environments/<env>.tfvars`, run `make deploy-plan` and then `make deploy`, confirm the same boot line in the pod log, repeat step 4 against the deployed server, and tell desktop-client users to resync.
+
+## Directory search rollout
+
+`search_people_json` needs `User.ReadBasic.All`, which the consented default scope set does not include, and `ensure_chat_json` needs `Chat.ReadWrite`. Both are admin-gated in an organisational tenant. The order below matters: Entra evaluates a consent request as one bundle, so widening `MS_SCOPES` before the admin has granted the scope walls every sign-in behind "Approval required", mail included (the PR #18 release note explains the rule).
+
+1. **Admin consent first.** The Azure AD admin adds `User.ReadBasic.All` (delegated) — and `Chat.ReadWrite` if it is not there yet — on the app registration's API permissions and clicks **Grant admin consent for [tenant]**.
+2. **Widen the requested scopes.** Append `User.ReadBasic.All` (and `Chat.ReadWrite`) to `MS_SCOPES` — in `mcps/microsoft/.env` locally, and in `ms_graph.extra_env` of `deployment/terraform-existing-vpc/environments/<env>.tfvars` for a deployment, then `make deploy-plan` and `make deploy`. Unset, `MS_SCOPES` falls back to the consented default in `ms_graph/local_auth.py`, so the full list must be written out.
+3. **Every user reconnects.** A refresh token carries the scopes it was issued with, so an existing connection never gains the new ones. After reconnecting, `connection_status` lists `user.readbasic.all` (and `chat.readwrite`), which is what the desktop client keys its typeahead on.
+4. **Verify.** `search_people_json(query="<a colleague's name prefix>")` returns people. Before step 3 it returns `{"error": "directory_scope_missing"}`, which is the expected answer rather than a fault; `ensure_chat_json` likewise returns `teams_unavailable` on a connection without `Chat.ReadWrite` — the same error a missing Teams licence produces, because both arrive as a Graph 403.
 
 ## CLI Usage
 
@@ -269,7 +281,7 @@ If the browser path fails (SSH, headless), MSAL falls back to device code flow �
 poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
-### Available Tools (45)
+### Available Tools (48)
 
 | Tool | Description |
 |------|-------------|
@@ -302,16 +314,19 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 | `refresh_dataset` | Trigger an on-demand refresh of a Power BI dataset |
 | `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive |
 | `get_profile_json` | Get the signed-in user's identity as structured JSON |
+| `search_people_json` | Search the organisation directory by name or mail prefix |
 | `list_mail_delta` | Fetch one page of a mail folder's delta feed for incremental sync |
 | `get_mail_detail` | Get a message's plain-text body, internet headers, and attachment list |
 | `get_mail_attachment_json` | Get one email attachment's metadata, extracted text, or base64 bytes |
-| `create_reply_draft_json` | Create a reply draft and return its ID and web link |
+| `create_reply_draft_json` | Create a reply draft and return its ids, web link, and recipients |
+| `create_draft_json` | Create a new mail draft with recipients and a plain-text body; returns its ids |
 | `update_draft_body` | Replace a draft's body with plain text |
 | `add_draft_attachment_json` | Attach a base64 file to a draft before sending |
-| `send_draft` | Send an existing draft |
+| `send_draft` | Send an existing draft; returns the ids the sent copy carries |
 | `mark_mail_read_json` | Mark messages read or unread in bulk, best effort per message |
 | `list_chats_page` | Fetch one page of the user's Teams chats, newest activity first |
 | `get_chat_members_json` | List a chat's members (user IDs and display names) |
+| `ensure_chat_json` | Find or create a Teams chat with one person, or create a group chat |
 | `list_chat_messages_page` | Fetch one page of a chat's messages, flattened, with attachments |
 | `get_chat_attachment_json` | Get a chat attachment's bytes, or a file's thumbnail, as base64 |
 | `mark_chat_read_json` | Mark a Teams chat read for the signed-in user |
@@ -323,11 +338,11 @@ All parameters use simple `str`/`int` types for Bedrock compatibility. Teams too
 
 ### Desktop JSON tools
 
-The last seventeen tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
+The last twenty tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
 
 The 28 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
 
-A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. The Teams write tools (`mark_chat_read_json`, `send_chat_message_json`) also return a structured `"teams_unavailable"` error for the permanent no-Teams-license 403, which a client must not retry. The mail attachment tools (`get_mail_attachment_json`, `add_draft_attachment_json`) likewise return structured permanent errors — `invalid_mode`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `get_mail_attachment_json` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. The Teams attachment reader (`get_chat_attachment_json`) returns `not_found`, `access_denied`, `no_thumbnail`, `invalid_thumbnail`, `is_folder`, and `too_large` — it shares the same 10 MB cap, decided from the driveItem size before a file is downloaded — `send_chat_message_json` returns `invalid_attachments` (bad JSON or an entry missing `name`/`content_base64`) and `files_scope_missing` (the connection lacks `Files.ReadWrite`), and `inspect_file_json` returns `missing_target`, `access_denied`, `not_found`, and `invalid_link`; all of these are permanent too. The three paging tools (`list_mail_delta`, `list_chats_page`, `list_chat_messages_page`) return `invalid_cursor` when the cursor they were given is not a Graph URL: cursors only ever come from those tools, and the server refuses to send the bearer token anywhere but Graph. `get_mail_detail`, `get_mail_attachment_json`, and `create_reply_draft_json` return `external_sender` when the mail sender policy hides the message, which is permanent as well, and `connection_status` reports the policy's state under `mail_policy` so a client can explain the refusal. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
+A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. The Teams write tools (`mark_chat_read_json`, `send_chat_message_json`) also return a structured `"teams_unavailable"` error for the permanent no-Teams-license 403, which a client must not retry. The mail attachment tools (`get_mail_attachment_json`, `add_draft_attachment_json`) likewise return structured permanent errors — `invalid_mode`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `get_mail_attachment_json` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. The Teams attachment reader (`get_chat_attachment_json`) returns `not_found`, `access_denied`, `no_thumbnail`, `invalid_thumbnail`, `is_folder`, and `too_large` — it shares the same 10 MB cap, decided from the driveItem size before a file is downloaded — `send_chat_message_json` returns `invalid_attachments` (bad JSON or an entry missing `name`/`content_base64`) and `files_scope_missing` (the connection lacks `Files.ReadWrite`), and `inspect_file_json` returns `missing_target`, `access_denied`, `not_found`, and `invalid_link`; all of these are permanent too. `search_people_json` returns `directory_scope_missing` when the connection lacks `User.ReadBasic.All`, and `ensure_chat_json` returns `invalid_members` (an id that is not a Graph user id or UPN), `no_identity` (the signed-in user cannot be read off the token), and `no_members` (nobody left after dropping blanks and the caller), as well as `teams_unavailable`; these are permanent as well. `send_draft` reads the draft's `conversation_id` and `internet_message_id` before it sends and returns them, so a client can store its own copy of the sent mail at once and match it to the Sent Items copy by `internet_message_id`. The three paging tools (`list_mail_delta`, `list_chats_page`, `list_chat_messages_page`) return `invalid_cursor` when the cursor they were given is not a Graph URL: cursors only ever come from those tools, and the server refuses to send the bearer token anywhere but Graph. `get_mail_detail`, `get_mail_attachment_json`, and `create_reply_draft_json` return `external_sender` when the mail sender policy hides the message, which is permanent as well, and `connection_status` reports the policy's state under `mail_policy` so a client can explain the refusal. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
 
 ## Bond AI Integration
 
@@ -556,10 +571,12 @@ Go to **API permissions** -> **Add a permission** -> **Microsoft Graph** -> **De
 | `Team.ReadBasic.All` | List Teams the user has joined |
 | `Channel.ReadBasic.All` | List channels in a Team |
 | `ChannelMessage.Send` | Send messages to Teams channels |
+| `Chat.ReadWrite` | Read, send, and create Teams chats |
+| `User.ReadBasic.All` | Search the organisation directory (recipient typeahead) |
 
 After adding permissions, click **Grant admin consent for [your tenant]** if your organization requires admin consent for these permissions.
 
-**Note**: All permissions are **delegated** (user-level). Bond AI never accesses data without the user being signed in. Omit the Teams permissions if Teams integration is not needed. Omit Files/Sites permissions if file access is not needed.
+**Note**: All permissions are **delegated** (user-level). Bond AI never accesses data without the user being signed in. Omit the Teams permissions if Teams integration is not needed. Omit Files/Sites permissions if file access is not needed. Omit `User.ReadBasic.All` if directory search is not needed.
 
 **3. Add a redirect URI**
 

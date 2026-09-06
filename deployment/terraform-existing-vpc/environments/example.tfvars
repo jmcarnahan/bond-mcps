@@ -137,6 +137,10 @@ services = {
       # Hide mail from senders outside these domains (unset = off). List every
       # domain the org sends from, including <tenant>.onmicrosoft.com.
       # MS_MAIL_ALLOWED_SENDER_DOMAINS = "yourcompany.com,yourcompany.onmicrosoft.com"
+      # Scopes each sign-in requests, space-separated. Unset = the consented
+      # default in ms_graph/local_auth.py. Widen only AFTER the admin has
+      # granted the extra scopes (README: "Directory search rollout").
+      # MS_SCOPES = "Mail.Read Mail.ReadWrite Mail.Send MailboxSettings.Read User.Read Files.Read.All Chat.ReadWrite User.ReadBasic.All"
     }
     health = { type = "http", path = "/healthz" }
   }
