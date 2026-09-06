@@ -549,7 +549,7 @@ DELTA_SELECT = (
     "receivedDateTime,isRead,isDraft,hasAttachments,bodyPreview"
 )
 
-DETAIL_SELECT = "id,from,sender,uniqueBody,internetMessageHeaders,hasAttachments"
+DETAIL_SELECT = "id,from,sender,isDraft,uniqueBody,internetMessageHeaders,hasAttachments"
 
 # Expanding attachments here means one round trip for body + attachment
 # metadata, and the inner $select keeps contentBytes out of the response.

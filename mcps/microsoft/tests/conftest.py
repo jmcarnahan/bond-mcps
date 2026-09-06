@@ -1318,3 +1318,18 @@ SAMPLE_FORWARDING_RULE = {
     "conditions": {"senderContains": ["adele"]},
     "actions": {"forwardAsAttachmentTo": [{"emailAddress": {"address": EXTERNAL_SENDER_ADDRESS}}]},
 }
+
+
+# An unsent draft exactly as Graph returns it (verified live 2026-09-06): no `from`,
+# no `sender`, isDraft True. Without the isDraft allowance the policy hides it.
+SAMPLE_UNSENT_DRAFT = {
+    "id": "AAMkUNSENT001",
+    "subject": "DRAFT-SUBJECT unsent reply",
+    "bodyPreview": "DRAFT-PREVIEW",
+    "body": {"contentType": "text", "content": "DRAFT-BODY"},
+    "toRecipients": [{"emailAddress": {"address": "bob@example.com"}}],
+    "receivedDateTime": "2024-01-15T12:00:00Z",
+    "isRead": True,
+    "isDraft": True,
+    "hasAttachments": False,
+}

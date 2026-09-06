@@ -12,6 +12,37 @@ import httpx
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
+
+class NonGraphUrlError(ValueError):
+    """A request path was an absolute URL outside Graph.
+
+    ``get`` accepts absolute URLs because Graph paging cursors (nextLink,
+    deltaLink) are absolute, and some of those cursors are supplied by the
+    caller. The bearer token rides on every request, so a caller-supplied
+    URL on another host would hand the token to that host.
+    """
+
+
+def _check_graph_path(path: str) -> None:
+    """Allow a relative Graph path or an absolute URL under GRAPH_BASE_URL only.
+
+    Anything else — another host, a protocol-relative ``//host``, an uppercase
+    scheme, a lookalike such as ``graph.microsoft.com.evil`` — is refused
+    before a request is built. Exact-prefix on purpose: Graph never emits a
+    cursor that needs anything looser.
+
+    Only ``get`` is guarded: it is the one method that accepts absolute URLs
+    from outside (paging cursors). ``get_operation_status`` and ``delete_url``
+    take absolute URLs on other hosts on purpose — copy-monitor and upload-
+    session URLs that Graph itself handed back — and are not caller-supplied.
+    """
+    if path.startswith(GRAPH_BASE_URL + "/"):
+        return
+    if path.startswith("/") and not path.startswith("//"):
+        return
+    raise NonGraphUrlError(f"refusing to send the Graph token to a non-Graph URL: {path[:80]!r}")
+
+
 # Upload-session fragments can be several MB, so the bare client gets longer
 # read/write budgets than the 30 s the Graph JSON calls use.
 _UPLOAD_TIMEOUT = httpx.Timeout(30.0, read=120.0, write=120.0)
@@ -121,6 +152,7 @@ class GraphClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        _check_graph_path(path)
         response = self._client.get(path, params=params, headers=headers)
         _raise_for_graph_error(response)
         return response.json()
@@ -270,6 +302,7 @@ class AsyncGraphClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        _check_graph_path(path)
         response = await self._client.get(path, params=params, headers=headers)
         _raise_for_graph_error(response)
         return response.json()

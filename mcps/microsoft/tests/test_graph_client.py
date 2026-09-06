@@ -8,6 +8,7 @@ from ms_graph.graph_client import (
     AsyncGraphClient,
     GraphClient,
     GraphError,
+    NonGraphUrlError,
 )
 
 UPLOAD_URL = "https://sn3302.up.1drv.com/up/session-abc"
@@ -663,3 +664,58 @@ class TestDeleteUrl:
                 await client.delete_url(UPLOAD_URL)
 
         assert exc.value.status_code == 404
+
+
+class TestNonGraphUrls:
+    """get() refuses to send the bearer token anywhere but Graph.
+
+    Paging cursors are absolute URLs and three tools accept them from the
+    caller, so this is the one place a caller-controlled host could reach.
+    """
+
+    GRAPH_CURSOR = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta?$deltatoken=abc"
+    BAD = [
+        "https://evil.example/v1.0/me",
+        "https://graph.microsoft.com.evil.example/v1.0/me",
+        "https://graph.microsoft.com/v1.0.evil.example/me",
+        "https://graph.microsoft.com@evil.example/v1.0/me",
+        "HTTPS://graph.microsoft.com/v1.0/me",
+        "http://graph.microsoft.com/v1.0/me",
+        "//evil.example/v1.0/me",
+        " https://graph.microsoft.com/v1.0/me",
+        "evil.example/me",
+        "",
+    ]
+
+    @respx.mock
+    def test_graph_cursor_is_fetched(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        with GraphClient("tok") as client:
+            assert client.get(self.GRAPH_CURSOR) == {"value": []}
+        assert route.called
+
+    @respx.mock
+    def test_relative_path_is_fetched(self):
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(return_value=httpx.Response(200, json={"ok": 1}))
+        with GraphClient("tok") as client:
+            assert client.get("/me") == {"ok": 1}
+
+    @respx.mock
+    @pytest.mark.parametrize("bad", BAD)
+    def test_sync_refuses_before_any_request(self, bad):
+        with GraphClient("tok") as client, pytest.raises(NonGraphUrlError):
+            client.get(bad)
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    @pytest.mark.parametrize("bad", BAD)
+    async def test_async_refuses_before_any_request(self, bad):
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(NonGraphUrlError):
+                await client.get(bad)
+        assert respx.calls.call_count == 0
+
+    def test_is_a_value_error(self):
+        assert issubclass(NonGraphUrlError, ValueError)
