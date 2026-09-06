@@ -1368,3 +1368,36 @@ SAMPLE_UNSENT_DRAFT = {
     "isDraft": True,
     "hasAttachments": False,
 }
+
+
+# Two directory rows for search_people_json; the second has no mail and no
+# title, as a room mailbox or a fresh account looks.
+SAMPLE_USERS_SEARCH_RESPONSE = {
+    "@odata.count": 2,
+    "value": [
+        {
+            "id": "user-id-002",
+            "displayName": "Alice Smith",
+            "mail": "alice@example.com",
+            "userPrincipalName": "alice@example.com",
+            "jobTitle": "Engineer",
+        },
+        {
+            "id": "user-id-003",
+            "displayName": "Smith Room",
+            "mail": None,
+            "userPrincipalName": "smithroom@example.com",
+            "jobTitle": None,
+        },
+    ],
+}
+
+# POST /chats answers 201 with the chat whether it created one or found the
+# existing 1:1, so nothing here says which.
+SAMPLE_CHAT_CREATED = {
+    "id": "19:new-chat@thread.v2",
+    "chatType": "oneOnOne",
+    "topic": None,
+    "createdDateTime": "2026-09-06T10:00:00Z",
+    "lastUpdatedDateTime": "2026-09-06T10:00:00Z",
+}

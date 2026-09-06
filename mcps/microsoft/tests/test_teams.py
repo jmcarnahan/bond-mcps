@@ -14,6 +14,7 @@ from ms_graph.teams import (
     FilesScopeMissingError,
     TeamsNotAvailableError,
     _attachment_from_drive_item,
+    _chat_create_payload,
     _hosted_contents,
     _member_emails,
     _message_base,
@@ -24,6 +25,7 @@ from ms_graph.teams import (
 )
 
 from .conftest import (
+    GRAPH_ERROR_400,
     GRAPH_ERROR_403,
     GRAPH_ERROR_404,
     SAMPLE_CHANNEL_FILES_FOLDER,
@@ -32,6 +34,7 @@ from .conftest import (
     SAMPLE_CHANNEL_MESSAGE_USER,
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
+    SAMPLE_CHAT_CREATED,
     SAMPLE_CHAT_MEMBERS_RESPONSE,
     SAMPLE_CHAT_MESSAGE_SENT,
     SAMPLE_CHAT_MESSAGE_WITH_CARD,
@@ -2119,3 +2122,119 @@ class TestSendInlineImages:
             )
 
         assert json.loads(post.calls[0].request.content)["mentions"] == mentions
+
+
+# ---------------------------------------------------------------------------
+# Chat creation
+# ---------------------------------------------------------------------------
+
+CHATS_URL = f"{GRAPH_BASE_URL}/chats"
+BIND = "https://graph.microsoft.com/v1.0/users"
+
+
+class TestChatCreatePayload:
+    def test_two_members_are_a_one_on_one_and_never_carry_a_topic(self):
+        payload = _chat_create_payload(["me-oid", "bob@example.com"], topic="Hello")
+
+        assert payload["chatType"] == "oneOnOne"
+        assert "topic" not in payload
+
+    def test_three_members_are_a_group_with_the_topic(self):
+        payload = _chat_create_payload(["me-oid", "bob@example.com", "carol@example.com"], "Hello")
+
+        assert payload["chatType"] == "group"
+        assert payload["topic"] == "Hello"
+
+    def test_a_group_without_a_topic_omits_the_key(self):
+        payload = _chat_create_payload(["me-oid", "bob@example.com", "carol@example.com"], "")
+
+        assert payload["chatType"] == "group"
+        assert "topic" not in payload
+
+    def test_member_shape_is_the_graph_conversation_member(self):
+        payload = _chat_create_payload(["me-oid", "bob@example.com"])
+
+        assert payload["members"][0] == {
+            "@odata.type": "#microsoft.graph.aadUserConversationMember",
+            "roles": ["owner"],
+            "user@odata.bind": "https://graph.microsoft.com/v1.0/users('me-oid')",
+        }
+
+    def test_member_order_is_preserved(self):
+        payload = _chat_create_payload(["me-oid", "bob@example.com", "carol@example.com"])
+
+        assert [m["user@odata.bind"] for m in payload["members"]] == [
+            f"{BIND}('me-oid')",
+            f"{BIND}('bob@example.com')",
+            f"{BIND}('carol@example.com')",
+        ]
+
+
+class TestCreateChat:
+    @respx.mock
+    async def test_acreate_chat_posts_the_payload_and_returns_the_chat(self):
+        route = respx.post(CHATS_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_CREATED)
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await teams.acreate_chat(client, ["me-oid", "bob@example.com"])
+
+        assert result == SAMPLE_CHAT_CREATED
+        assert json.loads(route.calls[0].request.content) == _chat_create_payload(
+            ["me-oid", "bob@example.com"]
+        )
+
+    @respx.mock
+    async def test_acreate_chat_sends_the_topic_for_a_group(self):
+        route = respx.post(CHATS_URL).mock(
+            return_value=httpx.Response(201, json={**SAMPLE_CHAT_CREATED, "chatType": "group"})
+        )
+        members = ["me-oid", "bob@example.com", "carol@example.com"]
+        async with AsyncGraphClient("tok") as client:
+            await teams.acreate_chat(client, members, topic="Launch")
+
+        assert json.loads(route.calls[0].request.content) == _chat_create_payload(members, "Launch")
+
+    @respx.mock
+    async def test_acreate_chat_403_raises_not_available(self):
+        respx.post(CHATS_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                await teams.acreate_chat(client, ["me-oid", "bob@example.com"])
+
+    @respx.mock
+    async def test_acreate_chat_propagates_other_errors(self):
+        respx.post(CHATS_URL).mock(return_value=httpx.Response(400, json=GRAPH_ERROR_400))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await teams.acreate_chat(client, ["me-oid", "nobody"])
+
+        assert exc_info.value.status_code == 400
+
+    @respx.mock
+    async def test_acreate_chat_empty_body_is_an_empty_dict(self):
+        respx.post(CHATS_URL).mock(return_value=httpx.Response(201))
+        async with AsyncGraphClient("tok") as client:
+            result = await teams.acreate_chat(client, ["me-oid", "bob@example.com"])
+
+        assert result == {}
+
+    @respx.mock
+    def test_create_chat_posts_the_payload_and_returns_the_chat(self):
+        route = respx.post(CHATS_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_CREATED)
+        )
+        with GraphClient("tok") as client:
+            result = teams.create_chat(client, ["me-oid", "bob@example.com"])
+
+        assert result == SAMPLE_CHAT_CREATED
+        assert json.loads(route.calls[0].request.content) == _chat_create_payload(
+            ["me-oid", "bob@example.com"]
+        )
+
+    @respx.mock
+    def test_create_chat_403_raises_not_available(self):
+        respx.post(CHATS_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with GraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                teams.create_chat(client, ["me-oid", "bob@example.com"])

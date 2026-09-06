@@ -28,6 +28,7 @@ from .conftest import (
     SAMPLE_CHANNEL_FILES_FOLDER,
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
+    SAMPLE_CHAT_CREATED,
     SAMPLE_CHAT_MEMBERS_RESPONSE,
     SAMPLE_CHAT_MESSAGE_FULL,
     SAMPLE_CHAT_MESSAGE_SENT,
@@ -104,6 +105,7 @@ from .conftest import (
     SAMPLE_UNSENT_DRAFT,
     SAMPLE_UPLOADED_FILE,
     SAMPLE_USER_PROFILE,
+    SAMPLE_USERS_SEARCH_RESPONSE,
     TEAMS_FILE_ATTACHMENT_ID,
     TEAMS_FILE_URL,
     TEAMS_HOSTED_ID,
@@ -4146,6 +4148,110 @@ class TestMCPProfileJson:
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
+USERS_SEARCH_PREFIX = f"{GRAPH_BASE_URL}/users?"
+
+
+def _users_query() -> dict:
+    """The decoded query string of the one /users request respx saw."""
+    for call in respx.calls:
+        if call.request.url.path == "/v1.0/users":
+            return parse_qs(urlparse(str(call.request.url)).query)
+    raise AssertionError("no /users request was made")
+
+
+class TestMCPSearchPeopleJson:
+    """search_people_json."""
+
+    @respx.mock
+    async def test_blank_query_returns_empty_without_graph_or_token(self, mcp_server):
+        """A typeahead fires on every keystroke, so an empty box costs nothing."""
+        result = await _call(mcp_server, "search_people_json", {"query": "   "})
+
+        assert _structured(result) == {"people": []}
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_results_are_flattened_with_nulls_kept(self, mcp_server):
+        route = respx.get(url__startswith=USERS_SEARCH_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "search_people_json", {"query": "smi"})
+
+        assert _structured(result) == {
+            "people": [
+                {
+                    "id": "user-id-002",
+                    "display_name": "Alice Smith",
+                    "mail": "alice@example.com",
+                    "user_principal_name": "alice@example.com",
+                    "job_title": "Engineer",
+                },
+                {
+                    "id": "user-id-003",
+                    "display_name": "Smith Room",
+                    "mail": None,
+                    "user_principal_name": "smithroom@example.com",
+                    "job_title": None,
+                },
+            ]
+        }
+        assert route.calls[0].request.headers["ConsistencyLevel"] == "eventual"
+        query = _users_query()
+        assert query["$search"] == ['"displayName:smi" OR "mail:smi"']
+        assert query["$top"] == ["10"]
+
+    @respx.mock
+    async def test_top_is_passed_and_clamped(self, mcp_server):
+        respx.get(url__startswith=USERS_SEARCH_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
+        )
+        with _mock_token():
+            await _call(mcp_server, "search_people_json", {"query": "smi", "top": 500})
+
+        assert _users_query()["$top"] == ["50"]
+
+    @respx.mock
+    async def test_query_is_stripped(self, mcp_server):
+        respx.get(url__startswith=USERS_SEARCH_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
+        )
+        with _mock_token():
+            await _call(mcp_server, "search_people_json", {"query": "  smi  "})
+
+        assert _users_query()["$search"] == ['"displayName:smi" OR "mail:smi"']
+
+    @respx.mock
+    async def test_403_is_directory_scope_missing(self, mcp_server):
+        respx.get(url__startswith=USERS_SEARCH_PREFIX).mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "search_people_json", {"query": "smi"})
+
+        assert _structured(result) == {"error": "directory_scope_missing"}
+
+    @respx.mock
+    async def test_429_propagates_as_tool_error(self, mcp_server):
+        """Throttling is transient, so it must not look like a permanent answer."""
+        from fastmcp.exceptions import ToolError
+
+        respx.get(url__startswith=USERS_SEARCH_PREFIX).mock(
+            return_value=httpx.Response(
+                429, json={"error": {"code": "TooManyRequests", "message": "throttled"}}
+            )
+        )
+        with _mock_token():
+            with pytest.raises(ToolError, match="429"):
+                await _call(mcp_server, "search_people_json", {"query": "smi"})
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "search_people_json", {"query": "smi"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
 class TestMCPListMailDelta:
     """list_mail_delta."""
 
@@ -5169,6 +5275,164 @@ SAMPLE_CHAT_MESSAGE_CREATED_WITH_FILE = {
         }
     ],
 }
+
+
+CHATS_CREATE_URL = f"{GRAPH_BASE_URL}/chats"
+USER_BIND = "https://graph.microsoft.com/v1.0/users"
+
+
+def _chat_create_body() -> dict:
+    """The JSON body of the one POST /chats respx saw."""
+    for call in respx.calls:
+        if call.request.method == "POST" and call.request.url.path == "/v1.0/chats":
+            return json.loads(call.request.content)
+    raise AssertionError("no POST /chats request was made")
+
+
+class TestMCPEnsureChatJson:
+    """ensure_chat_json."""
+
+    @respx.mock
+    async def test_one_id_makes_a_one_on_one_with_the_caller_first(self, mcp_server):
+        respx.post(CHATS_CREATE_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_CREATED)
+        )
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(
+                mcp_server,
+                "ensure_chat_json",
+                {"user_ids": "bob@example.com", "topic": "ignored for a 1:1"},
+            )
+
+        assert _structured(result) == {
+            "chat_id": "19:new-chat@thread.v2",
+            "chat_type": "oneOnOne",
+        }
+        body = _chat_create_body()
+        assert body["chatType"] == "oneOnOne"
+        assert "topic" not in body
+        assert [m["user@odata.bind"] for m in body["members"]] == [
+            f"{USER_BIND}('user-obj-id')",
+            f"{USER_BIND}('bob@example.com')",
+        ]
+
+    @respx.mock
+    async def test_two_ids_make_a_group_with_topic(self, mcp_server):
+        respx.post(CHATS_CREATE_URL).mock(
+            return_value=httpx.Response(
+                201, json={**SAMPLE_CHAT_CREATED, "chatType": "group", "topic": "Launch"}
+            )
+        )
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(
+                mcp_server,
+                "ensure_chat_json",
+                {"user_ids": "bob@example.com, carol@example.com", "topic": " Launch "},
+            )
+
+        assert _structured(result)["chat_type"] == "group"
+        body = _chat_create_body()
+        assert body["chatType"] == "group"
+        assert body["topic"] == "Launch"
+        assert [m["user@odata.bind"] for m in body["members"]] == [
+            f"{USER_BIND}('user-obj-id')",
+            f"{USER_BIND}('bob@example.com')",
+            f"{USER_BIND}('carol@example.com')",
+        ]
+
+    @respx.mock
+    async def test_blanks_and_duplicates_are_dropped(self, mcp_server):
+        respx.post(CHATS_CREATE_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_CREATED)
+        )
+        with _mock_token(IDENTITY_TOKEN):
+            await _call(
+                mcp_server,
+                "ensure_chat_json",
+                {"user_ids": " bob@example.com,, bob@example.com , "},
+            )
+
+        body = _chat_create_body()
+        assert body["chatType"] == "oneOnOne"
+        assert [m["user@odata.bind"] for m in body["members"]] == [
+            f"{USER_BIND}('user-obj-id')",
+            f"{USER_BIND}('bob@example.com')",
+        ]
+
+    @respx.mock
+    async def test_own_id_is_dropped_and_self_only_is_no_members(self, mcp_server):
+        """Graph would answer 400 for a chat of one; say so without the round trip."""
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "user-obj-id"})
+
+        assert _structured(result) == {"error": "no_members"}
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_own_id_among_others_is_dropped(self, mcp_server):
+        respx.post(CHATS_CREATE_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_CREATED)
+        )
+        with _mock_token(IDENTITY_TOKEN):
+            await _call(
+                mcp_server,
+                "ensure_chat_json",
+                {"user_ids": "user-obj-id, bob@example.com"},
+            )
+
+        body = _chat_create_body()
+        assert body["chatType"] == "oneOnOne"
+        assert [m["user@odata.bind"] for m in body["members"]] == [
+            f"{USER_BIND}('user-obj-id')",
+            f"{USER_BIND}('bob@example.com')",
+        ]
+
+    @respx.mock
+    async def test_empty_user_ids_is_no_members(self, mcp_server):
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": " , "})
+
+        assert _structured(result) == {"error": "no_members"}
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_invalid_member_makes_no_request(self, mcp_server):
+        """The id lands inside users('…'), so it is checked before anything else."""
+        result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com, x'y"})
+
+        assert _structured(result) == {"error": "invalid_members"}
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_token_without_claims_is_no_identity(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com"})
+
+        assert _structured(result) == {"error": "no_identity"}
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_teams_403_reports_unavailable(self, mcp_server):
+        respx.post(CHATS_CREATE_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com"})
+
+        assert _structured(result) == {"error": "teams_unavailable"}
+
+    @respx.mock
+    async def test_unknown_user_400_propagates(self, mcp_server):
+        from fastmcp.exceptions import ToolError
+
+        respx.post(CHATS_CREATE_URL).mock(return_value=httpx.Response(400, json=GRAPH_ERROR_400))
+        with _mock_token(IDENTITY_TOKEN):
+            with pytest.raises(ToolError, match="400"):
+                await _call(mcp_server, "ensure_chat_json", {"user_ids": "nobody@example.com"})
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 class TestMCPMarkChatReadJson:
