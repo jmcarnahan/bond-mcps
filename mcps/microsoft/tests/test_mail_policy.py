@@ -289,7 +289,10 @@ class TestCheckMessageAsync:
 
         url = str(route.calls[0].request.url)
         assert f"/me/messages/{ENCODED_AWKWARD_ID}" in url
-        assert "%24select=id%2Cfrom%2Csender" in url or "$select=id,from,sender" in url
+        assert (
+            "%24select=id%2Cfrom%2Csender%2CisDraft" in url
+            or "$select=id,from,sender,isDraft" in url
+        )
 
     @respx.mock
     async def test_external_sender_is_refused(self, monkeypatch):
@@ -356,7 +359,10 @@ class TestCheckMessageSync:
 
         url = str(route.calls[0].request.url)
         assert f"/me/messages/{ENCODED_AWKWARD_ID}" in url
-        assert "%24select=id%2Cfrom%2Csender" in url or "$select=id,from,sender" in url
+        assert (
+            "%24select=id%2Cfrom%2Csender%2CisDraft" in url
+            or "$select=id,from,sender,isDraft" in url
+        )
 
     @respx.mock
     def test_external_sender_is_refused(self, monkeypatch):
@@ -392,3 +398,33 @@ class TestCheckMessageSync:
         with GraphClient("tok") as client:
             with pytest.raises(GraphError):
                 mail_policy.check_message(client, SAMPLE_MESSAGE["id"], None)
+
+
+class TestDrafts:
+    """Graph returns no `from` on a draft; the isDraft flag alone admits it."""
+
+    def test_draft_without_from_is_allowed(self):
+        assert mail_policy.sender_allowed({"id": "d", "isDraft": True}, ONE_DOMAIN) is True
+
+    def test_draft_flag_wins_even_with_an_external_from(self):
+        # A draft is the user's composition whatever from it carries (a
+        # send-as alias, or nothing). Only Exchange sets the flag.
+        msg = {"isDraft": True, "from": {"emailAddress": {"address": "x@evil.example.net"}}}
+        assert mail_policy.sender_allowed(msg, ONE_DOMAIN) is True
+
+    @pytest.mark.parametrize("flag", ["true", 1, "True", [True], {"x": 1}])
+    def test_only_the_boolean_true_counts(self, flag):
+        assert mail_policy.sender_allowed({"isDraft": flag}, ONE_DOMAIN) is False
+
+    def test_non_draft_without_from_is_still_hidden(self):
+        assert mail_policy.sender_allowed({"isDraft": False}, ONE_DOMAIN) is False
+
+    def test_filter_keeps_drafts(self, monkeypatch):
+        monkeypatch.setenv(ENV, "corp.com")
+        from .conftest import SAMPLE_UNSENT_DRAFT
+
+        kept = mail_policy.filter_messages([SAMPLE_EXTERNAL_MESSAGE, SAMPLE_UNSENT_DRAFT])
+        assert kept == [SAMPLE_UNSENT_DRAFT]
+
+    def test_sender_select_carries_isdraft(self):
+        assert "isDraft" in mail_policy.SENDER_SELECT.split(",")

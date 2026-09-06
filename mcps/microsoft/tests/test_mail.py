@@ -1064,7 +1064,7 @@ class TestGetMessageDetailSync:
         req = route.calls[0].request
         assert req.headers["prefer"] == 'outlook.body-content-type="text"'
         assert (
-            "$select=id%2Cfrom%2Csender%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments"
+            "$select=id%2Cfrom%2Csender%2CisDraft%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments"
             in str(req.url)
         )
         # One round trip carries the attachment metadata, and never contentBytes.

@@ -22,7 +22,12 @@ external. Fail closed, no special cases, exact match only (subdomains are
 listed explicitly). ``sender`` is consulted because Exchange does not
 authenticate the Sender header the way DMARC covers From, so "sent on behalf
 of an internal user by an external service" is external-originated content.
-``replyTo`` is not consulted.
+``replyTo`` is not consulted. The one exception is a draft: Graph returns no
+``from`` on a draft at all (verified live 2026-09-06 on the create response,
+a single GET, the folder listing, and the delta feed), so a message Exchange
+marks ``isDraft`` is the user's own composition and is allowed. A sender
+cannot set ``isDraft`` on mail they deliver; only Exchange does, and only on
+messages composed in the mailbox.
 
 **Where enforcement lives.** At the caller boundary, in this module only —
 never inside the ~18 sync/async fetch functions in ``mail.py`` and
@@ -69,7 +74,7 @@ ENV_ALLOWED_SENDER_DOMAINS = "MS_MAIL_ALLOWED_SENDER_DOMAINS"
 
 # The only fields the id-only check fetches: enough to judge the sender and
 # nothing that could leak the message's content into a refusal path.
-SENDER_SELECT = "id,from,sender"
+SENDER_SELECT = "id,from,sender,isDraft"
 
 EXTERNAL_SENDER_TEXT = (
     "This message is from a sender outside the allowed domains and is hidden by the mail policy."
@@ -161,9 +166,17 @@ def _address(node: Any) -> Any:
 
 
 def sender_allowed(msg: Any, domains: frozenset[str]) -> bool:
-    """True when a message originated inside ``domains``. Pure, fail closed."""
+    """True when a message originated inside ``domains``. Pure, fail closed.
+
+    A draft is allowed outright: Graph returns no ``from`` on a draft, and
+    ``isDraft`` is set by Exchange on messages composed in the mailbox, never
+    by a sender. The check is for the boolean ``True`` only, so a string or
+    any other truthy junk in a malformed payload does not open the gate.
+    """
     if not isinstance(msg, dict):
         return False
+    if msg.get("isDraft") is True:
+        return True
     if sender_domain(_address(msg.get("from"))) not in domains:
         return False
     on_behalf = _address(msg.get("sender"))

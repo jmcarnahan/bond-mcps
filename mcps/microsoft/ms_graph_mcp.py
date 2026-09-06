@@ -59,7 +59,7 @@ from ms_graph import mail as mail_ops
 from ms_graph import power_bi as pbi_ops
 from ms_graph import teams as teams_ops
 from ms_graph.auth import get_graph_token, get_powerbi_token
-from ms_graph.graph_client import AsyncGraphClient, GraphError
+from ms_graph.graph_client import AsyncGraphClient, GraphError, NonGraphUrlError
 from ms_graph.local_auth import login_scopes
 from ms_graph.power_bi import AsyncPowerBIClient
 from ms_graph.teams import (
@@ -314,7 +314,8 @@ async def list_emails(
         return err
 
     _SELECT = (
-        "id,subject,from,sender,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview"
+        "id,subject,from,sender,isDraft,toRecipients,receivedDateTime,isRead,"
+        "hasAttachments,bodyPreview"
     )
 
     # Resolved before any Graph call so a malformed allowlist fails the call
@@ -2901,7 +2902,10 @@ async def export_report(
 # tools return external_sender when the mail sender policy hides a message —
 # also permanent, and never accompanied by any detail of the hidden message;
 # connection_status reports mail_policy.enabled so a client can explain the
-# gap and resync when it flips. Everything else — Graph 5xx, throttling,
+# gap and resync when it flips. The three paging tools (list_mail_delta,
+# list_chats_page, list_chat_messages_page) return invalid_cursor when the
+# cursor is not a Graph URL — permanent; the Graph client refuses to send the
+# bearer token anywhere else. Everything else — Graph 5xx, throttling,
 # unexpected shapes, a malformed policy allowlist — propagates so FastMCP
 # raises a tool error, which is the client's "transient, retry later" signal.
 # ---------------------------------------------------------------------------
@@ -3010,7 +3014,9 @@ async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received:
             (e.g. "2026-01-01T00:00:00Z"). Ignored when cursor is set.
 
     A resync of true means the saved cursor has expired: discard local state
-    for the folder and call again with an empty cursor.
+    for the folder and call again with an empty cursor. A cursor that is not a
+    Graph URL returns {"error": "invalid_cursor"} without any request: cursors
+    only ever come from this tool, and the token must not follow one elsewhere.
 
     While the mail sender policy is on, messages from senders outside the
     allowed domains are omitted from messages; `@removed` tombstones always
@@ -3025,6 +3031,9 @@ async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received:
             )
     except PermissionError as e:
         return _not_connected(e)
+    except NonGraphUrlError:
+        logger.warning("list_mail_delta: refused a non-Graph cursor")
+        return {"error": "invalid_cursor"}
     except GraphError as e:
         if e.status_code == 410:
             return {"messages": [], "next_cursor": "", "delta_cursor": "", "resync": True}
@@ -3421,6 +3430,8 @@ async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
     get_chat_members_json), last_preview_at, and last_read_at (how far the
     signed-in user has read the chat; null when Graph sends no viewpoint).
     Returns next_cursor for the next page, empty when the listing is complete.
+    A cursor that is not a Graph URL returns {"error": "invalid_cursor"} without
+    any request.
 
     Args:
         cursor: A next_cursor from a previous call. Empty starts at page one.
@@ -3432,6 +3443,9 @@ async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
             data = await teams_ops.achats_page(client, cursor=cursor, top=top)
     except PermissionError as e:
         return _not_connected(e)
+    except NonGraphUrlError:
+        logger.warning("list_chats_page: refused a non-Graph cursor")
+        return {"error": "invalid_cursor"}
 
     chats = []
     for chat in data.get("value", []):
@@ -3485,7 +3499,8 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
     last_modified, attachments. System events have no sender, so the from_*
     fields are null. mentioned_user_ids is the Graph user ids the message
     @mentions, in the order they appear and empty when none. Returns
-    next_cursor for the next page, empty when there are no more.
+    next_cursor for the next page, empty when there are no more. A cursor that
+    is not a Graph URL returns {"error": "invalid_cursor"} without any request.
 
     attachments: every file, inline image, card, or quoted-message reference on
     the message as {id, kind, name, content_type, content_url, thumbnail_url,
@@ -3508,6 +3523,9 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
             data = await teams_ops.achat_messages_page(client, chat_id, since=since, cursor=cursor)
     except PermissionError as e:
         return _not_connected(e)
+    except NonGraphUrlError:
+        logger.warning("list_chat_messages_page: refused a non-Graph cursor")
+        return {"error": "invalid_cursor"}
 
     return {
         "messages": [_chat_message_json(m) for m in data.get("value", [])],
