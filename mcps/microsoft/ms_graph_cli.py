@@ -18,6 +18,10 @@ Usage:
     ms-graph-cli email attachment <message_id> <attachment_id> [--out PATH]
     ms-graph-cli email send <to> <subject> <body> [--from <address>] [--cc <address>] [--attach PATH ...]
 
+    The email list/read/attachment commands honour MS_MAIL_ALLOWED_SENDER_DOMAINS
+    exactly as the MCP server does: when it is set, mail from senders outside those
+    domains is hidden.
+
     # Calendar
     ms-graph-cli calendar list [--start <iso8601>] [--end <iso8601>] [--top 10]
     ms-graph-cli calendar get <event_id>
@@ -68,7 +72,7 @@ from auth import log_discipline  # noqa: E402
 log_discipline.apply()
 
 from ms_graph import attachments as attachment_ops
-from ms_graph import calendar, files, mail, teams
+from ms_graph import calendar, files, mail, mail_policy, teams
 from ms_graph import power_bi as pbi_ops
 from ms_graph.graph_client import GraphClient
 from ms_graph.local_auth import get_local_powerbi_token, get_local_token
@@ -160,6 +164,9 @@ def cmd_powerbi_whoami(args: argparse.Namespace) -> None:
 
 
 def cmd_email_list(args: argparse.Namespace) -> None:
+    # Resolved before any Graph call so a malformed allowlist fails the
+    # command before mail is fetched, as the server's list_emails does.
+    notice = mail_policy.POLICY_NOTICE if mail_policy.enabled() else ""
     token = get_local_token()
     with GraphClient(token) as client:
         if args.query:
@@ -169,8 +176,14 @@ def cmd_email_list(args: argparse.Namespace) -> None:
             messages = mail.list_messages(client, folder=args.folder, top=args.top)
             header = f"Recent messages in '{args.folder}'"
 
+    # Filter before formatting: the sync list calls send no $select, so these
+    # dicts carry full bodies and nothing external may reach _fmt_message.
+    messages = mail_policy.filter_messages(messages)
+
     if not messages:
         print("No messages found.")
+        if notice:
+            print(notice)
         return
 
     print(f"{header} ({len(messages)}):\n")
@@ -178,6 +191,8 @@ def cmd_email_list(args: argparse.Namespace) -> None:
         print(f"[{i}]")
         print(_fmt_message(msg))
         print()
+    if notice:
+        print(notice)
 
 
 def _fmt_size(size_bytes: int) -> str:
@@ -212,6 +227,9 @@ def cmd_email_read(args: argparse.Namespace) -> None:
     attachments: list[dict] = []
     with GraphClient(token) as client:
         msg = mail.get_message(client, args.message_id)
+        if not mail_policy.message_allowed(msg):
+            print(mail_policy.EXTERNAL_SENDER_TEXT)
+            return
         if msg.get("hasAttachments"):
             attachments = attachment_ops.list_message_attachments(client, args.message_id)
 
@@ -239,11 +257,23 @@ def cmd_email_read(args: argparse.Namespace) -> None:
 def cmd_email_attachment(args: argparse.Namespace) -> None:
     token = get_local_token()
     with GraphClient(token) as client:
+        # Judge the parent message before any attachment metadata is read.
+        if not mail_policy.check_message(client, args.message_id, None):
+            print(mail_policy.EXTERNAL_SENDER_TEXT)
+            return
         meta = attachment_ops.get_attachment_metadata(client, args.message_id, args.attachment_id)
         summary = attachment_ops.attachment_summary(meta)
         if summary["kind"] == "reference":
             print(f"Link attachment: {summary['source_url'] or '(no URL)'}")
             return
+        # An attached message is judged by the same rule as a message.
+        if summary["kind"] == "item" and mail_policy.enabled():
+            expanded = attachment_ops.get_item_attachment(
+                client, args.message_id, args.attachment_id
+            )
+            if not mail_policy.message_allowed(expanded.get("item") or {}):
+                print(mail_policy.EXTERNAL_SENDER_TEXT)
+                return
         data, ctype = attachment_ops.get_attachment_bytes(
             client, args.message_id, args.attachment_id
         )
