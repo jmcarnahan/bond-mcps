@@ -15,7 +15,8 @@ Usage:
     ms-graph-cli email list [--folder inbox] [--top 10]
     ms-graph-cli email list --query "budget report" [--top 10]
     ms-graph-cli email read <message_id>
-    ms-graph-cli email send <to> <subject> <body> [--from <address>] [--cc <address>]
+    ms-graph-cli email attachment <message_id> <attachment_id> [--out PATH]
+    ms-graph-cli email send <to> <subject> <body> [--from <address>] [--cc <address>] [--attach PATH ...]
 
     # Calendar
     ms-graph-cli calendar list [--start <iso8601>] [--end <iso8601>] [--top 10]
@@ -29,8 +30,10 @@ Usage:
     ms-graph-cli teams chats [--type oneOnOne|group|meeting] [--top 20]
     ms-graph-cli teams read --chat-id <chat_id> [--top 20]
     ms-graph-cli teams read --team-id <team_id> --channel-id <channel_id> [--top 20]
-    ms-graph-cli teams send <message> --chat-id <chat_id>
-    ms-graph-cli teams send <message> --team-id <team_id> --channel-id <channel_id>
+    ms-graph-cli teams attachment <message_id> <attachment_id> --chat-id <chat_id> [--out PATH]
+    ms-graph-cli teams attachment <message_id> <attachment_id> --team-id <team_id> --channel-id <channel_id> [--out PATH]
+    ms-graph-cli teams send <message> --chat-id <chat_id> [--attach PATH ...] [--image PATH ...]
+    ms-graph-cli teams send <message> --team-id <team_id> --channel-id <channel_id> [--attach PATH ...] [--image PATH ...]
     ms-graph-cli teams activity [--hours 24]
 
     # Files
@@ -51,8 +54,10 @@ Usage:
 """
 
 import argparse
+import mimetypes
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -62,6 +67,7 @@ from auth import log_discipline  # noqa: E402
 
 log_discipline.apply()
 
+from ms_graph import attachments as attachment_ops
 from ms_graph import calendar, files, mail, teams
 from ms_graph import power_bi as pbi_ops
 from ms_graph.graph_client import GraphClient
@@ -174,10 +180,40 @@ def cmd_email_list(args: argparse.Namespace) -> None:
         print()
 
 
+def _fmt_size(size_bytes: int) -> str:
+    """Human-readable byte count. The CLI keeps its own copy rather than
+    importing ms_graph_mcp, which would drag the whole server in."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _print_attachments(attachments: list[dict]) -> None:
+    """Print one line per attachment, mirroring read_email's markdown section."""
+    print("\nAttachments:")
+    for att in attachments:
+        summary = attachment_ops.attachment_summary(att)
+        if summary["kind"] == "reference":
+            detail = f"link: {summary['source_url'] or '(no URL)'}"
+        else:
+            parts = [summary["content_type"] or "unknown type", _fmt_size(summary["size"])]
+            if summary["is_inline"]:
+                parts.append("inline")
+            detail = ", ".join(parts)
+        print(f"  {summary['name'] or '(unnamed)'}  ({detail})  id: {summary['id']}")
+
+
 def cmd_email_read(args: argparse.Namespace) -> None:
     token = get_local_token()
+    attachments: list[dict] = []
     with GraphClient(token) as client:
         msg = mail.get_message(client, args.message_id)
+        if msg.get("hasAttachments"):
+            attachments = attachment_ops.list_message_attachments(client, args.message_id)
 
     sender = msg.get("from", {}).get("emailAddress", {})
     to_addrs = ", ".join(
@@ -196,11 +232,61 @@ def cmd_email_read(args: argparse.Namespace) -> None:
         print(f"[HTML body — {len(content)} chars]\n")
         print(content[:3000])
 
+    if attachments:
+        _print_attachments(attachments)
+
+
+def cmd_email_attachment(args: argparse.Namespace) -> None:
+    token = get_local_token()
+    with GraphClient(token) as client:
+        meta = attachment_ops.get_attachment_metadata(client, args.message_id, args.attachment_id)
+        summary = attachment_ops.attachment_summary(meta)
+        if summary["kind"] == "reference":
+            print(f"Link attachment: {summary['source_url'] or '(no URL)'}")
+            return
+        data, ctype = attachment_ops.get_attachment_bytes(
+            client, args.message_id, args.attachment_id
+        )
+
+    out = args.out or _default_attachment_filename(summary["name"], summary["kind"])
+    Path(out).write_bytes(data)
+    print(f"Saved {len(data)} bytes to {out} ({ctype})")
+
+
+def _default_attachment_filename(name: str, kind: str) -> str:
+    """The file name used when --out is not given.
+
+    The attachment name comes from the sender, so only its last path segment
+    is kept: a name like "../.ssh/authorized_keys" must not escape the
+    current directory. Attached messages get a .eml suffix when they have none.
+    """
+    base = Path(name or "").name
+    if base in ("", ".", ".."):
+        base = "attachment"
+    if kind == "item" and not Path(base).suffix:
+        base = f"{base}.eml"
+    return base
+
 
 def cmd_email_send(args: argparse.Namespace) -> None:
     token = get_local_token()
     from_addr = args.from_address or os.environ.get("MS_DEFAULT_FROM_ADDRESS") or None
     cc_list = [a.strip() for a in args.cc.split(",") if a.strip()] if args.cc else None
+
+    attachments = []
+    for path in args.attach:
+        source = Path(path)
+        if not source.is_file():
+            print(f"File not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        attachments.append(
+            attachment_ops.ResolvedAttachment(
+                name=source.name,
+                data=source.read_bytes(),
+                content_type=attachment_ops.guess_content_type(source.name),
+            )
+        )
+
     with GraphClient(token) as client:
         mail.send_message(
             client,
@@ -209,9 +295,11 @@ def cmd_email_send(args: argparse.Namespace) -> None:
             body=args.body,
             cc=cc_list,
             from_address=from_addr,
+            attachments=attachments or None,
         )
     cc_note = f" (CC: {args.cc})" if args.cc else ""
-    print(f"Email sent to {args.to}{cc_note}.")
+    attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
+    print(f"Email sent to {args.to}{cc_note}{attach_note}.")
 
 
 # ---------------------------------------------------------------------------
@@ -561,19 +649,117 @@ def cmd_teams_read(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_teams_attachment(args: argparse.Namespace) -> None:
+    if not args.chat_id and not (args.team_id and args.channel_id):
+        print("Error: provide --chat-id, or both --team-id and --channel-id.", file=sys.stderr)
+        sys.exit(1)
+
+    kw = (
+        {"chat_id": args.chat_id}
+        if args.chat_id
+        else {"team_id": args.team_id, "channel_id": args.channel_id}
+    )
+
+    token = get_local_token()
+    with GraphClient(token) as client:
+        msg = teams.get_message(client, args.message_id, **kw)
+        entries = teams.parse_message_attachments(msg)
+        entry = next((e for e in entries if e["id"] == args.attachment_id), None)
+        if entry is None:
+            available = ", ".join(f"{e['kind']}: {e['id']}" for e in entries if e["id"]) or "(none)"
+            print(
+                f"Error: no attachment '{args.attachment_id}' on this message. "
+                f"Available: {available}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        kind = entry["kind"]
+        if kind == "card":
+            print(
+                f"Card ({entry['content_type']}): " f"{entry['card_text'] or '(no readable text)'}"
+            )
+            return
+        if kind not in ("file", "image"):
+            print(f"Nothing to download: this attachment is a {kind}.")
+            return
+
+        if kind == "file":
+            if not entry["content_url"]:
+                print("Error: this file attachment has no content URL.", file=sys.stderr)
+                sys.exit(1)
+            item, data = files.resolve_sharing_link_bytes(client, entry["content_url"])
+            name = entry["name"] or item.get("name") or "attachment"
+            ctype = (item.get("file") or {}).get("mimeType", "")
+        else:
+            data, ctype = teams.get_hosted_content(client, args.message_id, entry["id"], **kw)
+            ext = mimetypes.guess_extension(ctype.split(";")[0].strip()) or ".bin"
+            name = f"image-{entry['id'][:12]}{ext}"
+
+    out = args.out or _default_attachment_filename(name, "file")
+    Path(out).write_bytes(data)
+    print(f"Saved {len(data)} bytes to {out} ({ctype})")
+
+
+def _read_attachments(paths: list[str]) -> list:
+    """Read local files into attachments, or exit naming the one that is missing."""
+    resolved = []
+    for path in paths:
+        source = Path(path)
+        if not source.is_file():
+            print(f"File not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        resolved.append(
+            attachment_ops.ResolvedAttachment(
+                name=source.name,
+                data=source.read_bytes(),
+                content_type=attachment_ops.guess_content_type(source.name),
+            )
+        )
+    return resolved
+
+
 def cmd_teams_send(args: argparse.Namespace) -> None:
     if not args.chat_id and not (args.team_id and args.channel_id):
         print("Error: provide --chat-id, or both --team-id and --channel-id.", file=sys.stderr)
         sys.exit(1)
 
+    files = _read_attachments(args.attach)
+    images = _read_attachments(args.image)
+    target = "chat" if args.chat_id else "channel"
+    notes = ""
+    if files:
+        notes += f" with {len(files)} file(s)"
+    if images:
+        notes += f" and {len(images)} image(s)" if files else f" with {len(images)} image(s)"
+
     token = get_local_token()
     with GraphClient(token) as client:
-        if args.chat_id:
-            teams.send_chat_message(client, args.chat_id, args.message)
-            print("Message sent to chat.")
-        else:
-            teams.send_channel_message(client, args.team_id, args.channel_id, args.message)
-            print("Message sent to channel.")
+        if not files and not images:
+            if args.chat_id:
+                teams.send_chat_message(client, args.chat_id, args.message)
+            else:
+                teams.send_channel_message(client, args.team_id, args.channel_id, args.message)
+            print(f"Message sent to {target}.")
+            return
+        try:
+            teams.send_message_with_files(
+                client,
+                content=args.message,
+                files=files,
+                images=images,
+                chat_id=args.chat_id,
+                team_id="" if args.chat_id else args.team_id,
+                channel_id="" if args.chat_id else args.channel_id,
+                exclude_user_id=teams.decode_token_claims(token).get("oid", ""),
+            )
+        except teams.FilesScopeMissingError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    print(f"Message sent to {target}{notes}.")
 
 
 def cmd_teams_activity(args: argparse.Namespace) -> None:
@@ -952,12 +1138,25 @@ def main() -> None:
     p.add_argument("message_id")
     p.set_defaults(func=cmd_email_read)
 
+    p = email_sub.add_parser("attachment", help="Download an email attachment to a file")
+    p.add_argument("message_id")
+    p.add_argument("attachment_id")
+    p.add_argument(
+        "--out",
+        default=None,
+        help="Output path (default: the attachment's own name in the current directory)",
+    )
+    p.set_defaults(func=cmd_email_attachment)
+
     p = email_sub.add_parser("send", help="Send an email")
     p.add_argument("to", help="Recipient email address")
     p.add_argument("subject")
     p.add_argument("body")
     p.add_argument("--from", dest="from_address", default=None, help="Sender alias address")
     p.add_argument("--cc", default="", help="CC recipients (comma-separated)")
+    p.add_argument(
+        "--attach", action="append", default=[], metavar="PATH", help="File to attach (repeatable)"
+    )
     p.set_defaults(func=cmd_email_send)
 
     # rules
@@ -1037,11 +1236,32 @@ def main() -> None:
     p.add_argument("--top", type=int, default=20)
     p.set_defaults(func=cmd_teams_read)
 
+    p = teams_sub.add_parser(
+        "attachment", help="Download a file or inline image from a Teams message"
+    )
+    p.add_argument("message_id")
+    p.add_argument("attachment_id")
+    p.add_argument("--team-id", dest="team_id", default="")
+    p.add_argument("--channel-id", dest="channel_id", default="")
+    p.add_argument("--chat-id", dest="chat_id", default="")
+    p.add_argument("--out", default="", help="Output path (default: the attachment's own name)")
+    p.set_defaults(func=cmd_teams_attachment)
+
     p = teams_sub.add_parser("send", help="Send a message to a channel or chat")
     p.add_argument("message")
     p.add_argument("--team-id", dest="team_id", default="")
     p.add_argument("--channel-id", dest="channel_id", default="")
     p.add_argument("--chat-id", dest="chat_id", default="")
+    p.add_argument(
+        "--attach", action="append", default=[], metavar="PATH", help="File to send (repeatable)"
+    )
+    p.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Image shown inline in the message (repeatable, image/* under 4 MB)",
+    )
     p.set_defaults(func=cmd_teams_send)
 
     p = teams_sub.add_parser("activity", help="Recent Teams activity digest")

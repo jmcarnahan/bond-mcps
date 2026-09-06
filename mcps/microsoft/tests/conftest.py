@@ -801,27 +801,15 @@ GRAPH_ERROR_400 = {
 # ops percent-encode them into the path.
 SAMPLE_AWKWARD_MESSAGE_ID = "AAMkA/GI2+TG93AAA="
 
-SAMPLE_MESSAGE_DETAIL = {
-    "id": SAMPLE_MESSAGE["id"],
-    "hasAttachments": True,
-    "uniqueBody": {
-        "contentType": "text",
-        "content": "Here is the weekly report.\n\nBest,\nAlice",
-    },
-    "internetMessageHeaders": [
-        {"name": "Message-ID", "value": "<abc123@example.com>"},
-        {"name": "In-Reply-To", "value": "<parent@example.com>"},
-        {"name": "Received", "value": "from mx1.example.com"},
-        # Duplicate header — the first occurrence is the one that wins.
-        {"name": "received", "value": "from mx2.example.com"},
-    ],
-}
+SAMPLE_MESSAGE_WITH_ATTACHMENTS = {**SAMPLE_MESSAGE, "hasAttachments": True}
 
 SAMPLE_MESSAGE_DETAIL_NO_BODY = {
     "id": SAMPLE_MESSAGE["id"],
     "hasAttachments": False,
     "internetMessageHeaders": [],
 }
+
+# SAMPLE_MESSAGE_DETAIL lives below, with the attachment samples it $expands.
 
 SAMPLE_REPLY_DRAFT = {
     "id": "AAMkAGI2draft001=",
@@ -895,4 +883,292 @@ SAMPLE_CHAT_MESSAGES_PAGE = {
         SAMPLE_CHAT_MESSAGE_FROM_APP,
         SAMPLE_CHAT_MESSAGE_SYSTEM,
     ]
+}
+
+
+# ---------------------------------------------------------------------------
+# Teams attachments (shared files, inline images, cards)
+# ---------------------------------------------------------------------------
+
+TEAMS_FILE_ATTACHMENT_ID = "6a1b2c3d-1111-2222-3333-444455556666"
+TEAMS_FILE_URL = (
+    "https://contoso-my.sharepoint.com/personal/alice_contoso_com/Documents/"
+    "Microsoft Teams Chat Files/roadmap.pptx"
+)
+TEAMS_HOSTED_ID = "aWQ9eF8wLWN1cy1kMS0xMjM0NTY3ODkwLHR5cGU9MQ"
+TEAMS_HOSTED_URL = (
+    "https://graph.microsoft.com/v1.0/chats/chat-1on1-001/messages/"
+    f"chat-msg-image-001/hostedContents/{TEAMS_HOSTED_ID}/$value"
+)
+TEAMS_PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+# A file shared into a chat: Graph carries it as a "reference" attachment and
+# the body holds a matching <attachment> tag with no visible text of its own.
+SAMPLE_CHAT_MESSAGE_WITH_FILE = {
+    "id": "chat-msg-file-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T10:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T10:00:00Z",
+    "from": {"user": {"id": "user-id-002", "displayName": "Alice Smith"}, "application": None},
+    "body": {
+        "contentType": "html",
+        "content": (
+            f'<p>Here is the deck</p><attachment id="{TEAMS_FILE_ATTACHMENT_ID}"></attachment>'
+        ),
+    },
+    "attachments": [
+        {
+            "id": TEAMS_FILE_ATTACHMENT_ID,
+            "contentType": "reference",
+            "contentUrl": TEAMS_FILE_URL,
+            "name": "roadmap.pptx",
+            "thumbnailUrl": None,
+            "content": None,
+        }
+    ],
+}
+
+# Inline images are not attachments at all — only the body's <img> tag names them.
+SAMPLE_CHAT_MESSAGE_WITH_IMAGE = {
+    "id": "chat-msg-image-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T11:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T11:00:00Z",
+    "from": {"user": {"id": "user-id-002", "displayName": "Alice Smith"}, "application": None},
+    "body": {
+        "contentType": "html",
+        "content": f'<p>Look:</p><img src="{TEAMS_HOSTED_URL}" width="250" height="250">',
+    },
+    "attachments": [],
+}
+
+SAMPLE_CHAT_MESSAGE_WITH_CARD = {
+    "id": "chat-msg-card-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T12:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T12:00:00Z",
+    "from": {"user": None, "application": {"id": "app-id-001", "displayName": "Power Automate"}},
+    "body": {"contentType": "html", "content": ""},
+    "attachments": [
+        {
+            "id": "card-att-001",
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": (
+                '{"type":"AdaptiveCard","body":[{"type":"TextBlock","text":"Deploy finished"}]}'
+            ),
+        }
+    ],
+}
+
+# Graph never sends these shapes; the parser walks them anyway so one bad entry
+# cannot sink a page. The real file entry LAST proves the walk kept going.
+SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS = {
+    "id": "chat-msg-junk-001",
+    "messageType": "message",
+    "createdDateTime": "2026-02-01T13:00:00Z",
+    "lastModifiedDateTime": "2026-02-01T13:00:00Z",
+    "from": {"user": {"id": "user-id-002", "displayName": "Alice Smith"}, "application": None},
+    "body": {"contentType": "html", "content": "<p>Mixed bag</p>"},
+    "attachments": [
+        "not-a-dict",
+        None,
+        {"id": None, "contentType": None},
+        {"id": "ref-001", "contentType": "messageReference", "content": '{"messageId":"123"}'},
+        {"id": "img-att", "contentType": "image/png", "contentUrl": "https://x/y.png"},
+        {
+            "id": TEAMS_FILE_ATTACHMENT_ID,
+            "contentType": "reference",
+            "contentUrl": TEAMS_FILE_URL,
+            "name": "roadmap.pptx",
+        },
+    ],
+}
+
+# The driveItem behind TEAMS_FILE_URL, resolved through /shares/{token}/driveItem.
+SAMPLE_TEAMS_DRIVE_ITEM = {
+    "id": "teams-file-001",
+    "name": "roadmap.pptx",
+    "size": 2048,
+    "file": {"mimeType": TEAMS_PPTX_MIME},
+    "webUrl": TEAMS_FILE_URL,
+    "lastModifiedDateTime": "2026-02-01T10:00:00Z",
+    "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-id-002"}},
+    "parentReference": {"driveId": "drive-ext-001"},
+}
+
+# ---------------------------------------------------------------------------
+# Sending files into Teams: the upload, the re-fetch, and the channel folder
+# ---------------------------------------------------------------------------
+
+# Teams keys a file card off the GUID inside the driveItem's eTag, and Graph
+# writes that GUID in upper case.
+TEAMS_UPLOAD_GUID = "7A5C1C2E-3B4D-4E5F-8A9B-0C1D2E3F4A5B"
+TEAMS_WEBDAV_URL = (
+    "https://contoso-my.sharepoint.com/personal/user_contoso_com/Documents/"
+    "Microsoft Teams Chat Files/notes.txt"
+)
+
+# What a $select re-fetch returns: eTag and webDavUrl, the two the card needs.
+SAMPLE_TEAMS_UPLOADED_ITEM = {
+    "id": "teams-upload-001",
+    "name": "notes.txt",
+    "size": 5,
+    "eTag": f'"{{{TEAMS_UPLOAD_GUID}}},2"',
+    "webUrl": "https://contoso-my.sharepoint.com/personal/user_contoso_com/notes.txt",
+    "webDavUrl": TEAMS_WEBDAV_URL,
+    "parentReference": {"driveId": "drive-001"},
+}
+
+# The upload PUT itself answers without eTag or webDavUrl — hence the re-fetch.
+SAMPLE_TEAMS_UPLOAD_RESPONSE = {
+    "id": "teams-upload-001",
+    "name": "notes.txt",
+    "size": 5,
+    "webUrl": "https://contoso-my.sharepoint.com/personal/user_contoso_com/notes.txt",
+    "parentReference": {"driveId": "drive-001"},
+}
+
+SAMPLE_CHANNEL_FILES_FOLDER = {
+    "id": "folder-channel-001",
+    "name": "General",
+    "webUrl": "https://contoso.sharepoint.com/sites/eng/Shared%20Documents/General",
+    "parentReference": {"driveId": "drive-team-001"},
+}
+
+SAMPLE_INVITE_RESPONSE = {"value": [{"id": "perm-001", "roles": ["read"]}]}
+
+
+SAMPLE_CHAT_MESSAGES_PAGE_WITH_ATTACHMENTS = {
+    "value": [
+        SAMPLE_CHAT_MESSAGE_WITH_FILE,
+        SAMPLE_CHAT_MESSAGE_WITH_IMAGE,
+        SAMPLE_CHAT_MESSAGE_WITH_CARD,
+        SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS,
+    ]
+}
+
+
+# ---------------------------------------------------------------------------
+# Attachments (mail attachment metadata, upload sessions, sink payloads)
+# ---------------------------------------------------------------------------
+
+SAMPLE_FILE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAttachFile001=",
+    "name": "report.pdf",
+    "contentType": "application/pdf",
+    "size": 1_258_291,
+    "isInline": False,
+    "contentId": None,
+    "lastModifiedDateTime": "2025-12-15T10:30:00Z",
+}
+
+SAMPLE_INLINE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAttachInline002=",
+    "name": "logo.png",
+    "contentType": "image/png",
+    "size": 4096,
+    "isInline": True,
+    "contentId": "logo@company",
+    "lastModifiedDateTime": "2025-12-15T10:30:00Z",
+}
+
+SAMPLE_ITEM_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.itemAttachment",
+    "id": "AAMkAttachItem003=",
+    "name": "FW: Budget",
+    "contentType": None,
+    "size": 32_768,
+    "isInline": False,
+    "lastModifiedDateTime": "2025-12-15T10:30:00Z",
+}
+
+SAMPLE_REFERENCE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.referenceAttachment",
+    "id": "AAMkAttachRef004=",
+    "name": "Q4 Plan.docx",
+    "contentType": None,
+    "size": 0,
+    "isInline": False,
+    "sourceUrl": "https://contoso.sharepoint.com/:w:/s/team/Q4Plan",
+}
+
+SAMPLE_ATTACHMENTS_RESPONSE = {
+    "value": [SAMPLE_FILE_ATTACHMENT, SAMPLE_INLINE_ATTACHMENT, SAMPLE_REFERENCE_ATTACHMENT]
+}
+
+# get_mail_detail $expands attachments, so one request returns body, headers,
+# and this list together.
+SAMPLE_MESSAGE_DETAIL = {
+    "id": SAMPLE_MESSAGE["id"],
+    "hasAttachments": True,
+    "uniqueBody": {
+        "contentType": "text",
+        "content": "Here is the weekly report.\n\nBest,\nAlice",
+    },
+    "internetMessageHeaders": [
+        {"name": "Message-ID", "value": "<abc123@example.com>"},
+        {"name": "In-Reply-To", "value": "<parent@example.com>"},
+        {"name": "Received", "value": "from mx1.example.com"},
+        # Duplicate header — the first occurrence is the one that wins.
+        {"name": "received", "value": "from mx2.example.com"},
+    ],
+    "attachments": [
+        SAMPLE_FILE_ATTACHMENT,
+        SAMPLE_INLINE_ATTACHMENT,
+        SAMPLE_REFERENCE_ATTACHMENT,
+    ],
+}
+
+SAMPLE_ATTACHMENTS_NEXT_LINK = (
+    "https://graph.microsoft.com/v1.0/me/messages/AAMkAGI2TG93AAA%3D/attachments"
+    "?$skiptoken=attach%2Bskip"
+)
+
+SAMPLE_ATTACHMENTS_PAGE_NEXT = {
+    "value": [SAMPLE_FILE_ATTACHMENT],
+    "@odata.nextLink": SAMPLE_ATTACHMENTS_NEXT_LINK,
+}
+
+SAMPLE_ATTACHMENTS_PAGE_FINAL = {"value": [SAMPLE_REFERENCE_ATTACHMENT]}
+
+SAMPLE_CREATED_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAttachNew005=",
+    "name": "notes.txt",
+    "contentType": "text/plain",
+    "size": 11,
+}
+
+# Outlook attachment upload sessions live on outlook.office.com and are
+# pre-authenticated; OneDrive sessions live on an up.*.1drv.com host.
+SAMPLE_ATTACHMENT_UPLOAD_URL = (
+    "https://outlook.office.com/api/v2.0/Users('user-id-001')/Messages('msg-1')"
+    "/AttachmentSessions('sess-1')?authtoken=abc"
+)
+
+SAMPLE_ATTACHMENT_UPLOAD_SESSION = {
+    "uploadUrl": SAMPLE_ATTACHMENT_UPLOAD_URL,
+    "expirationDateTime": "2025-12-16T10:30:00Z",
+    "nextExpectedRanges": ["0"],
+}
+
+SAMPLE_ATTACHMENT_LOCATION = (
+    "https://outlook.office.com/api/v2.0/Users('user-id-001')/Messages('msg-1')"
+    "/Attachments('AAMkAttachBig006%3D')"
+)
+
+SAMPLE_DRIVE_UPLOAD_URL = "https://sn3302.up.1drv.com/up/abcdef0123456789"
+
+SAMPLE_DRIVE_UPLOAD_SESSION = {
+    "uploadUrl": SAMPLE_DRIVE_UPLOAD_URL,
+    "expirationDateTime": "2025-12-16T10:30:00Z",
+}
+
+SAMPLE_DRAFT_MESSAGE = {
+    "id": "AAMkAGI2draft777=",
+    "isDraft": True,
+    "subject": "Hello",
+    "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft777",
 }

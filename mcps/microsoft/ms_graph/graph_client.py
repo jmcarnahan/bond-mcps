@@ -5,11 +5,32 @@ Provides sync and async clients that handle authorization headers
 and base URL routing for the Graph v1.0 endpoint.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+
+# Upload-session fragments can be several MB, so the bare client gets longer
+# read/write budgets than the 30 s the Graph JSON calls use.
+_UPLOAD_TIMEOUT = httpx.Timeout(30.0, read=120.0, write=120.0)
+
+
+@dataclass(frozen=True)
+class RangeResult:
+    """One upload-session fragment response.
+
+    Graph answers a fragment PUT three different ways: an intermediate fragment
+    returns JSON with ``nextExpectedRanges``; the final OneDrive fragment
+    returns the driveItem JSON; the final Outlook attachment fragment returns
+    201 with an EMPTY body and the attachment URL in ``Location``. Callers need
+    all three, so all three are carried here.
+    """
+
+    status_code: int
+    body: dict[str, Any] | None
+    location: str
 
 
 class GraphError(Exception):
@@ -41,6 +62,45 @@ def _raise_for_graph_error(response: httpx.Response) -> None:
     raise GraphError(response.status_code, code, message)
 
 
+def _timeout_kwargs(timeout: float | None) -> dict[str, Any]:
+    """Pass a per-call timeout to httpx only when one was asked for."""
+    return {} if timeout is None else {"timeout": timeout}
+
+
+def _range_headers(data: bytes, start: int, total: int, content_type: str) -> dict[str, str]:
+    """Headers for one upload-session fragment PUT."""
+    return {
+        "Content-Type": content_type,
+        "Content-Length": str(len(data)),
+        "Content-Range": f"bytes {start}-{start + len(data) - 1}/{total}",
+    }
+
+
+def _range_result(response: httpx.Response) -> RangeResult:
+    """Wrap a successful fragment response, tolerating an empty or non-JSON body."""
+    body: dict[str, Any] | None = None
+    if response.content:
+        try:
+            parsed = response.json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            body = parsed
+    return RangeResult(response.status_code, body, response.headers.get("Location", ""))
+
+
+def _check_cancel_response(response: httpx.Response) -> None:
+    """Accept 200/204 from an upload-session cancel; raise GraphError otherwise."""
+    if response.status_code in (200, 204):
+        return
+    _raise_for_graph_error(response)
+    raise GraphError(
+        response.status_code,
+        "UnexpectedStatus",
+        f"Unexpected status {response.status_code} cancelling the upload session",
+    )
+
+
 class GraphClient:
     """Synchronous Microsoft Graph API client."""
 
@@ -50,6 +110,10 @@ class GraphClient:
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=30.0,
         )
+        # Upload-session URLs are pre-authenticated: OneDrive answers 401 when a
+        # bearer header is present, so those requests need a client that carries
+        # no default headers and no base URL.
+        self._bare_client = httpx.Client(timeout=_UPLOAD_TIMEOUT)
 
     def get(
         self,
@@ -116,14 +180,70 @@ class GraphClient:
         _raise_for_graph_error(response)
         return response.json()
 
-    def get_bytes(self, path: str, params: dict[str, Any] | None = None) -> bytes:
+    def get_bytes(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> bytes:
         """GET request returning raw bytes. Follows redirects (Graph /content returns 302)."""
-        response = self._client.get(path, params=params, follow_redirects=True)
+        response = self._client.get(
+            path, params=params, follow_redirects=True, **_timeout_kwargs(timeout)
+        )
         _raise_for_graph_error(response)
         return response.content
 
+    def get_bytes_with_type(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[bytes, str]:
+        """GET raw bytes plus the response Content-Type ("" when absent).
+
+        Attachment and thumbnail endpoints never repeat the MIME type in a JSON
+        body, so the header is the only place the caller can learn it.
+        """
+        response = self._client.get(
+            path, params=params, follow_redirects=True, **_timeout_kwargs(timeout)
+        )
+        _raise_for_graph_error(response)
+        return response.content, response.headers.get("Content-Type", "")
+
+    def delete(self, path: str) -> None:
+        """DELETE a resource (Graph replies 204 No Content with an empty body)."""
+        response = self._client.delete(path)
+        _raise_for_graph_error(response)
+
+    def put_range(
+        self,
+        upload_url: str,
+        data: bytes,
+        start: int,
+        total: int,
+        content_type: str = "application/octet-stream",
+    ) -> RangeResult:
+        """PUT one fragment to a pre-authenticated upload-session URL.
+
+        Sent through the bare client so no Authorization header goes out; both
+        Outlook and OneDrive session URLs already carry their own credential.
+        """
+        response = self._bare_client.put(
+            upload_url,
+            content=data,
+            headers=_range_headers(data, start, total, content_type),
+        )
+        _raise_for_graph_error(response)
+        return _range_result(response)
+
+    def delete_url(self, url: str) -> None:
+        """DELETE an absolute pre-authenticated URL (cancels an upload session)."""
+        response = self._bare_client.delete(url)
+        _check_cancel_response(response)
+
     def close(self) -> None:
         self._client.close()
+        self._bare_client.close()
 
     def __enter__(self) -> "GraphClient":
         return self
@@ -141,6 +261,8 @@ class AsyncGraphClient:
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=30.0,
         )
+        # See GraphClient.__init__ — upload-session URLs must go out unsigned.
+        self._bare_client = httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT)
 
     async def get(
         self,
@@ -214,19 +336,65 @@ class AsyncGraphClient:
         _raise_for_graph_error(response)
         return response.json()
 
-    async def get_bytes(self, path: str, params: dict[str, Any] | None = None) -> bytes:
+    async def get_bytes(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> bytes:
         """GET request returning raw bytes. Follows redirects (Graph /content returns 302)."""
-        response = await self._client.get(path, params=params, follow_redirects=True)
+        response = await self._client.get(
+            path, params=params, follow_redirects=True, **_timeout_kwargs(timeout)
+        )
         _raise_for_graph_error(response)
         return response.content
+
+    async def get_bytes_with_type(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[bytes, str]:
+        """GET raw bytes plus the response Content-Type ("" when absent) (async)."""
+        response = await self._client.get(
+            path, params=params, follow_redirects=True, **_timeout_kwargs(timeout)
+        )
+        _raise_for_graph_error(response)
+        return response.content, response.headers.get("Content-Type", "")
 
     async def delete(self, path: str) -> None:
         """DELETE a resource (Graph replies 204 No Content with an empty body)."""
         response = await self._client.delete(path)
         _raise_for_graph_error(response)
 
+    async def put_range(
+        self,
+        upload_url: str,
+        data: bytes,
+        start: int,
+        total: int,
+        content_type: str = "application/octet-stream",
+    ) -> RangeResult:
+        """PUT one fragment to a pre-authenticated upload-session URL (async).
+
+        See :meth:`GraphClient.put_range` for why the bearer header is omitted.
+        """
+        response = await self._bare_client.put(
+            upload_url,
+            content=data,
+            headers=_range_headers(data, start, total, content_type),
+        )
+        _raise_for_graph_error(response)
+        return _range_result(response)
+
+    async def delete_url(self, url: str) -> None:
+        """DELETE an absolute pre-authenticated URL (cancels an upload session) (async)."""
+        response = await self._bare_client.delete(url)
+        _check_cancel_response(response)
+
     async def close(self) -> None:
         await self._client.aclose()
+        await self._bare_client.aclose()
 
     async def __aenter__(self) -> "AsyncGraphClient":
         return self
