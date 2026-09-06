@@ -1,8 +1,9 @@
 """Directory lookups: who is in the organisation.
 
 One endpoint, /users with $search, under User.ReadBasic.All. Everything else in
-this package reads /me; this is the only place the server looks at other users,
-and it returns only the address-book properties a typeahead needs.
+this package reads the signed-in user's own data; this is the only place the
+server looks at other users, and it returns only the address-book properties a
+typeahead needs.
 """
 
 from urllib.parse import quote
@@ -38,7 +39,7 @@ def _search_path(query: str, top: int) -> str:
     )
 
 
-def _raise_scope_missing(e: GraphError) -> None:
+def _raise_directory_scope_missing(e: GraphError) -> None:
     """A 403 on /users is the missing directory scope; anything else propagates."""
     if e.status_code == 403:
         raise DirectoryScopeMissingError() from e
@@ -46,18 +47,27 @@ def _raise_scope_missing(e: GraphError) -> None:
 
 
 def search_users(client: GraphClient, query: str, top: int = 10) -> list[dict]:
-    """Search the directory by display-name token or mail prefix."""
+    """Search the directory by display-name token or mail prefix.
+
+    A query with nothing searchable left once it is escaped (an "&" alone,
+    say) returns an empty list without a request: Graph would answer 400 to
+    an empty clause, and a client would read that as "retry".
+    """
+    if not _search_clause(query).strip():
+        return []
     try:
         data = client.get(_search_path(query, top), headers=_ADVANCED_QUERY_HEADERS)
     except GraphError as e:
-        _raise_scope_missing(e)
+        _raise_directory_scope_missing(e)
     return data.get("value", [])
 
 
 async def asearch_users(client: AsyncGraphClient, query: str, top: int = 10) -> list[dict]:
     """Search the directory by display-name token or mail prefix (async)."""
+    if not _search_clause(query).strip():
+        return []
     try:
         data = await client.get(_search_path(query, top), headers=_ADVANCED_QUERY_HEADERS)
     except GraphError as e:
-        _raise_scope_missing(e)
+        _raise_directory_scope_missing(e)
     return data.get("value", [])

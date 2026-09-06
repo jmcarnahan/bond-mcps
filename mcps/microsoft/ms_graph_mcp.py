@@ -3059,8 +3059,9 @@ async def search_people_json(query: str, top: int = 10) -> dict:
     starts with it, ordered by display name. Returns people: a list of
     {id, display_name, mail, user_principal_name, job_title}; mail and
     job_title may be null. The signed-in user can appear in the results —
-    the client filters them out if it wants to. A blank query returns an
-    empty list without calling Graph.
+    the client filters them out if it wants to. A blank query, or one with
+    nothing searchable left once "&" is dropped, returns an empty list
+    without calling Graph.
 
     Requires User.ReadBasic.All. Without it the tool returns
     {"error": "directory_scope_missing"}, which is permanent until the
@@ -3516,9 +3517,11 @@ async def send_draft(draft_id: str) -> dict:
             create_draft_json).
 
     Returns:
-        ok, plus the sent message's id, conversation_id, internet_message_id,
-        subject, to, cc, and sent_at. internet_message_id and conversation_id
-        let a client store its own copy of the mail immediately and later match
+        ok, plus the draft's id, conversation_id, internet_message_id, subject,
+        to, cc, and sent_at. The id is the draft's and stops resolving once the
+        copy lands in Sent Items, so it serves only as a client-side key;
+        internet_message_id and conversation_id carry over to the sent copy, so
+        a client can store its own copy of the mail immediately and later match
         it to the real Sent Items copy by internet_message_id. sent_at is the
         server's UTC clock when Graph queued the send; Exchange's own
         sentDateTime may differ from it by seconds. There is no web_link — the

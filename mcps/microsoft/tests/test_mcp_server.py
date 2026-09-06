@@ -4212,6 +4212,15 @@ class TestMCPSearchPeopleJson:
         assert _users_query()["$top"] == ["50"]
 
     @respx.mock
+    async def test_nothing_searchable_returns_empty_without_graph(self, mcp_server):
+        """ "&" is dropped by the escaper; what is left is blank, so no request."""
+        with _mock_token():
+            result = await _call(mcp_server, "search_people_json", {"query": " & "})
+
+        assert _structured(result) == {"people": []}
+        assert _graph_trail() == []
+
+    @respx.mock
     async def test_query_is_stripped(self, mcp_server):
         respx.get(url__startswith=USERS_SEARCH_PREFIX).mock(
             return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)

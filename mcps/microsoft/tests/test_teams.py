@@ -2238,3 +2238,12 @@ class TestCreateChat:
         with GraphClient("tok") as client:
             with pytest.raises(TeamsNotAvailableError):
                 teams.create_chat(client, ["me-oid", "bob@example.com"])
+
+    @respx.mock
+    def test_create_chat_propagates_other_errors(self):
+        respx.post(CHATS_URL).mock(return_value=httpx.Response(400, json=GRAPH_ERROR_400))
+        with GraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                teams.create_chat(client, ["me-oid", "nobody"])
+
+        assert exc_info.value.status_code == 400

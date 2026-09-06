@@ -114,6 +114,17 @@ class TestSearchUsers:
             with pytest.raises(DirectoryScopeMissingError):
                 people.search_users(client, "smi")
 
+    @respx.mock
+    def test_nothing_searchable_makes_no_request(self):
+        """An "&" alone escapes to an empty clause, which Graph would 400."""
+        route = respx.get(url__startswith=USERS_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
+        )
+        with GraphClient("tok") as client:
+            assert people.search_users(client, "&") == []
+
+        assert not route.called
+
 
 class TestAsearchUsers:
     @respx.mock
@@ -168,6 +179,16 @@ class TestAsearchUsers:
                 await people.asearch_users(client, "smi")
 
         assert exc_info.value.status_code == 429
+
+    @respx.mock
+    async def test_nothing_searchable_makes_no_request(self):
+        route = respx.get(url__startswith=USERS_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert await people.asearch_users(client, " & ") == []
+
+        assert not route.called
 
     @respx.mock
     async def test_a_response_without_value_is_an_empty_list(self):
