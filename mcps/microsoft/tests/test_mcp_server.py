@@ -7549,20 +7549,20 @@ class TestCursorGuard:
         ],
     )
     async def test_non_graph_cursor_is_refused(self, mcp_server, tool, args):
-        _mock_token()
-        result = await _call(mcp_server, tool, args)
-        assert _structured(result) == {"error": "invalid_cursor"}
-        assert _graph_trail() == []
+        with _mock_token():
+            result = await _call(mcp_server, tool, args)
+            assert _structured(result) == {"error": "invalid_cursor"}
+            assert _graph_trail() == []
 
     @respx.mock
     async def test_graph_cursor_still_works(self, mcp_server):
-        _mock_token()
-        cursor = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta?$deltatoken=abc"
-        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
-            return_value=httpx.Response(200, json={"value": [], "@odata.deltaLink": cursor})
-        )
-        result = await _call(mcp_server, "list_mail_delta", {"cursor": cursor})
-        assert _structured(result)["delta_cursor"] == cursor
+        with _mock_token():
+            cursor = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta?$deltatoken=abc"
+            respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
+                return_value=httpx.Response(200, json={"value": [], "@odata.deltaLink": cursor})
+            )
+            result = await _call(mcp_server, "list_mail_delta", {"cursor": cursor})
+            assert _structured(result)["delta_cursor"] == cursor
 
 
 class TestDraftsUnderPolicy:
@@ -7571,51 +7571,55 @@ class TestDraftsUnderPolicy:
     @respx.mock
     async def test_list_emails_drafts_folder_keeps_drafts(self, mcp_server, monkeypatch):
         _policy_on(monkeypatch)
-        _mock_token()
-        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/drafts/messages").mock(
-            return_value=httpx.Response(
-                200, json={"value": [SAMPLE_UNSENT_DRAFT, SAMPLE_EXTERNAL_MESSAGE]}
+        with _mock_token():
+            route = respx.get(
+                url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/drafts/messages"
+            ).mock(
+                return_value=httpx.Response(
+                    200, json={"value": [SAMPLE_UNSENT_DRAFT, SAMPLE_EXTERNAL_MESSAGE]}
+                )
             )
-        )
-        result = await _call(mcp_server, "list_emails", {"folder": "drafts"})
-        text = _get_text(result)
-        _assert_no_canary(text)
-        assert "DRAFT-SUBJECT" in text
-        assert "isDraft" in _select_of(route.calls[0].request).split(",")
+            result = await _call(mcp_server, "list_emails", {"folder": "drafts"})
+            text = _get_text(result)
+            _assert_no_canary(text)
+            assert "DRAFT-SUBJECT" in text
+            assert "isDraft" in _select_of(route.calls[0].request).split(",")
 
     @respx.mock
     async def test_read_email_shows_a_draft(self, mcp_server, monkeypatch):
         _policy_on(monkeypatch)
-        _mock_token()
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{SAMPLE_UNSENT_DRAFT['id']}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_UNSENT_DRAFT)
-        )
-        result = await _call(mcp_server, "read_email", {"message_id": SAMPLE_UNSENT_DRAFT["id"]})
-        text = _get_text(result)
-        assert "DRAFT-BODY" in text
-        assert mail_policy.EXTERNAL_SENDER_TEXT not in text
+        with _mock_token():
+            respx.get(f"{GRAPH_BASE_URL}/me/messages/{SAMPLE_UNSENT_DRAFT['id']}").mock(
+                return_value=httpx.Response(200, json=SAMPLE_UNSENT_DRAFT)
+            )
+            result = await _call(
+                mcp_server, "read_email", {"message_id": SAMPLE_UNSENT_DRAFT["id"]}
+            )
+            text = _get_text(result)
+            assert "DRAFT-BODY" in text
+            assert mail_policy.EXTERNAL_SENDER_TEXT not in text
 
     @respx.mock
     async def test_attachment_check_admits_a_draft(self, mcp_server, monkeypatch):
         """The id check's $select carries isDraft, so a draft's attachment is readable."""
         _policy_on(monkeypatch)
-        _mock_token()
-        draft_id = SAMPLE_UNSENT_DRAFT["id"]
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{draft_id}").mock(
-            return_value=httpx.Response(200, json={"id": draft_id, "isDraft": True})
-        )
-        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/{draft_id}/attachments/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
-        )
-        result = await _call(
-            mcp_server,
-            "get_mail_attachment_json",
-            {
-                "message_id": draft_id,
-                "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
-                "mode": "metadata",
-            },
-        )
-        data = _structured(result)
-        assert "error" not in data
-        assert data["id"] == SAMPLE_FILE_ATTACHMENT["id"]
+        with _mock_token():
+            draft_id = SAMPLE_UNSENT_DRAFT["id"]
+            respx.get(f"{GRAPH_BASE_URL}/me/messages/{draft_id}").mock(
+                return_value=httpx.Response(200, json={"id": draft_id, "isDraft": True})
+            )
+            respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/{draft_id}/attachments/").mock(
+                return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
+            )
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment_json",
+                {
+                    "message_id": draft_id,
+                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                    "mode": "metadata",
+                },
+            )
+            data = _structured(result)
+            assert "error" not in data
+            assert data["id"] == SAMPLE_FILE_ATTACHMENT["id"]
