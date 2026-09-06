@@ -1,6 +1,7 @@
 """Tests for mail operations (sync and async)."""
 
 import json
+from urllib.parse import parse_qs, quote
 
 import httpx
 import pytest
@@ -21,6 +22,7 @@ from .conftest import (
     SAMPLE_DELTA_NEXT_LINK,
     SAMPLE_DELTA_PAGE_FINAL,
     SAMPLE_DELTA_PAGE_NEXT,
+    SAMPLE_DRAFT_FOR_SEND,
     SAMPLE_DRAFT_MESSAGE,
     SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
@@ -1262,6 +1264,47 @@ class TestDraftBodyAndSend:
         assert str(route.calls[0].request.url).endswith(
             "/me/messages/AAMkA%2FGI2%2BTG93AAA%3D/send"
         )
+
+
+class TestGetDraftForSend:
+    """The pre-send read that captures the ids the sent copy will carry."""
+
+    # httpx decodes url.path, so the encoding is asserted on the raw URL string.
+    EXPECTED_PATH = f"/me/messages/{quote(SAMPLE_AWKWARD_MESSAGE_ID, safe='')}"
+
+    @respx.mock
+    def test_selects_only_the_id_fields(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRAFT_FOR_SEND)
+        )
+        with GraphClient("tok") as client:
+            draft = mail.get_draft_for_send(client, SAMPLE_AWKWARD_MESSAGE_ID)
+
+        assert draft == SAMPLE_DRAFT_FOR_SEND
+        request = route.calls[0].request
+        assert str(request.url).split("?")[0].endswith(self.EXPECTED_PATH)
+        assert parse_qs(request.url.query.decode())["$select"] == [mail.DRAFT_SEND_SELECT]
+
+    @respx.mock
+    async def test_aselects_only_the_id_fields(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRAFT_FOR_SEND)
+        )
+        async with AsyncGraphClient("tok") as client:
+            draft = await mail.aget_draft_for_send(client, SAMPLE_AWKWARD_MESSAGE_ID)
+
+        assert draft == SAMPLE_DRAFT_FOR_SEND
+        request = route.calls[0].request
+        assert str(request.url).split("?")[0].endswith(self.EXPECTED_PATH)
+        assert parse_qs(request.url.query.decode())["$select"] == [mail.DRAFT_SEND_SELECT]
+
+    def test_select_carries_no_body_or_sender_field(self):
+        """The read runs ungated, so it must not be able to surface content."""
+        fields = mail.DRAFT_SEND_SELECT.split(",")
+        assert "body" not in fields
+        assert "bodyPreview" not in fields
+        assert "from" not in fields
+        assert "sender" not in fields
 
 
 class TestInboxRules:

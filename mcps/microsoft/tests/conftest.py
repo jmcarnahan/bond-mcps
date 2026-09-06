@@ -829,6 +829,41 @@ SAMPLE_REPLY_DRAFT = {
     "id": "AAMkAGI2draft001=",
     "isDraft": True,
     "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft001",
+    "conversationId": "AAQkAGI2conv001=",
+    "internetMessageId": "<draft001@example.com>",
+    "subject": "Re: Weekly Report",
+    "toRecipients": [{"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}}],
+}
+
+# What GET /me/messages/{id}?$select=DRAFT_SEND_SELECT answers with: ids and
+# recipients only. The second cc entry is malformed on purpose — Graph has been
+# seen to null an emailAddress, and one bad recipient must not sink a send.
+SAMPLE_DRAFT_FOR_SEND = {
+    "id": "AAMkAGI2draft001=",
+    "conversationId": "AAQkAGI2conv001=",
+    "internetMessageId": "<draft001@example.com>",
+    "subject": "Re: Weekly Report",
+    "toRecipients": [{"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}}],
+    "ccRecipients": [
+        {"emailAddress": {"name": "Charlie Brown", "address": "charlie@example.com"}},
+        {"emailAddress": None},
+    ],
+}
+
+# POST /me/messages answering create_draft_json: a brand-new draft, which Graph
+# stamps with both ids at creation.
+SAMPLE_NEW_DRAFT = {
+    "id": "AAMkAGI2draft888=",
+    "isDraft": True,
+    "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft888",
+    "conversationId": "AAQkAGI2conv888=",
+    "internetMessageId": "<draft888@example.com>",
+    "subject": "Lunch?",
+    "toRecipients": [
+        {"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}},
+        {"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}},
+    ],
+    "ccRecipients": [],
 }
 
 SAMPLE_CHATS_PAGE_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/chats?$skiptoken=chat%2Bskip"
@@ -1332,4 +1367,37 @@ SAMPLE_UNSENT_DRAFT = {
     "isRead": True,
     "isDraft": True,
     "hasAttachments": False,
+}
+
+
+# Two directory rows for search_people_json; the second has no mail and no
+# title, as a room mailbox or a fresh account looks.
+SAMPLE_USERS_SEARCH_RESPONSE = {
+    "@odata.count": 2,
+    "value": [
+        {
+            "id": "user-id-002",
+            "displayName": "Alice Smith",
+            "mail": "alice@example.com",
+            "userPrincipalName": "alice@example.com",
+            "jobTitle": "Engineer",
+        },
+        {
+            "id": "user-id-003",
+            "displayName": "Smith Room",
+            "mail": None,
+            "userPrincipalName": "smithroom@example.com",
+            "jobTitle": None,
+        },
+    ],
+}
+
+# POST /chats answers 201 with the chat whether it created one or found the
+# existing 1:1, so nothing here says which.
+SAMPLE_CHAT_CREATED = {
+    "id": "19:new-chat@thread.v2",
+    "chatType": "oneOnOne",
+    "topic": None,
+    "createdDateTime": "2026-09-06T10:00:00Z",
+    "lastUpdatedDateTime": "2026-09-06T10:00:00Z",
 }

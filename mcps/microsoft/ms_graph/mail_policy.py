@@ -45,7 +45,8 @@ is on.
 ``mark_as_read`` are writes that return counts only, on ids the caller must
 already hold — and the gated surfaces never hand out an external id.
 ``update_draft_body``, ``send_draft``, and ``add_draft_attachment_json`` take
-draft ids, which Exchange rejects on non-drafts. ``manage_mail_folders``
+draft ids, which Exchange rejects on non-drafts, and ``create_draft_json``
+creates an outbound draft of the user's own composition. ``manage_mail_folders``
 returns folder metadata, not mail. Teams, calendar, files, and Power BI are out
 of scope; calendar invites from external organisers are the recommended next
 follow-up.

@@ -13,7 +13,7 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (45 tools):
+Tool summary (48 tools):
   Email     : get_user_profile, list_emails, read_email, get_email_attachment, send_email,
               manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
@@ -21,9 +21,10 @@ Tool summary (45 tools):
               send_teams_message, get_teams_activity
   Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, edit_document, manage_file
   Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
-  Desktop JSON : get_profile_json, list_mail_delta, get_mail_detail, get_mail_attachment_json,
-                 create_reply_draft_json, update_draft_body, add_draft_attachment_json,
-                 send_draft, mark_mail_read_json, list_chats_page, get_chat_members_json,
+  Desktop JSON : get_profile_json, search_people_json, list_mail_delta, get_mail_detail,
+                 get_mail_attachment_json, create_reply_draft_json, create_draft_json,
+                 update_draft_body, add_draft_attachment_json, send_draft, mark_mail_read_json,
+                 list_chats_page, get_chat_members_json, ensure_chat_json,
                  list_chat_messages_page, get_chat_attachment_json, mark_chat_read_json,
                  send_chat_message_json, inspect_file_json, connection_status
 
@@ -43,6 +44,7 @@ import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -56,11 +58,13 @@ from ms_graph import document_create, document_edit, mail_policy, workbook_edit
 from ms_graph import files as files_ops
 from ms_graph import folders as folder_ops
 from ms_graph import mail as mail_ops
+from ms_graph import people as people_ops
 from ms_graph import power_bi as pbi_ops
 from ms_graph import teams as teams_ops
 from ms_graph.auth import get_graph_token, get_powerbi_token
 from ms_graph.graph_client import AsyncGraphClient, GraphError, NonGraphUrlError
 from ms_graph.local_auth import login_scopes
+from ms_graph.people import DirectoryScopeMissingError
 from ms_graph.power_bi import AsyncPowerBIClient
 from ms_graph.teams import (
     FilesScopeMissingError,
@@ -2905,9 +2909,16 @@ async def export_report(
 # gap and resync when it flips. The three paging tools (list_mail_delta,
 # list_chats_page, list_chat_messages_page) return invalid_cursor when the
 # cursor is not a Graph URL — permanent; the Graph client refuses to send the
-# bearer token anywhere else. Everything else — Graph 5xx, throttling,
-# unexpected shapes, a malformed policy allowlist — propagates so FastMCP
-# raises a tool error, which is the client's "transient, retry later" signal.
+# bearer token anywhere else. send_draft reads the draft's ids before sending
+# and returns them, so a client can store its own copy of the sent mail.
+# search_people_json returns directory_scope_missing when the connection lacks
+# User.ReadBasic.All; ensure_chat_json returns invalid_members (an id that is
+# not a Graph user id or UPN), no_identity (the caller cannot be read off the
+# token), and no_members (nobody left after dropping blanks and the caller),
+# plus teams_unavailable — all permanent.
+# Everything else — Graph 5xx, throttling, unexpected shapes, a malformed
+# policy allowlist — propagates so FastMCP raises a tool error, which is the
+# client's "transient, retry later" signal.
 # ---------------------------------------------------------------------------
 
 
@@ -2918,6 +2929,17 @@ def _profile_json(profile: dict) -> dict:
         "display_name": profile.get("displayName"),
         "mail": profile.get("mail"),
         "user_principal_name": profile.get("userPrincipalName"),
+    }
+
+
+def _person_json(user: dict) -> dict:
+    """Map a Graph /users row to the desktop directory shape."""
+    return {
+        "id": user.get("id"),
+        "display_name": user.get("displayName"),
+        "mail": user.get("mail"),
+        "user_principal_name": user.get("userPrincipalName"),
+        "job_title": user.get("jobTitle"),
     }
 
 
@@ -2952,6 +2974,37 @@ def _chat_message_json(msg: dict) -> dict:
         "last_modified": msg.get("lastModifiedDateTime"),
         "attachments": teams_ops.parse_message_attachments(msg),
     }
+
+
+def _recipients_json(recipients: Any) -> list[dict]:
+    """Flatten Graph recipient objects to {name, address}. A malformed entry is
+    skipped rather than sinking the whole draft."""
+    out = []
+    for entry in recipients or []:
+        address = entry.get("emailAddress") if isinstance(entry, dict) else None
+        if isinstance(address, dict) and address.get("address"):
+            out.append({"name": address.get("name"), "address": address["address"]})
+    return out
+
+
+def _draft_json(draft: dict) -> dict:
+    """The one shape a draft has, whether it answers a message or starts a thread."""
+    return {
+        "id": draft.get("id", ""),
+        "web_link": draft.get("webLink", ""),
+        "conversation_id": draft.get("conversationId"),
+        "internet_message_id": draft.get("internetMessageId"),
+        "subject": draft.get("subject"),
+        "to": _recipients_json(draft.get("toRecipients")),
+        "cc": _recipients_json(draft.get("ccRecipients")),
+    }
+
+
+def _utcnow_iso() -> str:
+    """Server time as ISO-8601 UTC with a Z suffix; a function so tests can pin it."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _stored_graph_scopes() -> list[str]:
@@ -2994,6 +3047,44 @@ async def get_profile_json() -> dict:
     except PermissionError as e:
         return _not_connected(e)
     return _profile_json(profile)
+
+
+@mcp.tool()
+async def search_people_json(query: str, top: int = 10) -> dict:
+    """
+    Search the organisation directory as structured JSON.
+
+    For programmatic clients building a recipient typeahead. Matches people
+    whose display name has a word starting with the query or whose mail
+    starts with it, ordered by display name. Returns people: a list of
+    {id, display_name, mail, user_principal_name, job_title}; mail and
+    job_title may be null. The signed-in user can appear in the results —
+    the client filters them out if it wants to. A blank query, or one with
+    nothing searchable left once "&" is dropped, returns an empty list
+    without calling Graph.
+
+    Requires User.ReadBasic.All. Without it the tool returns
+    {"error": "directory_scope_missing"}, which is permanent until the
+    connection is widened (see connection_status.scopes). Throttling (429)
+    propagates as a tool error; a typeahead should drop that request and keep
+    its last results rather than retry.
+
+    Args:
+        query: Name or mail prefix to search for.
+        top: Maximum results, 1-50 (default 10).
+    """
+    query = query.strip()
+    if not query:
+        return {"people": []}
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            users = await people_ops.asearch_users(client, query, top=top)
+    except PermissionError as e:
+        return _not_connected(e)
+    except DirectoryScopeMissingError:
+        return {"error": "directory_scope_missing"}
+    return {"people": [_person_json(u) for u in users]}
 
 
 @mcp.tool()
@@ -3255,7 +3346,9 @@ async def create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
 
     For programmatic clients. Graph builds the draft with recipients and the
     quoted original already filled in; use update_draft_body to set the reply
-    text, then send_draft. Returns id and web_link.
+    text, then send_draft. Returns the draft's id, web_link, conversation_id,
+    internet_message_id, subject, to, and cc — the same shape create_draft_json
+    returns.
 
     Args:
         message_id: The Graph message ID to reply to.
@@ -3274,7 +3367,60 @@ async def create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
             draft = await mail_ops.acreate_reply_draft(client, message_id, timezone=timezone)
     except PermissionError as e:
         return _not_connected(e)
-    return {"id": draft.get("id", ""), "web_link": draft.get("webLink", "")}
+    return _draft_json(draft)
+
+
+@mcp.tool()
+async def create_draft_json(
+    to: str, subject: str, body: str = "", cc: str = "", bcc: str = ""
+) -> dict:
+    """
+    Create a new mail draft with recipients and a body. Returns structured JSON.
+
+    For programmatic clients composing a fresh message rather than a reply. The
+    body is written as plain text (contentType "text") — the same rule
+    update_draft_body holds, so a typed "<" stays a "<" instead of becoming
+    markup. An empty ``to`` is accepted, which lets a client save a skeleton
+    draft and let the user finish it in Outlook through web_link. The draft's id
+    then works unchanged with add_draft_attachment_json, update_draft_body, and
+    send_draft.
+
+    Args:
+        to: Recipient addresses, comma-separated. Empty is allowed.
+        subject: The subject line.
+        body: Plain-text body. Empty leaves the draft body blank.
+        cc: Cc addresses, comma-separated.
+        bcc: Bcc addresses, comma-separated.
+
+    Returns:
+        The same shape create_reply_draft_json returns — id, web_link,
+        conversation_id, internet_message_id, subject, to, and cc.
+
+        The mail sender policy does not gate this tool: it composes outbound
+        mail of the user's own, and reads no message that arrived from anyone.
+        not_connected (with connect_url when one exists) is returned when there
+        is no Microsoft connection; everything else propagates as a tool error.
+    """
+    to_list = [addr.strip() for addr in to.split(",") if addr.strip()]
+    cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()]
+    bcc_list = [addr.strip() for addr in bcc.split(",") if addr.strip()]
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            # None, not [] — the payload builder omits an absent cc/bcc and Graph
+            # treats an explicitly empty one differently.
+            draft = await mail_ops.acreate_draft(
+                client,
+                to=to_list,
+                subject=subject,
+                body=body,
+                cc=cc_list or None,
+                bcc=bcc_list or None,
+                body_type="Text",
+            )
+    except PermissionError as e:
+        return _not_connected(e)
+    return _draft_json(draft)
 
 
 @mcp.tool()
@@ -3361,16 +3507,44 @@ async def send_draft(draft_id: str) -> dict:
     For programmatic clients. Graph accepts the send asynchronously, so a
     successful return means "queued", not "delivered".
 
+    The draft's ids and recipients are read first, then the draft is sent: once
+    Exchange moves the copy to Sent Items the draft id stops resolving, so this
+    is the only moment they can be learned. A failed read sends nothing and
+    propagates as a tool error, which is safe to retry.
+
     Args:
-        draft_id: The draft message ID (from create_reply_draft_json).
+        draft_id: The draft message ID (from create_reply_draft_json or
+            create_draft_json).
+
+    Returns:
+        ok, plus the draft's id, conversation_id, internet_message_id, subject,
+        to, cc, and sent_at. The id is the draft's and stops resolving once the
+        copy lands in Sent Items, so it serves only as a client-side key;
+        internet_message_id and conversation_id carry over to the sent copy, so
+        a client can store its own copy of the mail immediately and later match
+        it to the real Sent Items copy by internet_message_id. sent_at is the
+        server's UTC clock when Graph queued the send; Exchange's own
+        sentDateTime may differ from it by seconds. There is no web_link — the
+        draft's deep link dies with the draft.
     """
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
+            draft = await mail_ops.aget_draft_for_send(client, draft_id)
             await mail_ops.asend_draft(client, draft_id)
     except PermissionError as e:
         return _not_connected(e)
-    return {"ok": True}
+    sent = _draft_json(draft)
+    return {
+        "ok": True,
+        "id": sent["id"],
+        "conversation_id": sent["conversation_id"],
+        "internet_message_id": sent["internet_message_id"],
+        "subject": sent["subject"],
+        "to": sent["to"],
+        "cc": sent["cc"],
+        "sent_at": _utcnow_iso(),
+    }
 
 
 @mcp.tool()
@@ -3486,6 +3660,61 @@ async def get_chat_members_json(chat_id: str) -> dict:
         for m in data.get("value", [])
     ]
     return {"members": members}
+
+
+_CHAT_MEMBER_ID_RE = re.compile(r"[A-Za-z0-9._@+-]+")
+
+
+@mcp.tool()
+async def ensure_chat_json(user_ids: str, topic: str = "") -> dict:
+    """
+    Find or create a Teams chat with the given people. Returns structured JSON.
+
+    For programmatic clients that want to message someone who has no chat
+    yet. Pass one id and Graph returns the existing 1:1 chat with that person
+    if there is one, otherwise creates it — calling this twice is safe. Pass
+    two or more ids and Graph creates a NEW group chat every call (group
+    chats are never de-duplicated); topic applies only to a group chat. The
+    signed-in user is always a member and need not be listed. Requires
+    Chat.ReadWrite.
+
+    Returns chat_id and chat_type ("oneOnOne" or "group"). Permanent errors:
+    invalid_members (an id is not a Graph user id or UPN), no_identity (the
+    signed-in user cannot be read off the token), no_members (nobody left
+    after dropping blanks and the caller), teams_unavailable (no Teams
+    license). A Graph 400 on an unknown user propagates as a tool error.
+
+    Args:
+        user_ids: Comma-separated Graph user ids or user principal names.
+            Prefer the id search_people_json returns: a UPN with a character
+            outside letters, digits, and ._@+- (an apostrophe, say) is
+            rejected as invalid_members.
+        topic: Optional group-chat title; ignored for a 1:1 chat.
+    """
+    others: list[str] = []
+    for raw in user_ids.split(","):
+        member = raw.strip()
+        if member and member not in others:
+            others.append(member)
+    if any(not _CHAT_MEMBER_ID_RE.fullmatch(member) for member in others):
+        return {"error": "invalid_members"}
+
+    try:
+        token = get_graph_token()
+        oid = teams_ops.decode_token_claims(token)["oid"]
+        if not oid:
+            return {"error": "no_identity"}
+        others = [member for member in others if member != oid]
+        if not others:
+            return {"error": "no_members"}
+        async with AsyncGraphClient(token) as client:
+            chat = await teams_ops.acreate_chat(client, [oid, *others], topic=topic.strip())
+    except PermissionError as e:
+        return _not_connected(e)
+    except TeamsNotAvailableError:
+        return {"error": "teams_unavailable"}
+
+    return {"chat_id": chat.get("id"), "chat_type": chat.get("chatType")}
 
 
 @mcp.tool()

@@ -1338,3 +1338,51 @@ async def achat_messages_page(
     if cursor:
         return await client.get(cursor)
     return await client.get(_chat_messages_page_path(chat_id, since))
+
+
+# ---------------------------------------------------------------------------
+# Chat creation (desktop: message a person who has no chat yet)
+# ---------------------------------------------------------------------------
+
+_CHAT_MEMBER_TYPE = "#microsoft.graph.aadUserConversationMember"
+
+
+def _chat_create_payload(member_ids: list[str], topic: str = "") -> dict[str, Any]:
+    """Body for POST /chats. Two members (the caller and one other) make a
+    oneOnOne chat, which Graph de-duplicates; more make a group chat, which it
+    never does. topic is a group-only property, so it is sent only then."""
+    payload: dict[str, Any] = {
+        "chatType": "oneOnOne" if len(member_ids) == 2 else "group",
+        "members": [
+            {
+                "@odata.type": _CHAT_MEMBER_TYPE,
+                "roles": ["owner"],
+                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{member_id}')",
+            }
+            for member_id in member_ids
+        ],
+    }
+    if payload["chatType"] == "group" and topic:
+        payload["topic"] = topic
+    return payload
+
+
+def create_chat(client: GraphClient, member_ids: list[str], topic: str = "") -> dict[str, Any]:
+    """Create a chat (or, for a 1:1, get the existing one). member_ids go into
+    users('…') verbatim; the caller validates them. Needs Chat.ReadWrite."""
+    try:
+        result = client.post("/chats", json_data=_chat_create_payload(member_ids, topic))
+    except GraphError as e:
+        _check_teams_access(e)
+    return result or {}
+
+
+async def acreate_chat(
+    client: AsyncGraphClient, member_ids: list[str], topic: str = ""
+) -> dict[str, Any]:
+    """Create a chat (or, for a 1:1, get the existing one) (async)."""
+    try:
+        result = await client.post("/chats", json_data=_chat_create_payload(member_ids, topic))
+    except GraphError as e:
+        _check_teams_access(e)
+    return result or {}
