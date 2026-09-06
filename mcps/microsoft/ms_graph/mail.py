@@ -624,6 +624,17 @@ def send_draft(client: GraphClient, draft_id: str, mailbox: str | None = None) -
     client.post(f"{_base(mailbox)}/messages/{_safe_id(draft_id)}/send")
 
 
+# Read before /send: Exchange moves the item to Sent Items on send and the draft
+# id stops resolving, so this is the last chance to learn the ids the sent copy
+# will carry. No body, from, or sender: nothing here can leak content.
+DRAFT_SEND_SELECT = "id,conversationId,internetMessageId,subject,toRecipients,ccRecipients"
+
+
+def get_draft_for_send(client: GraphClient, draft_id: str) -> dict[str, Any]:
+    """Fetch the ids and recipients of a draft that is about to be sent."""
+    return client.get(f"/me/messages/{_safe_id(draft_id)}?$select={quote(DRAFT_SEND_SELECT)}")
+
+
 async def adelta_page(
     client: AsyncGraphClient,
     folder: str = "inbox",
@@ -676,3 +687,8 @@ async def aupdate_draft_body(client: AsyncGraphClient, draft_id: str, text: str)
 async def asend_draft(client: AsyncGraphClient, draft_id: str, mailbox: str | None = None) -> None:
     """Send an existing draft (async). Graph answers 202 with no body."""
     await client.post(f"{_base(mailbox)}/messages/{_safe_id(draft_id)}/send")
+
+
+async def aget_draft_for_send(client: AsyncGraphClient, draft_id: str) -> dict[str, Any]:
+    """Fetch the ids and recipients of a draft that is about to be sent (async)."""
+    return await client.get(f"/me/messages/{_safe_id(draft_id)}?$select={quote(DRAFT_SEND_SELECT)}")

@@ -829,6 +829,41 @@ SAMPLE_REPLY_DRAFT = {
     "id": "AAMkAGI2draft001=",
     "isDraft": True,
     "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft001",
+    "conversationId": "AAQkAGI2conv001=",
+    "internetMessageId": "<draft001@example.com>",
+    "subject": "Re: Weekly Report",
+    "toRecipients": [{"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}}],
+}
+
+# What GET /me/messages/{id}?$select=DRAFT_SEND_SELECT answers with: ids and
+# recipients only. The second cc entry is malformed on purpose — Graph has been
+# seen to null an emailAddress, and one bad recipient must not sink a send.
+SAMPLE_DRAFT_FOR_SEND = {
+    "id": "AAMkAGI2draft001=",
+    "conversationId": "AAQkAGI2conv001=",
+    "internetMessageId": "<draft001@example.com>",
+    "subject": "Re: Weekly Report",
+    "toRecipients": [{"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}}],
+    "ccRecipients": [
+        {"emailAddress": {"name": "Charlie Brown", "address": "charlie@example.com"}},
+        {"emailAddress": None},
+    ],
+}
+
+# POST /me/messages answering create_draft_json: a brand-new draft, which Graph
+# stamps with both ids at creation.
+SAMPLE_NEW_DRAFT = {
+    "id": "AAMkAGI2draft888=",
+    "isDraft": True,
+    "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft888",
+    "conversationId": "AAQkAGI2conv888=",
+    "internetMessageId": "<draft888@example.com>",
+    "subject": "Lunch?",
+    "toRecipients": [
+        {"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}},
+        {"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}},
+    ],
+    "ccRecipients": [],
 }
 
 SAMPLE_CHATS_PAGE_NEXT_LINK = "https://graph.microsoft.com/v1.0/me/chats?$skiptoken=chat%2Bskip"

@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import httpx
 import pytest
 import respx
-from ms_graph import mail_policy
+from ms_graph import mail, mail_policy
 from ms_graph.files import _encode_sharing_url
 from ms_graph.graph_client import GRAPH_BASE_URL
 from ms_graph.power_bi import POWERBI_BASE_URL
@@ -50,6 +50,7 @@ from .conftest import (
     SAMPLE_DELTA_PAGE_FINAL,
     SAMPLE_DELTA_PAGE_NEXT,
     SAMPLE_DELTA_TOMBSTONE,
+    SAMPLE_DRAFT_FOR_SEND,
     SAMPLE_DRAFT_MESSAGE,
     SAMPLE_DRIVE_CHILDREN_RESPONSE,
     SAMPLE_DRIVE_ITEM_BINARY,
@@ -80,6 +81,7 @@ from .conftest import (
     SAMPLE_MESSAGES_PAGE1,
     SAMPLE_MESSAGES_PAGE2,
     SAMPLE_MESSAGES_RESPONSE,
+    SAMPLE_NEW_DRAFT,
     SAMPLE_ONBEHALF_MESSAGE,
     SAMPLE_PBI_DASHBOARDS_RESPONSE,
     SAMPLE_PBI_DATASETS_RESPONSE,
@@ -4783,6 +4785,11 @@ class TestMCPDraftFlow:
         assert _structured(result) == {
             "id": "AAMkAGI2draft001=",
             "web_link": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft001",
+            "conversation_id": "AAQkAGI2conv001=",
+            "internet_message_id": "<draft001@example.com>",
+            "subject": "Re: Weekly Report",
+            "to": [{"name": "Alice Smith", "address": "alice@example.com"}],
+            "cc": [],
         }
 
     @respx.mock
@@ -4811,7 +4818,15 @@ class TestMCPDraftFlow:
         with _mock_token():
             result = await _call(mcp_server, "create_reply_draft_json", {"message_id": "m1"})
 
-        assert _structured(result) == {"id": "d1", "web_link": ""}
+        assert _structured(result) == {
+            "id": "d1",
+            "web_link": "",
+            "conversation_id": None,
+            "internet_message_id": None,
+            "subject": None,
+            "to": [],
+            "cc": [],
+        }
 
     @respx.mock
     async def test_update_draft_body_sends_text_content_type(self, mcp_server):
@@ -4830,19 +4845,154 @@ class TestMCPDraftFlow:
         assert payload == {"body": {"contentType": "text", "content": "On it."}}
 
     @respx.mock
-    async def test_send_draft_reports_ok_on_202(self, mcp_server):
-        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+    async def test_send_draft_returns_the_ids_the_sent_copy_carries(self, mcp_server, monkeypatch):
+        """The pre-send read is the only chance to learn them, so it happens first."""
+        monkeypatch.setattr("ms_graph_mcp._utcnow_iso", lambda: "2026-09-06T12:00:00Z")
+        get_route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRAFT_FOR_SEND)
+        )
+        respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
             return_value=httpx.Response(202)
         )
         with _mock_token():
             result = await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
 
-        assert _structured(result) == {"ok": True}
-        assert str(route.calls[0].request.url).endswith("/send")
+        data = _structured(result)
+        assert data == {
+            "ok": True,
+            "id": "AAMkAGI2draft001=",
+            "conversation_id": "AAQkAGI2conv001=",
+            "internet_message_id": "<draft001@example.com>",
+            "subject": "Re: Weekly Report",
+            "to": [{"name": "Alice Smith", "address": "alice@example.com"}],
+            # The malformed second cc entry drops out rather than sinking the send.
+            "cc": [{"name": "Charlie Brown", "address": "charlie@example.com"}],
+            "sent_at": "2026-09-06T12:00:00Z",
+        }
+        # A sent draft's deep link is dead, so no web_link is offered at all.
+        assert "web_link" not in data
+        assert _select_of(get_route.calls[0].request) == mail.DRAFT_SEND_SELECT
+
+    @respx.mock
+    async def test_send_draft_reads_before_it_sends(self, mcp_server):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRAFT_FOR_SEND)
+        )
+        respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(202)
+        )
+        with _mock_token():
+            await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+
+        methods_and_suffixes = [
+            (method, path.split("/me/messages/")[-1]) for method, path in _graph_trail()
+        ]
+        assert methods_and_suffixes == [
+            ("GET", "AAMkAGI2draft001="),
+            ("POST", "AAMkAGI2draft001=/send"),
+        ]
+
+    @respx.mock
+    async def test_send_draft_sends_nothing_when_the_read_fails(self, mcp_server):
+        """A failed read is a tool error, and the draft is still there to retry."""
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        post_route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(202)
+        )
+        from fastmcp.exceptions import ToolError
+
+        with _mock_token():
+            with pytest.raises(ToolError, match="404"):
+                await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+
+        assert not post_route.called
+        assert not any(method == "POST" for method, _ in _graph_trail())
 
     async def test_send_draft_not_connected(self, mcp_server):
         with _mock_missing_connection():
             result = await _call(mcp_server, "send_draft", {"draft_id": "d1"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPCreateDraftJson:
+    """create_draft_json — a fresh outbound draft, not a reply."""
+
+    URL = f"{GRAPH_BASE_URL}/me/messages"
+    EXPECTED = {
+        "id": "AAMkAGI2draft888=",
+        "web_link": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft888",
+        "conversation_id": "AAQkAGI2conv888=",
+        "internet_message_id": "<draft888@example.com>",
+        "subject": "Lunch?",
+        "to": [
+            {"name": "Alice Smith", "address": "alice@example.com"},
+            {"name": "Bob Jones", "address": "bob@example.com"},
+        ],
+        "cc": [],
+    }
+
+    @respx.mock
+    async def test_posts_a_text_draft_and_returns_the_draft_shape(self, mcp_server):
+        route = respx.post(self.URL).mock(return_value=httpx.Response(201, json=SAMPLE_NEW_DRAFT))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "create_draft_json",
+                {
+                    "to": "a@example.com, b@example.com",
+                    "subject": "Lunch?",
+                    "body": "1 < 2, so noon works.",
+                    "cc": "c@example.com",
+                },
+            )
+
+        assert _structured(result) == self.EXPECTED
+        payload = json.loads(route.calls[0].request.content)
+        # Pinned to text: a typed "<" must reach the recipient as a "<".
+        assert payload["body"] == {"contentType": "Text", "content": "1 < 2, so noon works."}
+        assert payload["toRecipients"] == [
+            {"emailAddress": {"address": "a@example.com"}},
+            {"emailAddress": {"address": "b@example.com"}},
+        ]
+        assert payload["ccRecipients"] == [{"emailAddress": {"address": "c@example.com"}}]
+        # An absent bcc is omitted, not sent empty; and the draft is the user's own.
+        assert "bccRecipients" not in payload
+        assert "from" not in payload
+
+    @respx.mock
+    async def test_empty_to_still_creates_a_draft(self, mcp_server):
+        """A skeleton the user finishes in Outlook through web_link."""
+        route = respx.post(self.URL).mock(return_value=httpx.Response(201, json=SAMPLE_NEW_DRAFT))
+        with _mock_token():
+            result = await _call(mcp_server, "create_draft_json", {"to": "", "subject": "Draft it"})
+
+        assert _structured(result) == self.EXPECTED
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["toRecipients"] == []
+        assert "ccRecipients" not in payload
+        assert "bccRecipients" not in payload
+
+    @respx.mock
+    async def test_bcc_is_sent_when_given(self, mcp_server):
+        route = respx.post(self.URL).mock(return_value=httpx.Response(201, json=SAMPLE_NEW_DRAFT))
+        with _mock_token():
+            await _call(
+                mcp_server,
+                "create_draft_json",
+                {"to": "a@example.com", "subject": "s", "bcc": " x@example.com , "},
+            )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["bccRecipients"] == [{"emailAddress": {"address": "x@example.com"}}]
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server, "create_draft_json", {"to": "a@example.com", "subject": "s"}
+            )
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
@@ -6783,6 +6933,7 @@ DELIBERATELY_UNGATED_MAIL_TOOLS = frozenset(
         "update_draft_body",
         "send_draft",
         "add_draft_attachment_json",
+        "create_draft_json",
         "manage_mail_folders",
     }
 )
@@ -6808,6 +6959,19 @@ def _assert_no_canary(result) -> None:
 def _select_of(request) -> str:
     """The $select query parameter of a recorded request."""
     return parse_qs(urlparse(str(request.url)).query).get("$select", [""])[0]
+
+
+def _sender_checks() -> list[str]:
+    """Every request respx saw that was a policy sender check, by path.
+
+    The policy's one probe is identifiable by its $select alone, so this says
+    "the policy looked" without depending on which message id it looked at.
+    """
+    return [
+        c.request.url.path
+        for c in respx.calls
+        if _select_of(c.request) == mail_policy.SENDER_SELECT
+    ]
 
 
 class TestMailSenderPolicy:
@@ -7346,6 +7510,42 @@ class TestMailSenderPolicy:
         assert not post_route.called
         assert _graph_trail() == [("GET", SENDER_CHECK_PATH)]
         _assert_no_canary(data)
+
+    # -- outbound stays ungated --------------------------------------------
+
+    @respx.mock
+    async def test_create_draft_json_is_not_gated(self, mcp_server, monkeypatch):
+        """Composing the user's own mail reads nothing that arrived from anyone."""
+        _policy_on(monkeypatch)
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_NEW_DRAFT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "create_draft_json",
+                {"to": "a@example.com", "subject": "Lunch?", "body": "noon"},
+            )
+
+        data = _structured(result)
+        assert data["id"] == SAMPLE_NEW_DRAFT["id"]
+        assert not _sender_checks()
+
+    @respx.mock
+    async def test_send_draft_is_not_gated(self, mcp_server, monkeypatch):
+        """The pre-send read selects no from/sender, so there is nothing to gate."""
+        _policy_on(monkeypatch)
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRAFT_FOR_SEND)
+        )
+        respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(202)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+
+        assert _structured(result)["ok"] is True
+        assert not _sender_checks()
 
     # -- forwarding inbox rules --------------------------------------------
 
