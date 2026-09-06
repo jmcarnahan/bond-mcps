@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote
 
-from . import document_create, files
+from . import document_create, files, mail_policy
 from . import mail as mail_ops
 from .document_extract import (
     MAX_DOCUMENT_DOWNLOAD_BYTES,
@@ -536,6 +536,10 @@ async def aresolve_attachment_source(
     else:
         message_id, attachment_id = _message_source_ids(spec)
         mailbox = spec.get("mailbox") or None
+        # Forwarding an attachment re-originates it as internal mail, so the
+        # source message is judged before a byte of it is read.
+        if not await mail_policy.acheck_message(client, message_id, mailbox):
+            raise ValueError(mail_policy.EXTERNAL_SENDER_TEXT)
         summary = attachment_summary(
             await aget_attachment_metadata(client, message_id, attachment_id, mailbox)
         )
@@ -567,6 +571,9 @@ def resolve_attachment_source(client: GraphClient, spec: dict[str, Any]) -> Reso
     else:
         message_id, attachment_id = _message_source_ids(spec)
         mailbox = spec.get("mailbox") or None
+        # See aresolve_attachment_source: the source message is judged first.
+        if not mail_policy.check_message(client, message_id, mailbox):
+            raise ValueError(mail_policy.EXTERNAL_SENDER_TEXT)
         summary = attachment_summary(
             get_attachment_metadata(client, message_id, attachment_id, mailbox)
         )

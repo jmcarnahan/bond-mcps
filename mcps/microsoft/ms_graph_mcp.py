@@ -52,7 +52,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 from ms_graph import attachments as attachment_ops
 from ms_graph import calendar as calendar_ops
-from ms_graph import document_create, document_edit, workbook_edit
+from ms_graph import document_create, document_edit, mail_policy, workbook_edit
 from ms_graph import files as files_ops
 from ms_graph import folders as folder_ops
 from ms_graph import mail as mail_ops
@@ -192,6 +192,14 @@ async def _lifespan(app):
 
     startup.verify_runtime_config()
 
+    # A set-but-malformed allowlist stops the pod at boot rather than serving
+    # mail unfiltered; the log line names the bad entry.
+    domains = mail_policy.allowed_sender_domains()
+    if domains:
+        logger.info("Mail sender policy: on (%d allowed domain(s))", len(domains))
+    else:
+        logger.info("Mail sender policy: off (%s unset)", mail_policy.ENV_ALLOWED_SENDER_DOMAINS)
+
     if os.environ.get("MS_CLIENT_ID"):
         from auth import OAuthProxyClient
 
@@ -295,6 +303,8 @@ async def list_emails(
     Returns:
         Pipe-delimited CSV. The has_attachments column flags messages that carry
         attachments; read_email lists them and get_email_attachment reads one.
+        While the mail sender policy is on, messages from senders outside the
+        allowed domains are omitted and a notice is appended.
     """
     import csv
     import io
@@ -303,7 +313,14 @@ async def list_emails(
     if err:
         return err
 
-    _SELECT = "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview"
+    _SELECT = (
+        "id,subject,from,sender,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview"
+    )
+
+    # Resolved before any Graph call so a malformed allowlist fails the call
+    # instead of returning unfiltered mail. The notice is constant: a hidden
+    # count would turn a $search query into a content oracle.
+    notice = f"\n{mail_policy.POLICY_NOTICE}" if mail_policy.enabled() else ""
 
     mb = mailbox or None
     token = get_graph_token()
@@ -327,6 +344,7 @@ async def list_emails(
             messages = await mail_ops.alist_messages(
                 client, folder=resolved_folder or folder, top=top, select=_SELECT, mailbox=mb
             )
+        messages = mail_policy.filter_messages(messages)
 
         mark_ids = opts.get("mark_as_read", [])
         if mark_ids:
@@ -338,8 +356,8 @@ async def list_emails(
     if not messages:
         prefix = f'No messages found matching "{query}".' if query else "No messages found."
         if mark_ids and isinstance(mark_ids, list):
-            return f"{prefix}\n\n{len(mark_ids)} message(s) marked as read."
-        return prefix
+            return f"{prefix}\n\n{len(mark_ids)} message(s) marked as read.{notice}"
+        return f"{prefix}{notice}"
 
     output = io.StringIO()
     if query:
@@ -383,7 +401,7 @@ async def list_emails(
     if mark_ids:
         output.write(f"\n{len(mark_ids)} message(s) marked as read.")
 
-    return output.getvalue()
+    return output.getvalue() + notice
 
 
 def _attachment_line(summary: dict, show_inline: bool) -> str:
@@ -440,6 +458,9 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
                 (no limit). Set a positive integer to truncate long emails.
             {"include_inline": true}  — also list inline images (embedded logos and
                 signatures). Default false: they are counted, not listed.
+
+    While the mail sender policy is on, a message from a sender outside the
+    allowed domains is refused instead of read.
     """
     opts, err = parse_options(options)
     if err:
@@ -448,12 +469,19 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
     max_content_length = opt_int(opts.get("max_content_length"), -1)
     include_inline = opt_bool(opts.get("include_inline"), False)
 
+    # Resolved before the fetch so a malformed allowlist fails the call with no
+    # Graph traffic at all; the message itself can only be judged after it is
+    # fetched, which is why the refusal below sits inside the client block.
+    policy_on = mail_policy.enabled()
+
     mb = mailbox or None
     token = get_graph_token()
     attachments: list[dict] = []
     attachments_note = ""
     async with AsyncGraphClient(token) as client:
         msg = await mail_ops.aget_message(client, message_id, mailbox=mb)
+        if policy_on and not mail_policy.message_allowed(msg):
+            return mail_policy.EXTERNAL_SENDER_TEXT
         has_attachments = bool(msg.get("hasAttachments"))
         if has_attachments:
             try:
@@ -597,6 +625,10 @@ async def get_email_attachment(
         body in "text" mode, and downloads as a .eml file in the other modes. A link
         attachment (a file shared by reference) has no bytes to return: every mode
         gives back its URL, which inspect_file can then read.
+
+        While the mail sender policy is on, an attachment is refused when the
+        message carrying it, or an attached message inside it, came from a
+        sender outside the allowed domains.
     """
     opts, err = parse_options(options)
     if err:
@@ -609,6 +641,11 @@ async def get_email_attachment(
     mb = mailbox or None
     token = get_graph_token()
     async with AsyncGraphClient(token) as client:
+        # Judge the parent message before any of its attachment metadata or
+        # bytes are read, against the same mailbox the reads will use.
+        if not await mail_policy.acheck_message(client, message_id, mb):
+            return mail_policy.EXTERNAL_SENDER_TEXT
+
         meta = await attachment_ops.aget_attachment_metadata(
             client, message_id, attachment_id, mailbox=mb
         )
@@ -622,6 +659,17 @@ async def get_email_attachment(
                 "to read the file."
             )
 
+        # An attached message is judged by the same rule as a message. The
+        # expanded item is fetched at most once per call and reused below; an
+        # attached event or contact has no sender and is therefore hidden.
+        expanded: dict | None = None
+        if summary["kind"] == "item" and mail_policy.enabled():
+            expanded = await attachment_ops.aget_item_attachment(
+                client, message_id, attachment_id, mailbox=mb
+            )
+            if not mail_policy.message_allowed(expanded.get("item") or {}):
+                return mail_policy.EXTERNAL_SENDER_TEXT
+
         # Decide from the metadata size, so an oversized attachment is refused
         # before its bytes cross the wire. Attached messages are downloaded as
         # .eml in base64 mode, so the same ceiling applies to them.
@@ -634,9 +682,10 @@ async def get_email_attachment(
 
         if summary["kind"] == "item":
             if mode == "text":
-                expanded = await attachment_ops.aget_item_attachment(
-                    client, message_id, attachment_id, mailbox=mb
-                )
+                if expanded is None:
+                    expanded = await attachment_ops.aget_item_attachment(
+                        client, message_id, attachment_id, mailbox=mb
+                    )
                 return header + _format_attached_message(expanded.get("item") or {})
             data, header_type = await attachment_ops.aget_attachment_bytes(
                 client, message_id, attachment_id, mailbox=mb
@@ -712,7 +761,9 @@ async def send_email(to: str, subject: str, body: str, mailbox: str = "", option
                     — forward an attachment from another email (IDs from read_email).
              "name" is required for text and base64, optional elsewhere (it defaults
              to the source file's own name). Any spec may set "content_type" to
-             override the type guessed from the name.
+             override the type guessed from the name. While the mail sender
+             policy is on, a {"message_id", "attachment_id"} spec is refused
+             when that message came from a sender outside the allowed domains.
     """
     opts, err = parse_options(options)
     if err:
@@ -795,7 +846,9 @@ async def manage_inbox_rules(action: str = "list", rule_id: str = "", options: s
     Returns:
         list: pipe-delimited CSV (id|displayName|sequence|isEnabled|conditions|actions).
         get: full JSON of the rule object (conditions, actions with values).
-        create/update: confirmation message with rule ID and name.
+        create/update: confirmation message with rule ID and name. While the
+            mail sender policy is on, a rule that forwards or redirects mail is
+            refused, because it would re-deliver external mail as internal.
         delete: confirmation message.
     """
     import csv
@@ -821,6 +874,12 @@ async def manage_inbox_rules(action: str = "list", rule_id: str = "", options: s
             missing = {"displayName", "sequence", "actions"} - opts.keys()
             if missing:
                 return f"Action 'create' requires: {', '.join(sorted(missing))}."
+
+        # Refused before the token is even acquired: a forwarding rule
+        # re-originates every external message as an internal one, which is a
+        # durable, self-service bypass of the whole policy.
+        if mail_policy.enabled() and mail_policy.rule_forwards(opts):
+            return mail_policy.FORWARDING_RULE_TEXT
 
     token = get_graph_token()
     async with AsyncGraphClient(token) as client:
@@ -2838,8 +2897,12 @@ async def export_report(
 # is_folder, and too_large; inspect_file_json returns missing_target,
 # access_denied, not_found, and invalid_link — all permanent.
 # send_chat_message_json returns invalid_attachments and files_scope_missing
-# (the account's connection lacks Files.ReadWrite) — both permanent. Everything
-# else — Graph 5xx, throttling, unexpected shapes — propagates so FastMCP
+# (the account's connection lacks Files.ReadWrite) — both permanent. The mail
+# tools return external_sender when the mail sender policy hides a message —
+# also permanent, and never accompanied by any detail of the hidden message;
+# connection_status reports mail_policy.enabled so a client can explain the
+# gap and resync when it flips. Everything else — Graph 5xx, throttling,
+# unexpected shapes, a malformed policy allowlist — propagates so FastMCP
 # raises a tool error, which is the client's "transient, retry later" signal.
 # ---------------------------------------------------------------------------
 
@@ -2948,6 +3011,11 @@ async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received:
 
     A resync of true means the saved cursor has expired: discard local state
     for the folder and call again with an empty cursor.
+
+    While the mail sender policy is on, messages from senders outside the
+    allowed domains are omitted from messages; `@removed` tombstones always
+    pass through. A policy change needs a full resync to take effect on
+    already-synced rows.
     """
     try:
         token = get_graph_token()
@@ -2963,7 +3031,7 @@ async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received:
         raise
 
     return {
-        "messages": data.get("value", []),
+        "messages": mail_policy.filter_messages(data.get("value", [])),
         "next_cursor": data.get("@odata.nextLink", ""),
         "delta_cursor": data.get("@odata.deltaLink", ""),
         "resync": False,
@@ -2986,6 +3054,9 @@ async def get_mail_detail(message_id: str) -> dict:
     get_mail_attachment_json for content. At most 50 attachments are listed,
     while attachment_count reports the true number.
 
+    While the mail sender policy is on, a message from a sender outside the
+    allowed domains returns {"error": "external_sender"} and nothing else.
+
     Args:
         message_id: The Graph message ID.
     """
@@ -2993,6 +3064,8 @@ async def get_mail_detail(message_id: str) -> dict:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
             msg = await mail_ops.aget_message_detail(client, message_id)
+            if not mail_policy.message_allowed(msg):
+                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
     except PermissionError as e:
         return _not_connected(e)
 
@@ -3018,13 +3091,22 @@ async def get_mail_detail(message_id: str) -> dict:
 
 
 async def _attachment_json_text(
-    client: AsyncGraphClient, message_id: str, attachment_id: str, summary: dict
+    client: AsyncGraphClient,
+    message_id: str,
+    attachment_id: str,
+    summary: dict,
+    expanded: dict | None = None,
 ) -> dict:
-    """text mode for get_mail_attachment_json: extract, decode, or explain."""
+    """text mode for get_mail_attachment_json: extract, decode, or explain.
+
+    ``expanded`` is the already-fetched item attachment when the mail policy
+    had to fetch it to judge the attached message, so it is never fetched twice.
+    """
     if summary["kind"] == "reference":
         return {**summary, "text": None, "truncated": False, "reason": "reference"}
     if summary["kind"] == "item":
-        expanded = await attachment_ops.aget_item_attachment(client, message_id, attachment_id)
+        if expanded is None:
+            expanded = await attachment_ops.aget_item_attachment(client, message_id, attachment_id)
         item = expanded.get("item") or {}
         body = item.get("body") or {}
         is_text = body.get("contentType") == "text"
@@ -3086,7 +3168,9 @@ async def get_mail_attachment_json(
         message (kind "item") also carries item_subject, item_from, and
         item_received in metadata and text modes, and downloads as .eml bytes.
 
-        Permanent errors, which must not be retried: invalid_mode (mode was not
+        Permanent errors, which must not be retried: external_sender (the mail
+        sender policy hides this message or the message attached to it),
+        invalid_mode (mode was not
         one of the three), too_large (with size and limit; bytes mode only,
         decided from the metadata so nothing is downloaded), reference (with
         source_url; a link attachment has no bytes), not_connected (with
@@ -3101,19 +3185,39 @@ async def get_mail_attachment_json(
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
+            # Judge the parent message before any attachment metadata or bytes
+            # are read. Inside the try so a malformed policy allowlist
+            # propagates as a tool error rather than being mistaken for a
+            # missing connection.
+            if not await mail_policy.acheck_message(client, message_id, None):
+                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+
             meta = await attachment_ops.aget_attachment_metadata(client, message_id, attachment_id)
             summary = attachment_ops.attachment_summary(meta)
+
+            # An attached message is judged by the same rule; fetched once here
+            # and handed to whichever mode needs it.
+            expanded: dict | None = None
+            if summary["kind"] == "item" and mail_policy.enabled():
+                expanded = await attachment_ops.aget_item_attachment(
+                    client, message_id, attachment_id
+                )
+                if not mail_policy.message_allowed(expanded.get("item") or {}):
+                    return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
 
             if mode == "metadata":
                 if summary["kind"] != "item":
                     return summary
-                expanded = await attachment_ops.aget_item_attachment(
-                    client, message_id, attachment_id
-                )
+                if expanded is None:
+                    expanded = await attachment_ops.aget_item_attachment(
+                        client, message_id, attachment_id
+                    )
                 return {**summary, **_attachment_item_fields(expanded.get("item") or {})}
 
             if mode == "text":
-                return await _attachment_json_text(client, message_id, attachment_id, summary)
+                return await _attachment_json_text(
+                    client, message_id, attachment_id, summary, expanded
+                )
 
             if summary["kind"] == "reference":
                 return {"error": "reference", "source_url": summary["source_url"]}
@@ -3148,10 +3252,16 @@ async def create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
         message_id: The Graph message ID to reply to.
         timezone: IANA or Windows timezone for the quoted original's
             timestamps (e.g. "America/New_York"). Empty leaves them in UTC.
+
+    While the mail sender policy is on, replying to a message from a sender
+    outside the allowed domains returns {"error": "external_sender"} — Graph
+    would otherwise quote the original into a draft whose from is the user.
     """
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
+            if not await mail_policy.acheck_message(client, message_id, None):
+                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
             draft = await mail_ops.acreate_reply_draft(client, message_id, timezone=timezone)
     except PermissionError as e:
         return _not_connected(e)
@@ -3801,6 +3911,11 @@ async def connection_status() -> dict:
     token rows persisted before the scopes key was corrected have no scopes
     recorded. Clients should read empty as "assume mail is granted, chat is
     not" rather than as a hard denial.
+
+    A connected account also reports mail_policy: {"enabled": bool} — whether
+    the mail sender policy is hiding external-sender mail. The allowed domains
+    themselves are not published. Use it to explain missing mail, and resync
+    the mail cache when the flag flips.
     """
     try:
         token = get_graph_token()
@@ -3827,11 +3942,21 @@ async def connection_status() -> dict:
     except Exception:
         logger.debug("connection_status could not fetch the profile", exc_info=True)
 
+    # A status probe must never crash: a malformed allowlist is reported as
+    # "on, but misconfigured" rather than raised, because the tools that would
+    # actually read mail already fail closed on it.
+    try:
+        policy = {"enabled": mail_policy.enabled()}
+    except mail_policy.MailPolicyConfigError:
+        logger.warning("connection_status: mail sender policy is misconfigured", exc_info=True)
+        policy = {"enabled": True, "error": "invalid_config"}
+
     return {
         "connected": True,
         "scopes": _stored_graph_scopes(),
         "connect_url": None,
         "account": account,
+        "mail_policy": policy,
     }
 
 

@@ -224,9 +224,14 @@ services = {
     hostname_prefix   = "ms-graph"
     replicas          = 2
     oauth_secret_name = "microsoft-oauth"
-    # consumers = personal MSA; switch to your tenant GUID for org accounts.
-    extra_env = { MS_TENANT_ID = "consumers" }
-    health    = { type = "http", path = "/healthz" }
+    extra_env = {
+      # consumers = personal MSA; switch to your tenant GUID for org accounts.
+      MS_TENANT_ID = "consumers"
+      # Hide mail from senders outside these domains (unset = off). List every
+      # domain the org sends from, including <tenant>.onmicrosoft.com.
+      MS_MAIL_ALLOWED_SENDER_DOMAINS = "yourcompany.com,yourcompany.onmicrosoft.com"
+    }
+    health = { type = "http", path = "/healthz" }
   }
 
   atlassian = {
@@ -264,6 +269,20 @@ services = {
   }
 }
 ```
+
+**Note on `MS_MAIL_ALLOWED_SENDER_DOMAINS`:** this variable is the
+external-sender mail policy's toggle and its allowlist at once. Unset or blank
+means off and every mail tool behaves as before; a comma-separated list of
+domains means mail whose Exchange `from` (or `sender`) is outside those domains
+is hidden from every mail surface. It is per-deployment, so a staging
+environment can run with it off while production runs with it on. A malformed
+value — a bare word, a `*`, an empty label — stops the pod at boot: readiness
+never passes and the log names the bad entry, which is deliberate, because
+serving mail unfiltered would be the worse failure. At startup the pod logs
+`Mail sender policy: on (N allowed domain(s))` or
+`Mail sender policy: off (MS_MAIL_ALLOWED_SENDER_DOMAINS unset)`. See the "Mail
+sender policy" section of `mcps/microsoft/README.md` for the rule, the coverage
+list, and the rollout checklist.
 
 **Note on `build` vs `image_tag`:** every service sets exactly one of the two
 (terraform validation enforces it). Services built from this repo set

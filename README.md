@@ -99,7 +99,7 @@ Create a `.env` in each MCP directory (or `export` the values). These are needed
 
 | MCP | Required | Optional |
 |---|---|---|
-| `mcps/microsoft/` | `MS_CLIENT_ID` | `MS_CLIENT_SECRET` (required if Azure app is a confidential client), `MS_TENANT_ID` (defaults to `consumers`), `MS_DEFAULT_FROM_ADDRESS` |
+| `mcps/microsoft/` | `MS_CLIENT_ID` | `MS_CLIENT_SECRET` (required if Azure app is a confidential client), `MS_TENANT_ID` (defaults to `consumers`), `MS_DEFAULT_FROM_ADDRESS`, `MS_MAIL_ALLOWED_SENDER_DOMAINS` (hide mail from external senders) |
 | `mcps/github/` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | — (the CLI and MCP server share this OAuth app; PKCE first, device-code fallback) |
 | `mcps/atlassian/` | `ATLASSIAN_CLIENT_ID`, `ATLASSIAN_CLIENT_SECRET` | `ATLASSIAN_ACCESS_TOKEN` + `ATLASSIAN_CLOUD_ID` (bypass OAuth flow entirely) |
 | `mcps/databricks/` | `DATABRICKS_HOST`, `DATABRICKS_HTTP_PATH` + EITHER `DATABRICKS_CLIENT_ID` (OAuth, recommended) OR `DATABRICKS_ACCESS_TOKEN` (PAT, dev fallback for free-tier workspaces) | `DATABRICKS_CLIENT_SECRET` (required if the OAuth app is confidential; omit for public PKCE-only apps) |

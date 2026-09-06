@@ -540,12 +540,16 @@ async def asearch_messages(
 
 # Exactly the fields the desktop list view needs. One constant so the fresh
 # start and any future callers cannot drift apart.
+#
+# ``sender`` rides along unconditionally (not only while the mail policy is
+# on) because a static select is deterministic and testable, and because a
+# stored delta cursor encodes the select it was created with.
 DELTA_SELECT = (
-    "id,internetMessageId,conversationId,subject,from,toRecipients,"
+    "id,internetMessageId,conversationId,subject,from,sender,toRecipients,"
     "receivedDateTime,isRead,isDraft,hasAttachments,bodyPreview"
 )
 
-DETAIL_SELECT = "id,uniqueBody,internetMessageHeaders,hasAttachments"
+DETAIL_SELECT = "id,from,sender,uniqueBody,internetMessageHeaders,hasAttachments"
 
 # Expanding attachments here means one round trip for body + attachment
 # metadata, and the inner $select keeps contentBytes out of the response.

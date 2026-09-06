@@ -134,6 +134,9 @@ services = {
     extra_env = {
       # Use "consumers" for personal MSA, "common" for any AAD, or a tenant GUID.
       MS_TENANT_ID = "consumers"
+      # Hide mail from senders outside these domains (unset = off). List every
+      # domain the org sends from, including <tenant>.onmicrosoft.com.
+      # MS_MAIL_ALLOWED_SENDER_DOMAINS = "yourcompany.com,yourcompany.onmicrosoft.com"
     }
     health = { type = "http", path = "/healthz" }
   }
