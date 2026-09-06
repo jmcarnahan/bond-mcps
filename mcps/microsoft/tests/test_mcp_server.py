@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import httpx
 import pytest
 import respx
+from ms_graph import mail_policy
 from ms_graph.files import _encode_sharing_url
 from ms_graph.graph_client import GRAPH_BASE_URL
 from ms_graph.power_bi import POWERBI_BASE_URL
@@ -56,7 +57,13 @@ from .conftest import (
     SAMPLE_DRIVE_ITEM_FOLDER,
     SAMPLE_DRIVE_ITEM_LARGE_TEXT,
     SAMPLE_DRIVE_ITEM_WORD,
+    SAMPLE_EXTERNAL_DELTA_MESSAGE,
+    SAMPLE_EXTERNAL_ITEM_ATTACHMENT,
+    SAMPLE_EXTERNAL_ITEM_ATTACHMENT_META,
+    SAMPLE_EXTERNAL_MESSAGE,
+    SAMPLE_EXTERNAL_MESSAGE_DETAIL,
     SAMPLE_FILE_ATTACHMENT,
+    SAMPLE_FORWARDING_RULE,
     SAMPLE_INLINE_ATTACHMENT,
     SAMPLE_INVITE_RESPONSE,
     SAMPLE_ITEM_ATTACHMENT,
@@ -73,6 +80,7 @@ from .conftest import (
     SAMPLE_MESSAGES_PAGE1,
     SAMPLE_MESSAGES_PAGE2,
     SAMPLE_MESSAGES_RESPONSE,
+    SAMPLE_ONBEHALF_MESSAGE,
     SAMPLE_PBI_DASHBOARDS_RESPONSE,
     SAMPLE_PBI_DATASETS_RESPONSE,
     SAMPLE_PBI_DAX_RESULT,
@@ -83,6 +91,8 @@ from .conftest import (
     SAMPLE_REPLY_DRAFT,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_EMPTY,
+    SAMPLE_SENDER_ONLY_EXTERNAL,
+    SAMPLE_SENDER_ONLY_INTERNAL,
     SAMPLE_SHARED_TEXT_FILE,
     SAMPLE_SITES_RESPONSE,
     SAMPLE_TEAMS_DRIVE_ITEM,
@@ -6736,3 +6746,787 @@ class TestConnectFlowScopes:
             overridden = MICROSOFT_CONNECT_CONFIG.resolved_scopes().split()
         assert org == [*CONSENTED_ORG_SCOPES, "offline_access"]
         assert overridden == ["Mail.Read", "offline_access"]
+
+
+# ---------------------------------------------------------------------------
+# External-sender mail policy
+# ---------------------------------------------------------------------------
+
+# The sender check reads the parent message by id, percent-encoded, with only
+# id/from/sender selected.
+SENDER_CHECK_URL = f"{GRAPH_BASE_URL}/me/messages/{quote(ATT_MSG_ID, safe='')}"
+SENDER_CHECK_PATH = f"/v1.0/me/messages/{ATT_MSG_ID}"
+ATT_EXT_ITEM_URL = f"{ATT_BASE}/{quote(SAMPLE_EXTERNAL_ITEM_ATTACHMENT['id'], safe='')}"
+EXTERNAL_MSG_ID = SAMPLE_EXTERNAL_MESSAGE["id"]
+
+# Every mail-touching tool must be classified. Decision 12: the ungated ones
+# are writes on ids the caller must already hold (the gated surfaces never hand
+# out an external id), draft ids that Exchange rejects on non-drafts, and
+# folder metadata that carries no mail.
+GATED_MAIL_TOOLS = frozenset(
+    {
+        "list_emails",
+        "read_email",
+        "get_email_attachment",
+        "send_email",
+        "manage_inbox_rules",
+        "list_mail_delta",
+        "get_mail_detail",
+        "get_mail_attachment_json",
+        "create_reply_draft_json",
+    }
+)
+DELIBERATELY_UNGATED_MAIL_TOOLS = frozenset(
+    {
+        "mark_mail_read_json",
+        "update_draft_body",
+        "send_draft",
+        "add_draft_attachment_json",
+        "manage_mail_folders",
+    }
+)
+MAIL_TOOL_WORDS = ("mail", "email", "draft", "inbox")
+
+
+def _policy_on(monkeypatch, value: str = "example.com") -> None:
+    """Turn the policy on. Every sample sender is @example.com, i.e. internal."""
+    monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, value)
+
+
+def _assert_no_canary(result) -> None:
+    """No field of a hidden message may appear in what a tool returned.
+
+    Each conftest canary fixture carries a distinct CANARY-<FIELD> marker, so a
+    failure here names the field that leaked.
+    """
+    text = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+    for marker in ("CANARY-", "mallory", "Mallory"):
+        assert marker not in text, f"{marker!r} leaked into a policy-gated result: {text[:400]}"
+
+
+def _select_of(request) -> str:
+    """The $select query parameter of a recorded request."""
+    return parse_qs(urlparse(str(request.url)).query).get("$select", [""])[0]
+
+
+class TestMailSenderPolicy:
+    """Every read surface hides mail that arrived from outside the allowlist."""
+
+    # -- list_emails --------------------------------------------------------
+
+    @respx.mock
+    async def test_list_emails_hides_external_and_appends_the_notice(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(
+                200, json={"value": [SAMPLE_MESSAGE, SAMPLE_EXTERNAL_MESSAGE]}
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_emails", {"top": 10})
+
+        text = _get_text(result)
+        assert "1 message(s) in inbox" in text
+        assert "alice@example.com" in text
+        assert text.endswith(mail_policy.POLICY_NOTICE)
+        assert "sender" in _select_of(route.calls[0].request)
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_list_emails_select_asks_for_sender_even_when_off(self, mcp_server):
+        """The select is static, so a stored cursor never lacks the field."""
+        route = respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_emails", {})
+
+        select = _select_of(route.calls[0].request)
+        assert "from" in select and "sender" in select
+        assert mail_policy.POLICY_NOTICE not in _get_text(result)
+        _assert_no_canary(_get_text(result))
+
+    @respx.mock
+    async def test_list_emails_search_hiding_everything_still_reports_no_results(
+        self, mcp_server, monkeypatch
+    ):
+        _policy_on(monkeypatch)
+        respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_EXTERNAL_MESSAGE]})
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_emails", {"query": "CANARY"})
+
+        text = _get_text(result)
+        assert text == f'No messages found matching "CANARY".\n{mail_policy.POLICY_NOTICE}'
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_search_notice_is_identical_for_zero_and_many_hidden(
+        self, mcp_server, monkeypatch
+    ):
+        """A hidden count on a $search query would be a content oracle."""
+        _policy_on(monkeypatch)
+        three = [{**SAMPLE_EXTERNAL_MESSAGE, "id": f"ext-{i}"} for i in range(3)]
+        respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(
+            side_effect=[
+                httpx.Response(200, json={"value": [SAMPLE_EXTERNAL_MESSAGE]}),
+                httpx.Response(200, json={"value": three}),
+            ]
+        )
+        with _mock_token():
+            one_hidden = _get_text(await _call(mcp_server, "list_emails", {"query": "CANARY"}))
+            many_hidden = _get_text(await _call(mcp_server, "list_emails", {"query": "CANARY"}))
+
+        assert one_hidden == many_hidden
+        _assert_no_canary(one_hidden)
+
+    @respx.mock
+    async def test_list_emails_filters_a_shared_mailbox_too(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        respx.get(f"{GRAPH_BASE_URL}/users/support@example.com/mailFolders/inbox/messages").mock(
+            return_value=httpx.Response(
+                200, json={"value": [SAMPLE_MESSAGE, SAMPLE_EXTERNAL_MESSAGE]}
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "list_emails", {"mailbox": "support@example.com", "top": 10}
+            )
+
+        text = _get_text(result)
+        assert "1 message(s) in inbox" in text
+        assert text.endswith(mail_policy.POLICY_NOTICE)
+        _assert_no_canary(text)
+
+    # -- read_email ---------------------------------------------------------
+
+    @respx.mock
+    async def test_read_email_refuses_external_before_marking_or_listing(
+        self, mcp_server, monkeypatch
+    ):
+        _policy_on(monkeypatch)
+        respx.get(f"{GRAPH_BASE_URL}/me/messages/{EXTERNAL_MSG_ID}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE)
+        )
+        patch_route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{EXTERNAL_MSG_ID}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE)
+        )
+        attachments_route = respx.get(
+            url__startswith=f"{GRAPH_BASE_URL}/me/messages/{EXTERNAL_MSG_ID}/attachments"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_RESPONSE))
+
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_email",
+                {"message_id": EXTERNAL_MSG_ID, "options": '{"mark_as_read": true}'},
+            )
+
+        text = _get_text(result)
+        assert text == mail_policy.EXTERNAL_SENDER_TEXT
+        assert not patch_route.called
+        assert not attachments_route.called
+        assert _graph_trail() == [("GET", f"/v1.0/me/messages/{EXTERNAL_MSG_ID}")]
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_read_email_refuses_mail_sent_on_behalf_of_an_insider(
+        self, mcp_server, monkeypatch
+    ):
+        """from is internal, but an outside service pressed send."""
+        _policy_on(monkeypatch)
+        msg_id = SAMPLE_ONBEHALF_MESSAGE["id"]
+        respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_ONBEHALF_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "read_email", {"message_id": msg_id})
+
+        text = _get_text(result)
+        assert text == mail_policy.EXTERNAL_SENDER_TEXT
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_read_email_internal_message_is_unchanged(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
+
+        text = _get_text(result)
+        assert "Weekly Report" in text
+        assert "Here is the weekly report" in text
+        _assert_no_canary(text)
+
+    # -- get_email_attachment ----------------------------------------------
+
+    @respx.mock
+    async def test_get_email_attachment_refuses_before_touching_the_attachment(
+        self, mcp_server, monkeypatch
+    ):
+        _policy_on(monkeypatch)
+        value_route = respx.get(f"{ATT_FILE_URL}/$value").mock(
+            return_value=httpx.Response(200, content=b"x")
+        )
+        meta_route = respx.get(ATT_FILE_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
+        )
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_email_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
+            )
+
+        text = _get_text(result)
+        assert text == mail_policy.EXTERNAL_SENDER_TEXT
+        assert not meta_route.called
+        assert not value_route.called
+        assert _graph_trail() == [("GET", SENDER_CHECK_PATH)]
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_get_email_attachment_checks_the_mailbox_it_will_read(
+        self, mcp_server, monkeypatch
+    ):
+        """A /me check before a /users/{mailbox} read would be the wrong check."""
+        _policy_on(monkeypatch)
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/users/support@example.com/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_email_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                    "mailbox": "support@example.com",
+                },
+            )
+
+        assert _get_text(result) == mail_policy.EXTERNAL_SENDER_TEXT
+        assert route.calls[0].request.url.path.startswith(
+            "/v1.0/users/support@example.com/messages/"
+        )
+        _assert_no_canary(_get_text(result))
+
+    @respx.mock
+    @pytest.mark.parametrize("mode", ["text", "base64", "onedrive"])
+    async def test_get_email_attachment_refuses_an_external_attached_message(
+        self, mcp_server, monkeypatch, mode
+    ):
+        """An attached message is judged by the same rule as a message."""
+        _policy_on(monkeypatch)
+        value_route = respx.get(f"{ATT_EXT_ITEM_URL}/$value").mock(
+            return_value=httpx.Response(200, content=b"raw-eml")
+        )
+
+        def _respond(request):
+            if "expand" in str(request.url):
+                return httpx.Response(200, json=SAMPLE_EXTERNAL_ITEM_ATTACHMENT)
+            return httpx.Response(200, json=SAMPLE_EXTERNAL_ITEM_ATTACHMENT_META)
+
+        respx.get(url__startswith=ATT_EXT_ITEM_URL).mock(side_effect=_respond)
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_INTERNAL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_email_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_EXTERNAL_ITEM_ATTACHMENT["id"],
+                    "mode": mode,
+                },
+            )
+
+        text = _get_text(result)
+        assert text == mail_policy.EXTERNAL_SENDER_TEXT
+        assert not value_route.called
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_get_email_attachment_internal_costs_one_extra_request(
+        self, mcp_server, monkeypatch
+    ):
+        _policy_on(monkeypatch)
+        respx.get(f"{ATT_FILE_URL}/$value").mock(
+            return_value=httpx.Response(
+                200, content=b"hello there", headers={"Content-Type": "text/plain"}
+            )
+        )
+        respx.get(ATT_FILE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    **SAMPLE_FILE_ATTACHMENT,
+                    "name": "notes.txt",
+                    "contentType": "text/plain",
+                    "size": 11,
+                },
+            )
+        )
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_INTERNAL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_email_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
+            )
+
+        text = _get_text(result)
+        assert "hello there" in text
+        trail = _graph_trail()
+        assert trail[0] == ("GET", SENDER_CHECK_PATH)
+        assert len(trail) == 3
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_policy_off_issues_no_extra_requests(self, mcp_server):
+        """Off must be byte-for-byte the old behaviour, including request count."""
+        respx.get(f"{ATT_FILE_URL}/$value").mock(
+            return_value=httpx.Response(
+                200, content=b"hello there", headers={"Content-Type": "text/plain"}
+            )
+        )
+        respx.get(ATT_FILE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    **SAMPLE_FILE_ATTACHMENT,
+                    "name": "notes.txt",
+                    "contentType": "text/plain",
+                    "size": 11,
+                },
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_email_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
+            )
+
+        assert "hello there" in _get_text(result)
+        assert len(_graph_trail()) == 2
+        _assert_no_canary(_get_text(result))
+
+    # -- forwarding an attachment out of an external message ----------------
+
+    @respx.mock
+    async def test_send_email_refuses_to_forward_an_external_attachment(
+        self, mcp_server, monkeypatch
+    ):
+        _policy_on(monkeypatch)
+        attachments_route = respx.get(url__startswith=ATT_BASE).mock(
+            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
+        )
+        send_route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        spec = {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]}
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "bob@example.com",
+                    "subject": "fwd",
+                    "body": "see attached",
+                    "options": json.dumps({"attachments": [spec]}),
+                },
+            )
+
+        text = _get_text(result)
+        assert text == f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}"
+        assert not attachments_route.called
+        assert not send_route.called
+        assert all(method != "POST" for method, _ in _graph_trail())
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_forward_spec_mailbox_is_the_mailbox_that_is_checked(
+        self, mcp_server, monkeypatch
+    ):
+        _policy_on(monkeypatch)
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/users/support@example.com/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        spec = {
+            "message_id": ATT_MSG_ID,
+            "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+            "mailbox": "support@example.com",
+        }
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "bob@example.com",
+                    "subject": "fwd",
+                    "body": "see attached",
+                    "options": json.dumps({"attachments": [spec]}),
+                },
+            )
+
+        assert _get_text(result) == f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}"
+        assert route.calls[0].request.url.path.startswith(
+            "/v1.0/users/support@example.com/messages/"
+        )
+        _assert_no_canary(_get_text(result))
+
+    @respx.mock
+    async def test_send_teams_message_refuses_to_forward_an_external_attachment(
+        self, mcp_server, monkeypatch
+    ):
+        """Teams is out of scope, but it must not become a laundering route."""
+        _policy_on(monkeypatch)
+        post_route = respx.post(TEAMS_CHAT_MSGS).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
+        )
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        spec = {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]}
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "fyi",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": json.dumps({"attachments": [spec]}),
+                },
+            )
+
+        text = _get_text(result)
+        assert text == f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}"
+        assert not post_route.called
+        _assert_no_canary(text)
+
+    # -- Desktop JSON surfaces ---------------------------------------------
+
+    @respx.mock
+    async def test_list_mail_delta_hides_external_and_keeps_tombstones(
+        self, mcp_server, monkeypatch
+    ):
+        _policy_on(monkeypatch)
+        page = {
+            "@odata.nextLink": SAMPLE_DELTA_NEXT_LINK,
+            "value": [
+                SAMPLE_DELTA_MESSAGE,
+                SAMPLE_EXTERNAL_DELTA_MESSAGE,
+                SAMPLE_DELTA_TOMBSTONE,
+            ],
+        }
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_mail_delta", {})
+
+        data = _structured(result)
+        assert data["messages"] == [SAMPLE_DELTA_MESSAGE, SAMPLE_DELTA_TOMBSTONE]
+        assert set(data) == {"messages", "next_cursor", "delta_cursor", "resync"}
+        assert data["next_cursor"] == SAMPLE_DELTA_NEXT_LINK
+        assert data["delta_cursor"] == ""
+        assert data["resync"] is False
+        _assert_no_canary(data)
+
+    @respx.mock
+    async def test_get_mail_detail_returns_only_the_error(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE_DETAIL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_mail_detail", {"message_id": SAMPLE_EXTERNAL_MESSAGE["id"]}
+            )
+
+        data = _structured(result)
+        assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+        select = _select_of(route.calls[0].request).split(",")
+        assert "from" in select and "sender" in select
+        _assert_no_canary(data)
+
+    @respx.mock
+    @pytest.mark.parametrize("mode", ["metadata", "text", "bytes"])
+    async def test_get_mail_attachment_json_refuses_an_external_parent(
+        self, mcp_server, monkeypatch, mode
+    ):
+        _policy_on(monkeypatch)
+        attachments_route = respx.get(url__startswith=ATT_BASE).mock(
+            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
+        )
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment_json",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                    "mode": mode,
+                },
+            )
+
+        data = _structured(result)
+        assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+        assert not attachments_route.called
+        _assert_no_canary(data)
+
+    @respx.mock
+    @pytest.mark.parametrize("mode", ["metadata", "text", "bytes"])
+    async def test_get_mail_attachment_json_refuses_an_external_attached_message(
+        self, mcp_server, monkeypatch, mode
+    ):
+        _policy_on(monkeypatch)
+        value_route = respx.get(f"{ATT_EXT_ITEM_URL}/$value").mock(
+            return_value=httpx.Response(200, content=b"raw-eml")
+        )
+
+        def _respond(request):
+            if "expand" in str(request.url):
+                return httpx.Response(200, json=SAMPLE_EXTERNAL_ITEM_ATTACHMENT)
+            return httpx.Response(200, json=SAMPLE_EXTERNAL_ITEM_ATTACHMENT_META)
+
+        respx.get(url__startswith=ATT_EXT_ITEM_URL).mock(side_effect=_respond)
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_INTERNAL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment_json",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_EXTERNAL_ITEM_ATTACHMENT["id"],
+                    "mode": mode,
+                },
+            )
+
+        data = _structured(result)
+        assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+        assert not value_route.called
+        _assert_no_canary(data)
+
+    @respx.mock
+    async def test_create_reply_draft_json_never_posts_create_reply(self, mcp_server, monkeypatch):
+        """Graph would build a draft quoting the original, from = the user."""
+        _policy_on(monkeypatch)
+        post_route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(201, json=SAMPLE_REPLY_DRAFT)
+        )
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "create_reply_draft_json", {"message_id": ATT_MSG_ID})
+
+        data = _structured(result)
+        assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+        assert not post_route.called
+        assert _graph_trail() == [("GET", SENDER_CHECK_PATH)]
+        _assert_no_canary(data)
+
+    # -- forwarding inbox rules --------------------------------------------
+
+    @respx.mock
+    async def test_forwarding_rule_is_refused_before_any_request(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "create", "options": json.dumps(SAMPLE_FORWARDING_RULE)},
+            )
+
+        text = _get_text(result)
+        assert text == mail_policy.FORWARDING_RULE_TEXT
+        assert _graph_trail() == []
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_updating_a_rule_to_redirect_is_refused(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        changes = {"actions": {"redirectTo": [{"emailAddress": {"address": "x@evil.example.net"}}]}}
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {
+                    "action": "update",
+                    "rule_id": SAMPLE_MESSAGE_RULE["id"],
+                    "options": json.dumps(changes),
+                },
+            )
+
+        text = _get_text(result)
+        assert text == mail_policy.FORWARDING_RULE_TEXT
+        assert _graph_trail() == []
+        _assert_no_canary(text)
+
+    @respx.mock
+    async def test_non_forwarding_rules_still_work_while_the_policy_is_on(
+        self, mcp_server, monkeypatch
+    ):
+        """Move/copy/markAsRead rules do not change from, so they stay allowed."""
+        _policy_on(monkeypatch)
+        rule = {"displayName": "Filed", "sequence": 2, "actions": {"moveToFolder": "AQMkAG"}}
+        route = respx.post(_RULES_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_MESSAGE_RULE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "create", "options": json.dumps(rule)},
+            )
+
+        assert route.called
+        assert "created" in _get_text(result).lower()
+        _assert_no_canary(_get_text(result))
+
+    @respx.mock
+    async def test_forwarding_rule_is_allowed_while_the_policy_is_off(self, mcp_server):
+        """The gate closes the policy bypass; it is not an independent control."""
+        route = respx.post(_RULES_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_MESSAGE_RULE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "create", "options": json.dumps(SAMPLE_FORWARDING_RULE)},
+            )
+
+        assert route.called
+        assert "created" in _get_text(result).lower()
+        _assert_no_canary(_get_text(result))
+
+    # -- connection_status --------------------------------------------------
+
+    @respx.mock
+    @pytest.mark.parametrize("value, expected", [("example.com", True), (None, False)])
+    async def test_connection_status_reports_the_policy_state(
+        self, mcp_server, monkeypatch, value, expected
+    ):
+        if value:
+            _policy_on(monkeypatch, value)
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(500, json={"error": {"code": "x", "message": "boom"}})
+        )
+        with (
+            _mock_token(),
+            patch("ms_graph_mcp._stored_graph_scopes", return_value=[]),
+        ):
+            result = await _call(mcp_server, "connection_status")
+
+        data = _structured(result)
+        assert data["connected"] is True
+        assert data["mail_policy"] == {"enabled": expected}
+        _assert_no_canary(data)
+
+    @respx.mock
+    async def test_connection_status_never_crashes_on_a_bad_allowlist(self, monkeypatch):
+        """A status probe must answer even when the config would stop the pod.
+
+        Called directly rather than through the client, because the lifespan
+        refuses to start the server at all on a malformed allowlist.
+        """
+        monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, "not a domain")
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(500, json={"error": {"code": "x", "message": "boom"}})
+        )
+        from ms_graph_mcp import connection_status
+
+        with (
+            _mock_token(),
+            patch("ms_graph_mcp._stored_graph_scopes", return_value=[]),
+        ):
+            data = await connection_status()
+
+        assert data["connected"] is True
+        assert data["mail_policy"] == {"enabled": True, "error": "invalid_config"}
+        _assert_no_canary(data)
+
+    # -- misconfiguration fails closed --------------------------------------
+
+    @respx.mock
+    async def test_bad_config_fails_read_email_before_any_graph_call(self, monkeypatch):
+        """The tool itself fails closed, independently of the boot check.
+
+        Called directly rather than through the client: the in-process client
+        runs the lifespan, which would refuse the allowlist first and prove
+        nothing about the tool.
+        """
+        _policy_on(monkeypatch, "*")
+        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
+        from ms_graph_mcp import read_email
+
+        with _mock_token(), pytest.raises(mail_policy.MailPolicyConfigError, match=r"'\*'"):
+            await read_email(ATT_MSG_ID)
+
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_bad_config_is_not_mistaken_for_a_missing_connection(self, monkeypatch):
+        """A Desktop JSON tool raises on a bad allowlist instead of returning a dict."""
+        _policy_on(monkeypatch, "*")
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE_DETAIL)
+        )
+        from ms_graph_mcp import get_mail_detail
+
+        with _mock_token(), pytest.raises(mail_policy.MailPolicyConfigError):
+            await get_mail_detail(SAMPLE_EXTERNAL_MESSAGE["id"])
+
+    async def test_lifespan_raises_on_bad_config(self, monkeypatch):
+        """A pod that cannot parse its allowlist must never become ready."""
+        monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, "not a domain")
+        from ms_graph_mcp import _lifespan
+
+        with pytest.raises(mail_policy.MailPolicyConfigError):
+            async with _lifespan(None):
+                pass
+
+    async def test_lifespan_starts_with_a_valid_allowlist(self, monkeypatch):
+        monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, "example.com")
+        from ms_graph_mcp import _lifespan
+
+        async with _lifespan(None):
+            pass
+
+    # -- the invariant itself -----------------------------------------------
+
+    async def test_every_mail_tool_is_classified(self, mcp_server):
+        """A new mail tool must be gated, or deliberately listed as ungated."""
+        from fastmcp import Client
+
+        async with Client(mcp_server) as client:
+            names = {t.name for t in await client.list_tools()}
+
+        classified = GATED_MAIL_TOOLS | DELIBERATELY_UNGATED_MAIL_TOOLS
+        mail_tools = {n for n in names if any(word in n.lower() for word in MAIL_TOOL_WORDS)}
+        assert mail_tools - classified == set()
+        # And every name we classified is still registered, so the lists cannot
+        # rot into a false sense of coverage.
+        assert classified - names == set()

@@ -915,7 +915,7 @@ class TestBodyTypeParameterAsync:
 # literally rather than derived from mail.DELTA_SELECT so that a change to the
 # select list has to be made deliberately in two places.
 EXPECTED_DELTA_SELECT = (
-    "id%2CinternetMessageId%2CconversationId%2Csubject%2Cfrom%2CtoRecipients"
+    "id%2CinternetMessageId%2CconversationId%2Csubject%2Cfrom%2Csender%2CtoRecipients"
     "%2CreceivedDateTime%2CisRead%2CisDraft%2ChasAttachments%2CbodyPreview"
 )
 
@@ -1063,7 +1063,10 @@ class TestGetMessageDetailSync:
         assert data == SAMPLE_MESSAGE_DETAIL
         req = route.calls[0].request
         assert req.headers["prefer"] == 'outlook.body-content-type="text"'
-        assert "$select=id%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments" in str(req.url)
+        assert (
+            "$select=id%2Cfrom%2Csender%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments"
+            in str(req.url)
+        )
         # One round trip carries the attachment metadata, and never contentBytes.
         assert "$expand=attachments%28%24select%3D" in str(req.url)
         assert "contentId" in str(req.url)

@@ -7,7 +7,7 @@ from urllib.parse import quote
 import httpx
 import pytest
 import respx
-from ms_graph import attachments, document_create, files
+from ms_graph import attachments, document_create, files, mail_policy
 from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient, GraphError
 
 from .conftest import (
@@ -27,6 +27,8 @@ from .conftest import (
     SAMPLE_ITEM_ATTACHMENT,
     SAMPLE_MESSAGE,
     SAMPLE_REFERENCE_ATTACHMENT,
+    SAMPLE_SENDER_ONLY_EXTERNAL,
+    SAMPLE_SENDER_ONLY_INTERNAL,
     SAMPLE_SHARED_TEXT_FILE,
     SAMPLE_UPLOADED_FILE,
 )
@@ -694,6 +696,88 @@ class TestResolveSourceSpecs:
             )
 
         assert att.data == b"%PDF"
+
+
+class TestForwardSpecMailPolicy:
+    """Forwarding an attachment re-originates it, so the source is judged first."""
+
+    def _routes(self):
+        """Attachment routes first, so the sender-check route cannot shadow them."""
+        attachment_route = respx.get(url__startswith=ATTACHMENTS_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
+        )
+        message_route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        return attachment_route, message_route
+
+    @respx.mock
+    async def test_external_source_message_is_refused(self, monkeypatch):
+        monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, "example.com")
+        attachment_route, message_route = self._routes()
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="outside the allowed domains"):
+                await attachments.aresolve_attachment_source(
+                    client, {"message_id": MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]}
+                )
+
+        assert message_route.called
+        assert not attachment_route.called
+
+    @respx.mock
+    def test_sync_external_source_message_is_refused(self, monkeypatch):
+        monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, "example.com")
+        attachment_route, message_route = self._routes()
+        with GraphClient("tok") as client:
+            with pytest.raises(ValueError, match="outside the allowed domains"):
+                attachments.resolve_attachment_source(
+                    client, {"message_id": MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]}
+                )
+
+        assert message_route.called
+        assert not attachment_route.called
+
+    @respx.mock
+    async def test_spec_mailbox_is_the_mailbox_that_is_checked(self, monkeypatch):
+        monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, "example.com")
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/users/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="outside the allowed domains"):
+                await attachments.aresolve_attachment_source(
+                    client,
+                    {
+                        "message_id": MSG_ID,
+                        "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                        "mailbox": "support@example.com",
+                    },
+                )
+
+        assert route.calls[0].request.url.path.startswith(
+            "/v1.0/users/support@example.com/messages/"
+        )
+
+    @respx.mock
+    async def test_internal_source_message_resolves_normally(self, monkeypatch):
+        monkeypatch.setenv(mail_policy.ENV_ALLOWED_SENDER_DOMAINS, "example.com")
+        respx.get(f"{FILE_ATTACHMENT_URL}/$value").mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF-1.7", headers={"Content-Type": "application/pdf"}
+            )
+        )
+        respx.get(url__startswith=ATTACHMENTS_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
+        )
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_INTERNAL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            att = await attachments.aresolve_attachment_source(
+                client, {"message_id": MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]}
+            )
+
+        assert att == attachments.ResolvedAttachment("report.pdf", b"%PDF-1.7", "application/pdf")
 
 
 class TestResolveSourceLists:

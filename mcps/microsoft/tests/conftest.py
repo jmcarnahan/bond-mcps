@@ -12,6 +12,20 @@ import pytest
 os.environ.setdefault("BOND_MCPS_SKIP_STARTUP_VERIFY", "1")
 
 
+@pytest.fixture(autouse=True)
+def _mail_policy_off(monkeypatch):
+    """Every test starts with the external-sender mail policy OFF.
+
+    A developer's mcps/microsoft/.env is loaded at import by ms_graph_mcp, so
+    without this the suite's behaviour would depend on whose laptop it runs
+    on. It has to be a per-test monkeypatch rather than the import-time
+    ``os.environ.setdefault`` used above, because tests that need the policy ON
+    set the variable themselves and must get a clean slate afterwards.
+    ``raising=False`` is mandatory: CI has the variable unset.
+    """
+    monkeypatch.delenv("MS_MAIL_ALLOWED_SENDER_DOMAINS", raising=False)
+
+
 @pytest.fixture
 def no_sleep(monkeypatch):
     """Patch time.sleep and asyncio.sleep in ms_graph.files to avoid real waits in copy tests."""
@@ -1171,4 +1185,136 @@ SAMPLE_DRAFT_MESSAGE = {
     "isDraft": True,
     "subject": "Hello",
     "webLink": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft777",
+}
+
+
+# ---------------------------------------------------------------------------
+# External-sender mail policy fixtures
+#
+# Every sample above is sent from @example.com, so setting
+# MS_MAIL_ALLOWED_SENDER_DOMAINS=example.com is "policy on, everything
+# internal". The payloads below are the external half. Each field carries its
+# OWN canary string, so a leak into any tool output names the field it came
+# from rather than just saying "something leaked".
+# ---------------------------------------------------------------------------
+
+EXTERNAL_SENDER_ADDRESS = "mallory@evil.example.net"
+
+SAMPLE_EXTERNAL_MESSAGE = {
+    "id": "AAMkAGI2external001=",
+    "subject": "CANARY-SUBJECT",
+    "receivedDateTime": "2026-01-06T11:00:00Z",
+    "isRead": False,
+    "hasAttachments": True,
+    "bodyPreview": "CANARY-PREVIEW",
+    "from": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+    "toRecipients": [{"emailAddress": {"name": "Bob Jones", "address": "CANARY-TO@example.com"}}],
+    "body": {"contentType": "text", "content": "CANARY-BODY"},
+}
+
+# The DELTA_SELECT shape: what a delta page actually carries.
+SAMPLE_EXTERNAL_DELTA_MESSAGE = {
+    "id": "AAMkAGI2delta003=",
+    "internetMessageId": "<CANARY-MESSAGE-ID@evil.example.net>",
+    "conversationId": "conv-CANARY",
+    "subject": "CANARY-DELTA-SUBJECT",
+    "from": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+    "sender": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+    "toRecipients": [{"emailAddress": {"name": "Bob Jones", "address": "CANARY-TO@example.com"}}],
+    "receivedDateTime": "2026-01-06T11:00:00Z",
+    "isRead": False,
+    "isDraft": False,
+    "hasAttachments": False,
+    "bodyPreview": "CANARY-DELTA-PREVIEW",
+}
+
+SAMPLE_EXTERNAL_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    "id": "AAMkAttachCanary001=",
+    "name": "CANARY-ATTACHMENT.pdf",
+    "contentType": "application/pdf",
+    "size": 2048,
+    "isInline": False,
+    "contentId": None,
+}
+
+SAMPLE_EXTERNAL_REFERENCE_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.referenceAttachment",
+    "id": "AAMkAttachCanary002=",
+    "name": "CANARY-LINK.docx",
+    "contentType": None,
+    "size": 0,
+    "isInline": False,
+    "sourceUrl": "https://canary.example.net/CANARY-URL",
+}
+
+# The DETAIL_SELECT + $expand=attachments shape get_mail_detail receives.
+SAMPLE_EXTERNAL_MESSAGE_DETAIL = {
+    "id": SAMPLE_EXTERNAL_MESSAGE["id"],
+    "from": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+    "sender": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+    "hasAttachments": True,
+    "uniqueBody": {"contentType": "text", "content": "CANARY-BODY"},
+    "internetMessageHeaders": [{"name": "X-Origin", "value": "CANARY-HEADER"}],
+    "attachments": [SAMPLE_EXTERNAL_ATTACHMENT, SAMPLE_EXTERNAL_REFERENCE_ATTACHMENT],
+}
+
+# Exchange's from is internal but an outside service pressed send: external.
+SAMPLE_ONBEHALF_MESSAGE = {
+    "id": "AAMkAGI2onbehalf001=",
+    "subject": "CANARY-ONBEHALF-SUBJECT",
+    "receivedDateTime": "2026-01-06T12:00:00Z",
+    "isRead": False,
+    "hasAttachments": False,
+    "bodyPreview": "CANARY-ONBEHALF-PREVIEW",
+    "from": {"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}},
+    "sender": {"emailAddress": {"name": "CANARY-NAME", "address": "bot@saas.example.net"}},
+    "toRecipients": [{"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}}],
+    "body": {"contentType": "text", "content": "CANARY-ONBEHALF-BODY"},
+}
+
+# Exactly what mail_policy.SENDER_SELECT asks Graph for.
+SAMPLE_SENDER_ONLY_INTERNAL = {
+    "id": SAMPLE_MESSAGE["id"],
+    "from": {"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}},
+    "sender": {"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}},
+}
+
+SAMPLE_SENDER_ONLY_EXTERNAL = {
+    "id": SAMPLE_MESSAGE["id"],
+    "from": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+    "sender": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+}
+
+# An internal message carrying an attached message that is NOT internal. The
+# attachment's own name is set by whoever attached it, so it is not a canary.
+SAMPLE_EXTERNAL_ITEM_ATTACHMENT = {
+    "@odata.type": "#microsoft.graph.itemAttachment",
+    "id": "AAMkAttachItemCanary003=",
+    "name": "FW: forwarded mail",
+    "contentType": None,
+    "size": 16_384,
+    "isInline": False,
+    "item": {
+        "@odata.type": "#microsoft.graph.message",
+        "id": "AAMkAGI2itemcanary=",
+        "subject": "CANARY-ITEM-SUBJECT",
+        "receivedDateTime": "2026-01-04T08:00:00Z",
+        "from": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
+        "body": {"contentType": "text", "content": "CANARY-ITEM-BODY"},
+        "bodyPreview": "CANARY-ITEM-PREVIEW",
+    },
+}
+
+# The metadata read (no $expand) returns the same attachment without its item.
+SAMPLE_EXTERNAL_ITEM_ATTACHMENT_META = {
+    k: v for k, v in SAMPLE_EXTERNAL_ITEM_ATTACHMENT.items() if k != "item"
+}
+
+SAMPLE_FORWARDING_RULE = {
+    "displayName": "CANARY-RULE",
+    "sequence": 1,
+    "isEnabled": True,
+    "conditions": {"senderContains": ["adele"]},
+    "actions": {"forwardAsAttachmentTo": [{"emailAddress": {"address": EXTERNAL_SENDER_ADDRESS}}]},
 }
