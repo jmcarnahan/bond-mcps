@@ -31,6 +31,7 @@ from ms_graph.teams import (
     normalize_search_hit,
     normalize_since,
     parse_message_attachments,
+    reply_parent_id,
     split_search_query,
 )
 
@@ -2280,6 +2281,52 @@ NOT_SUPPORTED_400 = {
     "error": {"code": "BadRequest", "message": "This API is not supported for MSA accounts"}
 }
 
+# A channel thread reply: the index returns it, but the chat route refuses it and
+# names the parent in the error text. Shapes verified live 2026-09-06.
+REPLY_ID = "1713933434104"
+REPLY_PARENT_ID = "1713933312527"
+REPLY_HIT = {
+    "summary": "budget2026",
+    "resource": {
+        "id": REPLY_ID,
+        "chatId": SEARCH_CHANNEL_ID,
+        "channelIdentity": {"channelId": SEARCH_CHANNEL_ID, "teamId": SEARCH_TEAM_ID},
+        "createdDateTime": "2024-04-24T04:37:15Z",
+        "webLink": f"https://teams.microsoft.com/l/message/{quote(SEARCH_CHANNEL_ID)}/{REPLY_ID}",
+    },
+}
+IS_A_REPLY_400 = {
+    "error": {
+        "code": "BadRequest",
+        "message": (
+            f"The message '{REPLY_ID}' is a reply and is not supported on this route. "
+            "Only root message identifiers are supported; retrieve replies via "
+            f"/chats({SEARCH_CHANNEL_ID})/messages({REPLY_PARENT_ID})/replies({REPLY_ID})."
+        ),
+    }
+}
+REPLY_ROUTE = (
+    f"{GRAPH_BASE_URL}/teams/{quote(SEARCH_TEAM_ID, safe='')}"
+    f"/channels/{quote(SEARCH_CHANNEL_ID, safe='')}"
+    f"/messages/{REPLY_PARENT_ID}/replies/{REPLY_ID}"
+)
+REPLY_BODY = {
+    "id": REPLY_ID,
+    "replyToId": REPLY_PARENT_ID,
+    "messageType": "message",
+    "createdDateTime": "2024-04-24T04:37:15Z",
+    "from": {"user": {"displayName": "Jimmy Wakimoto"}, "application": None},
+    "body": {"contentType": "html", "content": "<p>Moving the #budget2026 thread here</p>"},
+    "attachments": [],
+}
+
+
+def _get_trail():
+    """Every GET respx saw, in order, as (method, url)."""
+    return [
+        (c.request.method, str(c.request.url)) for c in respx.calls if c.request.method == "GET"
+    ]
+
 
 def _hit(msg_id, created="2026-03-02T10:00:00Z", chat_id=SEARCH_CHAT_ID):
     """A chat search hit for the given message id."""
@@ -2543,6 +2590,26 @@ class TestHitMatchesConversation:
 
     def test_case_insensitive(self):
         assert hit_matches_conversation(self._chat(), SEARCH_CHAT_ID.upper())
+
+
+class TestReplyParentId:
+    """The 400 the chat route answers for a channel reply names the parent."""
+
+    def _error(self, status, body):
+        err = body["error"]
+        return GraphError(status, err["code"], err["message"])
+
+    def test_parses_the_parent_from_the_400(self):
+        assert reply_parent_id(self._error(400, IS_A_REPLY_400), REPLY_ID) == REPLY_PARENT_ID
+
+    def test_other_status_is_ignored(self):
+        assert reply_parent_id(self._error(404, IS_A_REPLY_400), REPLY_ID) == ""
+
+    def test_other_reply_id_is_ignored(self):
+        assert reply_parent_id(self._error(400, IS_A_REPLY_400), "9999999999999") == ""
+
+    def test_plain_400_has_no_parent(self):
+        assert reply_parent_id(self._error(400, BAD_REQUEST_400), REPLY_ID) == ""
 
 
 class TestSearchMessages:
@@ -2846,6 +2913,64 @@ class TestSearchMessages:
         assert found["truncated"] is False
         assert not [c for c in respx.calls if c.request.method == "GET"]
 
+    @respx.mock
+    def test_channel_reply_hydrates_via_the_replies_route(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(400, json=IS_A_REPLY_400)
+        )
+        respx.get(REPLY_ROUTE).mock(return_value=httpx.Response(200, json=REPLY_BODY))
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        msg = found["messages"][0]
+        assert msg["id"] == REPLY_ID
+        assert msg["_conversation"] == f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
+        assert found["skipped"] == 0
+        assert _get_trail() == [
+            ("GET", f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}"),
+            ("GET", REPLY_ROUTE),
+        ]
+
+    @respx.mock
+    def test_reply_400_without_a_parent_is_skipped(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "BadRequest",
+                        "message": "The message is a reply and is not supported on this route.",
+                    }
+                },
+            )
+        )
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["skipped"] == 1
+        assert not [c for c in respx.calls if "/teams/" in c.request.url.path]
+
+    @respx.mock
+    def test_reply_route_403_is_teams_unavailable(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(400, json=IS_A_REPLY_400)
+        )
+        respx.get(REPLY_ROUTE).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with GraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                teams.search_messages(client, "#budget2026")
+
 
 class TestASearchMessages:
     """The async twin: same contract, concurrent hydration."""
@@ -2971,3 +3096,48 @@ class TestASearchMessages:
         async with AsyncGraphClient("tok") as client:
             with pytest.raises(TeamsSearchUnsupportedError):
                 await teams.asearch_messages(client, "#budget2026")
+
+    @respx.mock
+    async def test_async_channel_reply_hydrates_via_the_replies_route(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(400, json=IS_A_REPLY_400)
+        )
+        respx.get(REPLY_ROUTE).mock(return_value=httpx.Response(200, json=REPLY_BODY))
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        msg = found["messages"][0]
+        assert msg["id"] == REPLY_ID
+        assert msg["_conversation"] == f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
+        assert found["skipped"] == 0
+        assert _get_trail() == [
+            ("GET", f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}"),
+            ("GET", REPLY_ROUTE),
+        ]
+
+    @respx.mock
+    async def test_async_reply_400_without_a_parent_is_skipped(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "BadRequest",
+                        "message": "The message is a reply and is not supported on this route.",
+                    }
+                },
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["skipped"] == 1
+        assert not [c for c in respx.calls if "/teams/" in c.request.url.path]

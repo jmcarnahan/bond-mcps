@@ -132,6 +132,45 @@ SEARCH_CHANNEL_HYDRATE = f"{GRAPH_BASE_URL}/chats/{quote(SEARCH_CHANNEL_ID, safe
 SEARCH_NOT_SUPPORTED_400 = {
     "error": {"code": "BadRequest", "message": "This API is not supported for MSA accounts"}
 }
+# A channel thread reply: the chat route refuses it and names the parent, so the
+# hydrator retries on /teams/{team}/channels/{channel}/messages/{parent}/replies.
+SEARCH_REPLY_ID = "1713933434104"
+SEARCH_REPLY_PARENT_ID = "1713933312527"
+SEARCH_REPLY_HIT = {
+    "summary": "budget2026",
+    "resource": {
+        "id": SEARCH_REPLY_ID,
+        "chatId": SEARCH_CHANNEL_ID,
+        "channelIdentity": {"channelId": SEARCH_CHANNEL_ID, "teamId": SEARCH_TEAM_ID},
+        "createdDateTime": "2024-04-24T04:37:15Z",
+        "webLink": f"https://teams.microsoft.com/l/message/channel/{SEARCH_REPLY_ID}",
+    },
+}
+SEARCH_IS_A_REPLY_400 = {
+    "error": {
+        "code": "BadRequest",
+        "message": (
+            f"The message '{SEARCH_REPLY_ID}' is a reply and is not supported on this route. "
+            "Only root message identifiers are supported; retrieve replies via "
+            f"/chats({SEARCH_CHANNEL_ID})/messages({SEARCH_REPLY_PARENT_ID})"
+            f"/replies({SEARCH_REPLY_ID})."
+        ),
+    }
+}
+SEARCH_REPLY_ROUTE = (
+    f"{GRAPH_BASE_URL}/teams/{quote(SEARCH_TEAM_ID, safe='')}"
+    f"/channels/{quote(SEARCH_CHANNEL_ID, safe='')}"
+    f"/messages/{SEARCH_REPLY_PARENT_ID}/replies/{SEARCH_REPLY_ID}"
+)
+SEARCH_REPLY_BODY = {
+    "id": SEARCH_REPLY_ID,
+    "replyToId": SEARCH_REPLY_PARENT_ID,
+    "messageType": "message",
+    "createdDateTime": "2024-04-24T04:37:15Z",
+    "from": {"user": {"displayName": "Jimmy Wakimoto"}, "application": None},
+    "body": {"contentType": "html", "content": "<p>Moving the #budget2026 thread here</p>"},
+    "attachments": [],
+}
 
 
 def _search_hit(msg_id, created="2026-03-02T10:00:00Z", chat_id=SEARCH_CHAT_ID):
@@ -1837,6 +1876,28 @@ class TestMCPTeamsTools:
 
         text = _get_text(result)
         assert f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}" in text
+
+    @respx.mock
+    async def test_search_teams_messages_channel_reply(self, mcp_server):
+        """A channel thread reply is hydrated on the replies route, not skipped."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SEARCH_REPLY_HIT]))
+        )
+        respx.get(f"{SEARCH_CHANNEL_HYDRATE}/{SEARCH_REPLY_ID}").mock(
+            return_value=httpx.Response(400, json=SEARCH_IS_A_REPLY_400)
+        )
+        respx.get(SEARCH_REPLY_ROUTE).mock(return_value=httpx.Response(200, json=SEARCH_REPLY_BODY))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert "1 message(s) matching" in text
+        assert f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}" in text
+        assert "Moving the #budget2026 thread here" in text
+        assert "skipped" not in text
 
     @respx.mock
     async def test_search_teams_messages_all_time_by_default(self, mcp_server):

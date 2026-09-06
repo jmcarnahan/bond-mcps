@@ -13,12 +13,12 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (48 tools):
+Tool summary (49 tools):
   Email     : get_user_profile, list_emails, read_email, get_email_attachment, send_email,
               manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
-  Teams     : list_teams, list_chats, read_teams_messages, get_teams_attachment,
-              send_teams_message, get_teams_activity
+  Teams     : list_teams, list_chats, read_teams_messages, search_teams_messages,
+              get_teams_attachment, send_teams_message, get_teams_activity
   Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, edit_document, manage_file
   Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
   Desktop JSON : get_profile_json, search_people_json, list_mail_delta, get_mail_detail,
@@ -28,7 +28,7 @@ Tool summary (48 tools):
                  list_chat_messages_page, get_chat_attachment_json, mark_chat_read_json,
                  send_chat_message_json, inspect_file_json, connection_status
 
-The 28 markdown tools above render prose for an LLM to read. The Desktop JSON
+The 29 markdown tools above render prose for an LLM to read. The Desktop JSON
 namespace is for programmatic clients (the desktop mail app) and follows a
 different convention: every tool returns a ``dict``, which FastMCP surfaces as
 structuredContent. Parameters stay ``str``/``int`` only (empty string = absent)
@@ -3029,7 +3029,7 @@ async def export_report(
 # Desktop JSON tools
 #
 # A separate namespace for programmatic clients (the desktop mail app). Unlike
-# the 28 markdown tools above, these return dicts — FastMCP renders them as
+# the 29 markdown tools above, these return dicts — FastMCP renders them as
 # structuredContent. Parameters remain str/int only.
 #
 # Error contract: a missing Microsoft connection returns the not_connected

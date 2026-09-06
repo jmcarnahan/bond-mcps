@@ -89,6 +89,10 @@ EXACT_OVERFETCH = 2  # exact mode hydrates 2x max_results candidates
 # as a bare quoted term and re-checked against the message body afterwards.
 HASHTAG_RE = re.compile(r"^#([A-Za-z0-9_][\w-]*)$")
 
+# The parent/reply pair Graph names when a channel reply is fetched on the
+# root message route: "... retrieve replies via /chats(...)/messages(<parent>)/replies(<id>)".
+REPLY_ROUTE_RE = re.compile(r"messages\((\d+)\)/replies\((\d+)\)")
+
 
 def decode_token_claims(token: str) -> dict[str, str]:
     """Extract oid and tid from a Microsoft Graph access token (JWT).
@@ -510,6 +514,24 @@ def hit_matches_conversation(candidate: dict[str, Any], conversation_id: str) ->
     }
 
 
+def reply_parent_id(e: GraphError, message_id: str) -> str:
+    """The parent id Graph names when a channel reply is fetched on the root route.
+
+    The Search index returns channel replies, but a hit carries no parent id and
+    ``/chats/{id}/messages/{id}`` answers 400 "is a reply ... retrieve replies via
+    /chats(...)/messages(<parent>)/replies(<id>)". That chat-scoped replies route
+    is not allowed on a delegated token; the team-scoped one is (verified live
+    2026-09-06). Returns "" for any other error, or when the id Graph names is
+    not the one asked for.
+    """
+    if e.status_code != 400:
+        return ""
+    m = REPLY_ROUTE_RE.search(str(e))
+    if not m or m.group(2) != message_id:
+        return ""
+    return m.group(1)
+
+
 def _search_payload(query_string: str, offset: int) -> dict[str, Any]:
     """The POST /search/query body for one page of chatMessage hits."""
     return {
@@ -604,12 +626,35 @@ def get_message(
     team_id: str = "",
     channel_id: str = "",
 ) -> dict[str, Any]:
-    """Fetch ONE chat or channel message. Top-level messages only, not replies."""
+    """Fetch ONE chat or channel message. Top-level messages only; replies need get_reply."""
     base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
     try:
         return client.get(f"{base}/{_safe_id(message_id)}")
     except GraphError as e:
         _check_teams_access(e)
+
+
+def get_reply(
+    client: GraphClient, team_id: str, channel_id: str, parent_id: str, reply_id: str
+) -> dict[str, Any]:
+    """Fetch ONE reply in a channel thread."""
+    base = _message_base(team_id=team_id, channel_id=channel_id)
+    try:
+        return client.get(f"{base}/{_safe_id(parent_id)}/replies/{_safe_id(reply_id)}")
+    except GraphError as e:
+        _check_teams_access(e)
+
+
+def _hydrate_candidate(client: GraphClient, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Full message for a search hit — root messages via the chat route, channel
+    replies via the team replies route once Graph has named the parent."""
+    try:
+        return get_message(client, candidate["id"], chat_id=candidate["chat_id"])
+    except GraphError as e:
+        parent = reply_parent_id(e, candidate["id"])
+        if not parent or not candidate["team_id"]:
+            raise
+    return get_reply(client, candidate["team_id"], candidate["channel_id"], parent, candidate["id"])
 
 
 def get_hosted_content(
@@ -801,7 +846,7 @@ def search_messages(
     errors: list[BaseException] = []
     for candidate in candidates:
         try:
-            msg = get_message(client, candidate["id"], chat_id=candidate["chat_id"])
+            msg = _hydrate_candidate(client, candidate)
         except Exception as e:  # noqa: BLE001 — one bad id must not sink the search
             skipped += 1
             errors.append(e)
@@ -873,12 +918,39 @@ async def aget_message(
     team_id: str = "",
     channel_id: str = "",
 ) -> dict[str, Any]:
-    """Fetch ONE chat or channel message (async)."""
+    """Fetch ONE chat or channel message (async). Replies need aget_reply."""
     base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
     try:
         return await client.get(f"{base}/{_safe_id(message_id)}")
     except GraphError as e:
         _check_teams_access(e)
+
+
+async def aget_reply(
+    client: AsyncGraphClient, team_id: str, channel_id: str, parent_id: str, reply_id: str
+) -> dict[str, Any]:
+    """Fetch ONE reply in a channel thread (async)."""
+    base = _message_base(team_id=team_id, channel_id=channel_id)
+    try:
+        return await client.get(f"{base}/{_safe_id(parent_id)}/replies/{_safe_id(reply_id)}")
+    except GraphError as e:
+        _check_teams_access(e)
+
+
+async def _ahydrate_candidate(
+    client: AsyncGraphClient, candidate: dict[str, Any]
+) -> dict[str, Any]:
+    """Full message for a search hit — root messages via the chat route, channel
+    replies via the team replies route once Graph has named the parent (async)."""
+    try:
+        return await aget_message(client, candidate["id"], chat_id=candidate["chat_id"])
+    except GraphError as e:
+        parent = reply_parent_id(e, candidate["id"])
+        if not parent or not candidate["team_id"]:
+            raise
+    return await aget_reply(
+        client, candidate["team_id"], candidate["channel_id"], parent, candidate["id"]
+    )
 
 
 async def aget_hosted_content(
@@ -1115,7 +1187,7 @@ async def asearch_messages(
 
     async def _hydrate(candidate: dict[str, Any]) -> dict[str, Any]:
         async with sem:
-            msg = await aget_message(client, candidate["id"], chat_id=candidate["chat_id"])
+            msg = await _ahydrate_candidate(client, candidate)
         msg["_conversation"] = candidate["conversation"]
         msg["_web_link"] = candidate["web_link"]
         return msg
