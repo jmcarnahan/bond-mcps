@@ -69,6 +69,7 @@ from ms_graph.power_bi import AsyncPowerBIClient
 from ms_graph.teams import (
     FilesScopeMissingError,
     TeamsNotAvailableError,
+    TeamsSearchUnsupportedError,
     extract_message_sender,
     extract_message_text,
 )
@@ -1632,6 +1633,145 @@ async def read_teams_messages(
     result = f"{len(messages)} message(s) in {source} since {since}\n{buf.getvalue()}"
     if should_mark:
         result += "\n---\n*Chat marked as read.*"
+    return result
+
+
+@mcp.tool()
+async def search_teams_messages(
+    query: str,
+    since: str = "",
+    conversation_id: str = "",
+    options: str = "",
+) -> str:
+    """
+    Search Teams messages across every chat and channel by hashtag or keyword.
+
+    Covers 1:1 chats, group chats, and team channels in one search. Use this
+    when you do not know which conversation a message is in; use
+    read_teams_messages when you already have a chat_id or channel_id.
+
+    Hashtags: a '#tag' in the query is matched exactly. Microsoft's index
+    ignores the '#', so a bare search for '#budget2026' would also return
+    messages that merely say 'budget2026'; this tool re-reads each message and
+    keeps only the ones that literally contain '#budget2026'. Several hashtags mean AND —
+    '#budget2026 #q3' returns only messages carrying both.
+
+    Plain keywords ('invoice approved') are passed to Microsoft Search as
+    typed, with stemming, and are NOT re-checked. Keyword-Query-Language terms
+    a user types are passed through too, e.g. 'from:todd' or 'sent>=2026-01-01'.
+
+    Args:
+        query: Hashtags ('#budget2026'), keywords ('invoice approved'), or both.
+        since: ISO date or datetime cutoff, e.g. '2026-01-01' or
+               '2026-01-01T00:00:00Z'. EMPTY MEANS ALL TIME — unlike
+               read_teams_messages, which defaults to the last 7 days.
+        conversation_id: Restrict to one conversation. Accepts a chat id from
+               list_chats or a channel id from list_teams. Empty searches
+               everywhere.
+        options: JSON string with optional fields:
+            {"max_results": 25}  — messages to return (default 25, max 100).
+            {"exact": true}  — force literal hashtag checking on or off.
+                Default: on when the query contains a '#tag', off otherwise.
+                Turning it off returns everything the index matched, stemming
+                and all.
+            {"max_content_length": -1}  — max characters per message body.
+                Default -1 (no limit).
+
+    Returns a header line and a '|'-delimited table with columns:
+    timestamp, sender, conversation, content, attachments, id, link.
+    The conversation column reads 'chat:<chat_id>' or
+    'channel:<team_id>/<channel_id>' — pass those ids to read_teams_messages to
+    read the surrounding thread, or the id column to get_teams_attachment.
+    The link column is the message's Teams deep link.
+
+    Searching is only available on work or school accounts.
+    """
+    import csv
+    import io
+
+    opts, err = parse_options(options)
+    if err:
+        return err
+
+    if not query or not query.strip():
+        return "Provide a search query."
+
+    try:
+        since = teams_ops.normalize_since(since)
+    except ValueError as e:
+        return str(e)
+
+    max_results = opt_int(opts.get("max_results"), teams_ops.SEARCH_DEFAULT_MAX_RESULTS)
+    max_content_length = opt_int(opts.get("max_content_length"), -1)
+    exact_opt = opts.get("exact")
+    exact = None if exact_opt is None else opt_bool(exact_opt, True)
+
+    scope_id = conversation_id.strip()
+    token = get_graph_token()
+    try:
+        async with AsyncGraphClient(token) as client:
+            found = await teams_ops.asearch_messages(
+                client,
+                query,
+                since=since,
+                conversation_id=scope_id,
+                max_results=max_results,
+                exact=exact,
+            )
+    except TeamsSearchUnsupportedError:
+        return (
+            "**Teams message search is not available for this account.**\n"
+            "Microsoft Search covers work and school accounts only. Read a "
+            "specific conversation with read_teams_messages instead."
+        )
+    except TeamsNotAvailableError:
+        return "Microsoft Teams is not available for this account."
+
+    scope = f" in `{scope_id}`" if scope_id else ""
+    window = f" since {since}" if since else " (all time)"
+    messages = found["messages"]
+    if not messages:
+        note = ""
+        hydrated = found["candidates"] - found["skipped"]
+        if found["exact"] and found["hashtags"] and hydrated > 0:
+            note = (
+                f" The index matched {hydrated} message(s) but none carried "
+                'the hashtag literally; retry with {"exact": false} to see them.'
+            )
+        if found["skipped"]:
+            note += (
+                f" {found['skipped']} matching message(s) could not be read "
+                "(deleted, or no longer shared with you) and were skipped."
+            )
+        return f"No messages found matching `{query}`{scope}{window}.{note}"
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(["timestamp", "sender", "conversation", "content", "attachments", "id", "link"])
+    for msg in messages:
+        writer.writerow(
+            [
+                msg.get("createdDateTime", ""),
+                extract_message_sender(msg),
+                msg.get("_conversation", ""),
+                extract_message_text(msg, max_length=max_content_length) or "(empty)",
+                _teams_attachment_column(teams_ops.parse_message_attachments(msg)),
+                msg.get("id", ""),
+                msg.get("_web_link", ""),
+            ]
+        )
+
+    result = f"{len(messages)} message(s) matching `{query}`{scope}{window}\n{buf.getvalue()}"
+    if found["skipped"]:
+        result += (
+            f"\n*{found['skipped']} matching message(s) could not be read "
+            "(deleted, or no longer shared with you) and were skipped.*"
+        )
+    if found["truncated"]:
+        result += (
+            "\n*More results may exist. Narrow the search with since or "
+            "conversation_id, or raise max_results.*"
+        )
     return result
 
 

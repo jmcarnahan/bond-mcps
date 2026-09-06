@@ -431,6 +431,94 @@ SAMPLE_CHAT_MESSAGE_SENT = {
 
 
 # ---------------------------------------------------------------------------
+# Teams message search (POST /search/query, entityTypes=["chatMessage"])
+# ---------------------------------------------------------------------------
+# Shapes verified against the tenant: a CHAT hit has a NON-EMPTY
+# channelIdentity ({"channelId": <the chatId>}) and NO teamId; a CHANNEL hit
+# has teamId and a chatId equal to its channelId. Neither carries a body.
+
+SEARCH_CHAT_ID = "19:chatsearch001@unq.gbl.spaces"
+SEARCH_CHANNEL_ID = "19:channelsearch001@thread.tacv2"
+SEARCH_TEAM_ID = "team-guid-0001"
+
+SAMPLE_SEARCH_CHAT_HIT = {
+    "summary": "budget2026 numbers are in",
+    "resource": {
+        "@odata.type": "#microsoft.graph.chatMessage",
+        "id": "1750000000001",
+        "chatId": SEARCH_CHAT_ID,
+        "channelIdentity": {"channelId": SEARCH_CHAT_ID},
+        "createdDateTime": "2026-03-02T10:00:00Z",
+        "from": {"emailAddress": {"name": "Alice Smith", "address": "alice@example.com"}},
+        "subject": None,
+        "webLink": "https://teams.microsoft.com/l/message/chat/1750000000001",
+    },
+}
+
+SAMPLE_SEARCH_CHANNEL_HIT = {
+    "summary": "budget2026 planning",
+    "resource": {
+        "@odata.type": "#microsoft.graph.chatMessage",
+        "id": "1750000000002",
+        "chatId": SEARCH_CHANNEL_ID,
+        "channelIdentity": {"channelId": SEARCH_CHANNEL_ID, "teamId": SEARCH_TEAM_ID},
+        "createdDateTime": "2026-03-01T09:00:00Z",
+        "from": {"emailAddress": {"name": "Bob Jones", "address": "bob@example.com"}},
+        "subject": "Planning",
+        "webLink": "https://teams.microsoft.com/l/message/channel/1750000000002",
+    },
+}
+
+
+def search_response(hits, more=False):
+    """A /search/query response carrying these hits.
+
+    'total' is per-page for Teams messages and is never read by the code — it
+    is here only because Graph sends it.
+    """
+    return {
+        "value": [
+            {
+                "hitsContainers": [
+                    {
+                        "hits": list(hits),
+                        "total": len(hits),
+                        "moreResultsAvailable": more,
+                    }
+                ],
+                "searchTerms": [],
+            }
+        ]
+    }
+
+
+SAMPLE_SEARCH_MESSAGES_EMPTY = search_response([])
+
+# Hydrated bodies, keyed by message id.
+SAMPLE_HYDRATED_CHAT_MESSAGE = {
+    "id": "1750000000001",
+    "messageType": "message",
+    "createdDateTime": "2026-03-02T10:00:00Z",
+    "from": {"user": {"displayName": "Alice Smith"}, "application": None},
+    "body": {"contentType": "text", "content": "The #budget2026 numbers are in"},
+    "attachments": [],
+}
+
+SAMPLE_HYDRATED_CHANNEL_MESSAGE = {
+    "id": "1750000000002",
+    "messageType": "message",
+    "subject": "Planning",
+    "createdDateTime": "2026-03-01T09:00:00Z",
+    "from": {"user": {"displayName": "Bob Jones"}, "application": None},
+    "body": {
+        "contentType": "html",
+        "content": "<div><p>Kickoff</p><p>#budget2026 #q3</p></div>",
+    },
+    "attachments": [],
+}
+
+
+# ---------------------------------------------------------------------------
 # File write / copy / rename payloads
 # ---------------------------------------------------------------------------
 

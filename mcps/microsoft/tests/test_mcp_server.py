@@ -66,6 +66,8 @@ from .conftest import (
     SAMPLE_EXTERNAL_MESSAGE_DETAIL,
     SAMPLE_FILE_ATTACHMENT,
     SAMPLE_FORWARDING_RULE,
+    SAMPLE_HYDRATED_CHANNEL_MESSAGE,
+    SAMPLE_HYDRATED_CHAT_MESSAGE,
     SAMPLE_INLINE_ATTACHMENT,
     SAMPLE_INVITE_RESPONSE,
     SAMPLE_ITEM_ATTACHMENT,
@@ -92,6 +94,9 @@ from .conftest import (
     SAMPLE_PBI_WORKSPACES_RESPONSE,
     SAMPLE_REFERENCE_ATTACHMENT,
     SAMPLE_REPLY_DRAFT,
+    SAMPLE_SEARCH_CHANNEL_HIT,
+    SAMPLE_SEARCH_CHAT_HIT,
+    SAMPLE_SEARCH_MESSAGES_EMPTY,
     SAMPLE_SEARCH_RESPONSE,
     SAMPLE_SEARCH_RESPONSE_EMPTY,
     SAMPLE_SENDER_ONLY_EXTERNAL,
@@ -106,6 +111,9 @@ from .conftest import (
     SAMPLE_UPLOADED_FILE,
     SAMPLE_USER_PROFILE,
     SAMPLE_USERS_SEARCH_RESPONSE,
+    SEARCH_CHANNEL_ID,
+    SEARCH_CHAT_ID,
+    SEARCH_TEAM_ID,
     TEAMS_FILE_ATTACHMENT_ID,
     TEAMS_FILE_URL,
     TEAMS_HOSTED_ID,
@@ -113,7 +121,65 @@ from .conftest import (
     TEAMS_PPTX_MIME,
     TEAMS_UPLOAD_GUID,
     TEAMS_WEBDAV_URL,
+    search_response,
 )
+
+# Teams message search. The index answers POST /search/query; every hit is then
+# hydrated through GET /chats/{chatId}/messages/{id}, whose ids percent-encode.
+TEAMS_SEARCH_URL = f"{GRAPH_BASE_URL}/search/query"
+SEARCH_CHAT_HYDRATE = f"{GRAPH_BASE_URL}/chats/{quote(SEARCH_CHAT_ID, safe='')}/messages"
+SEARCH_CHANNEL_HYDRATE = f"{GRAPH_BASE_URL}/chats/{quote(SEARCH_CHANNEL_ID, safe='')}/messages"
+SEARCH_NOT_SUPPORTED_400 = {
+    "error": {"code": "BadRequest", "message": "This API is not supported for MSA accounts"}
+}
+
+
+def _search_hit(msg_id, created="2026-03-02T10:00:00Z", chat_id=SEARCH_CHAT_ID):
+    """A chat search hit for one message id."""
+    return {
+        "summary": "budget2026",
+        "resource": {
+            "id": msg_id,
+            "chatId": chat_id,
+            "channelIdentity": {"channelId": chat_id},
+            "createdDateTime": created,
+            "webLink": f"https://teams.microsoft.com/l/message/chat/{msg_id}",
+        },
+    }
+
+
+def _search_msg(msg_id, content="The #budget2026 numbers are in"):
+    """A hydrated chat message for one search hit."""
+    return {
+        "id": msg_id,
+        "messageType": "message",
+        "createdDateTime": "2026-03-02T10:00:00Z",
+        "from": {"user": {"displayName": "Alice Smith"}, "application": None},
+        "body": {"contentType": "text", "content": content},
+        "attachments": [],
+    }
+
+
+def _mock_search_hydration(bodies):
+    """Serve GET /chats/*/messages/<id> from a {message id: body} map; 404 otherwise."""
+
+    def _handler(request):
+        msg_id = str(request.url).rsplit("/", 1)[-1]
+        body = bodies.get(msg_id)
+        if body is None:
+            return httpx.Response(404, json=GRAPH_ERROR_404)
+        return httpx.Response(200, json=body)
+
+    return respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(side_effect=_handler)
+
+
+def _recorded_query_string() -> str:
+    """The queryString of the first /search/query request respx saw."""
+    for call in respx.calls:
+        if call.request.url.path.endswith("/search/query"):
+            return json.loads(call.request.content)["requests"][0]["query"]["queryString"]
+    raise AssertionError("no /search/query request was made")
+
 
 MONITOR_URL = "https://api.onedrive.com/v1.0/monitor/copy-op-token"
 CONNECT_URL = "https://auth.example.com/connect/microsoft?ticket=t"
@@ -1732,6 +1798,330 @@ class TestMCPTeamsTools:
         assert "x" * 100 in full_text
         assert "..." in truncated_text
         assert "x" * 100 not in truncated_text
+
+    @respx.mock
+    async def test_search_teams_messages_chat_hit(self, mcp_server):
+        """A chat hit renders the 7-column table with a chat: conversation label."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHAT_HIT]))
+        )
+        respx.get(f"{SEARCH_CHAT_HYDRATE}/1750000000001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_HYDRATED_CHAT_MESSAGE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert "1 message(s) matching" in text
+        assert "timestamp|sender|conversation|content|attachments|id|link" in text
+        assert f"chat:{SEARCH_CHAT_ID}" in text
+        assert "https://teams.microsoft.com/l/message/chat/1750000000001" in text
+
+    @respx.mock
+    async def test_search_teams_messages_channel_hit(self, mcp_server):
+        """A channel hit labels the conversation channel:<team>/<channel>."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHANNEL_HIT]))
+        )
+        respx.get(f"{SEARCH_CHANNEL_HYDRATE}/1750000000002").mock(
+            return_value=httpx.Response(200, json=SAMPLE_HYDRATED_CHANNEL_MESSAGE)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}" in text
+
+    @respx.mock
+    async def test_search_teams_messages_all_time_by_default(self, mcp_server):
+        """No since means all time — and no sent>= clause reaches the index."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_search_hit("m1")]))
+        )
+        _mock_search_hydration({"m1": _search_msg("m1")})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert "(all time)" in text
+        assert "sent>=" not in _recorded_query_string()
+
+    @respx.mock
+    async def test_search_teams_messages_since_is_normalized(self, mcp_server):
+        """A bare date becomes midnight Zulu and a day-granular KQL clause."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_search_hit("m1")]))
+        )
+        _mock_search_hydration({"m1": _search_msg("m1")})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "search_teams_messages",
+                    {"query": "#budget2026", "since": "2026-01-01"},
+                )
+
+        text = _get_text(result)
+        assert "since 2026-01-01T00:00:00Z" in text
+        assert _recorded_query_string().endswith("sent>=2026-01-01")
+
+    @respx.mock
+    async def test_search_teams_messages_invalid_since(self, mcp_server):
+        """A malformed cutoff is reported without touching Graph."""
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "search_teams_messages",
+                    {"query": "#budget2026", "since": "last tuesday"},
+                )
+
+        assert "Invalid since format" in _get_text(result)
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_search_teams_messages_empty_query(self, mcp_server):
+        """A blank query is a caller error, not a search for everything."""
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "   "})
+
+        assert "Provide a search query." in _get_text(result)
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_search_teams_messages_invalid_options(self, mcp_server):
+        """Options JSON is validated before any request."""
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "search_teams_messages",
+                    {"query": "#budget2026", "options": "not json"},
+                )
+
+        assert "must be valid JSON" in _get_text(result)
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_search_teams_messages_conversation_scope(self, mcp_server):
+        """conversation_id filters hits client-side; the index cannot scope."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=search_response([SAMPLE_SEARCH_CHAT_HIT, SAMPLE_SEARCH_CHANNEL_HIT]),
+            )
+        )
+        _mock_search_hydration(
+            {
+                "1750000000001": SAMPLE_HYDRATED_CHAT_MESSAGE,
+                "1750000000002": SAMPLE_HYDRATED_CHANNEL_MESSAGE,
+            }
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "search_teams_messages",
+                    {"query": "#budget2026", "conversation_id": SEARCH_CHAT_ID},
+                )
+
+        text = _get_text(result)
+        assert "1 message(s) matching" in text
+        assert f"in `{SEARCH_CHAT_ID}`" in text
+        assert len([m for m, _ in _graph_trail() if m == "GET"]) == 1
+
+    @respx.mock
+    async def test_search_teams_messages_exact_drops_stemmed_hit(self, mcp_server):
+        """The index stems; the tool re-checks and says so when nothing survives."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_search_hit("m1")]))
+        )
+        _mock_search_hydration({"m1": _search_msg("m1", content="budget20260 update")})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert "No messages found matching" in text
+        assert "The index matched 1 message(s)" in text
+        assert '{"exact": false}' in text
+
+    @respx.mock
+    async def test_search_teams_messages_exact_false_keeps_it(self, mcp_server):
+        """exact:false returns everything the index matched."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_search_hit("m1")]))
+        )
+        _mock_search_hydration({"m1": _search_msg("m1", content="budget20260 update")})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "search_teams_messages",
+                    {"query": "#budget2026", "options": '{"exact": false}'},
+                )
+
+        assert "1 message(s) matching" in _get_text(result)
+
+    @respx.mock
+    async def test_search_teams_messages_max_content_length(self, mcp_server):
+        """max_content_length truncates the content column."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_search_hit("m1")]))
+        )
+        _mock_search_hydration({"m1": _search_msg("m1", content="#budget2026 " + "x" * 500)})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "search_teams_messages",
+                    {"query": "#budget2026", "options": '{"max_content_length": 20}'},
+                )
+
+        text = _get_text(result)
+        assert "..." in text
+        assert "x" * 100 not in text
+
+    @respx.mock
+    async def test_search_teams_messages_max_results(self, mcp_server):
+        """max_results trims the table and prints the truncation note."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=search_response([_search_hit("m1"), _search_hit("m2"), _search_hit("m3")]),
+            )
+        )
+        _mock_search_hydration(
+            {"m1": _search_msg("m1"), "m2": _search_msg("m2"), "m3": _search_msg("m3")}
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool(
+                    "search_teams_messages",
+                    {"query": "#budget2026", "options": '{"max_results": 1}'},
+                )
+
+        text = _get_text(result)
+        assert "1 message(s) matching" in text
+        assert "More results may exist" in text
+
+    @respx.mock
+    async def test_search_teams_messages_attachments_column(self, mcp_server):
+        """Shared files reach the attachments column as name [file:<id>]."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_search_hit("chat-msg-file-001")])
+            )
+        )
+        _mock_search_hydration({"chat-msg-file-001": SAMPLE_CHAT_MESSAGE_WITH_FILE})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "notes"})
+
+        assert "[file:" in _get_text(result)
+
+    @respx.mock
+    async def test_search_teams_messages_skipped_note(self, mcp_server):
+        """A message that can no longer be read is counted, not fatal."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_search_hit("m1"), _search_hit("gone")])
+            )
+        )
+        _mock_search_hydration({"m1": _search_msg("m1")})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert "1 message(s) matching" in text
+        assert "could not be read" in text
+
+    @respx.mock
+    async def test_search_teams_messages_only_hit_deleted(self, mcp_server):
+        """A lone unreadable hit is reported as skipped, not as a tool error."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_search_hit("gone")]))
+        )
+        _mock_search_hydration({})
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert "No messages found matching" in text
+        assert "1 matching message(s) could not be read" in text
+        assert "The index matched" not in text
+
+    @respx.mock
+    async def test_search_teams_messages_no_results(self, mcp_server):
+        """An empty index answer reads as no results, with no hydration."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SEARCH_MESSAGES_EMPTY)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        text = _get_text(result)
+        assert "No messages found matching" in text
+        assert "The index matched" not in text
+
+    @respx.mock
+    async def test_search_teams_messages_teams_unavailable(self, mcp_server):
+        """A 403 on the index is the no-Teams-licence message."""
+        respx.post(TEAMS_SEARCH_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        assert "Microsoft Teams is not available for this account." in _get_text(result)
+
+    @respx.mock
+    async def test_search_teams_messages_consumer_account(self, mcp_server):
+        """A consumer account gets the work/school explanation, not a stack trace."""
+        respx.post(TEAMS_SEARCH_URL).mock(
+            return_value=httpx.Response(400, json=SEARCH_NOT_SUPPORTED_400)
+        )
+        with _mock_token():
+            from fastmcp import Client
+
+            async with Client(mcp_server) as client:
+                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+
+        assert "work and school accounts" in _get_text(result)
 
     @respx.mock
     async def test_read_email_max_content_length(self, mcp_server):
@@ -4027,6 +4417,7 @@ class TestMCPAuth:
             ("list_teams", {}),
             ("list_chats", {}),
             ("read_teams_messages", {"chat_id": "c1"}),
+            ("search_teams_messages", {"query": "#budget2026"}),
             ("send_teams_message", {"message": "Hi", "chat_id": "c1"}),
             ("get_teams_activity", {}),
             ("list_sharepoint_sites", {}),
