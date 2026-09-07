@@ -165,6 +165,8 @@ The CLI is organized into subcategories: `whoami`, `powerbi-whoami`, `email`, `r
 ```bash
 # Profile
 poetry run ms-graph-cli whoami
+poetry run ms-graph-cli whoami --user ada@example.com
+poetry run ms-graph-cli whoami --user ada@example.com --photo ada.jpg --photo-size 96x96
 
 # Email
 poetry run ms-graph-cli email list                                      # Recent inbox

@@ -11,7 +11,7 @@ Usage:
     export MS_CLIENT_ID=<your-azure-app-client-id>
 
     # Profile
-    ms-graph-cli whoami
+    ms-graph-cli whoami [--user UPN] [--photo out.jpg [--photo-size 96x96]]
 
     # Email
     ms-graph-cli email list [--folder inbox] [--top 10]
@@ -75,10 +75,11 @@ from auth import log_discipline  # noqa: E402
 log_discipline.apply()
 
 from ms_graph import attachments as attachment_ops
-from ms_graph import calendar, files, mail, mail_policy, teams
+from ms_graph import calendar, files, mail, mail_policy, people, photos, teams
 from ms_graph import power_bi as pbi_ops
-from ms_graph.graph_client import GraphClient
+from ms_graph.graph_client import GraphClient, GraphError
 from ms_graph.local_auth import get_local_powerbi_token, get_local_token
+from ms_graph.people import DirectoryScopeMissingError
 from ms_graph.power_bi import PowerBIClient
 
 # ---------------------------------------------------------------------------
@@ -120,10 +121,49 @@ def _fmt_drive_item(item: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+_PROFILE_SCOPE_MISSING_TEXT = (
+    "Could not retrieve the profile: this connection lacks the User.ReadBasic.All permission."
+)
+
+
 def cmd_whoami(args: argparse.Namespace) -> None:
+    user = (getattr(args, "user", "") or "").strip()
+    photo_path = getattr(args, "photo", "") or ""
+    photo_size = getattr(args, "photo_size", "") or ""
+    # Validated before the token is fetched: a bad size never reaches Graph.
+    if photo_size and not photo_path:
+        print("--photo-size only applies with --photo")
+        sys.exit(1)
+    try:
+        size = photos.check_photo_size(photo_size)
+    except ValueError as e:
+        print(str(e))
+        sys.exit(1)
+
     token = get_local_token()
-    with GraphClient(token) as client:
-        profile = mail.get_profile(client)
+    found = None
+    # Every Graph read happens before the first print: a missing directory
+    # scope must produce one line and nothing else, not a half-printed profile.
+    try:
+        with GraphClient(token) as client:
+            if user:
+                try:
+                    profile = people.get_user(client, user)
+                except GraphError as e:
+                    if e.status_code == 404:
+                        print(f"User not found: {user}")
+                        sys.exit(1)
+                    if e.status_code == 400:
+                        print(f"Invalid user: {user!r} (expected a directory user id or UPN)")
+                        sys.exit(1)
+                    raise
+            else:
+                profile = mail.get_profile(client)
+            if photo_path:
+                found = photos.get_photo_bytes(client, user, size)
+    except DirectoryScopeMissingError:
+        print(_PROFILE_SCOPE_MISSING_TEXT)
+        sys.exit(1)
 
     print(f"Display Name:       {profile.get('displayName', '?')}")
     print(f"Mail:               {profile.get('mail', '(not set)')}")
@@ -133,6 +173,14 @@ def cmd_whoami(args: argparse.Namespace) -> None:
     if profile.get("jobTitle"):
         print(f"Job Title:          {profile['jobTitle']}")
     print(f"ID:                 {profile.get('id', '?')}")
+
+    if photo_path:
+        if found is None:
+            print("No profile photo set.")
+            sys.exit(1)
+        data, ctype = found
+        Path(photo_path).write_bytes(data)
+        print(f"Saved {len(data)} bytes to {photo_path} ({ctype or 'unknown type'}, {size})")
 
 
 def cmd_powerbi_whoami(args: argparse.Namespace) -> None:
@@ -1210,6 +1258,18 @@ def main() -> None:
 
     # whoami
     p = sub.add_parser("whoami", help="Show authenticated user profile")
+    p.add_argument(
+        "--user", default="", help="Directory user id or UPN (default: the signed-in user)"
+    )
+    p.add_argument("--photo", default="", metavar="PATH", help="Save the profile photo to PATH")
+    p.add_argument(
+        "--photo-size",
+        default="",
+        help=(
+            "One of 48x48, 64x64, 96x96, 120x120, 240x240, 360x360, 432x432, 504x504, "
+            "648x648 or 'original' (default 240x240); only with --photo"
+        ),
+    )
     p.set_defaults(func=cmd_whoami)
 
     # powerbi-whoami
