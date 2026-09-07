@@ -16,8 +16,15 @@ import respx
 from fastmcp import Client
 from ms_graph import mail_policy
 from ms_graph.graph_client import GRAPH_BASE_URL
+from ms_graph.power_bi import POWERBI_BASE_URL
 
-from .conftest import SAMPLE_EXTERNAL_MESSAGE, SAMPLE_MESSAGE, SAMPLE_MESSAGES_RESPONSE
+from .conftest import (
+    SAMPLE_DRIVE_ITEM_FILE,
+    SAMPLE_DRIVE_ITEM_FOLDER,
+    SAMPLE_EXTERNAL_MESSAGE,
+    SAMPLE_MESSAGE,
+    SAMPLE_MESSAGES_RESPONSE,
+)
 
 CONNECT_URL = "https://auth.example.com/connect/microsoft?ticket=t"
 INBOX_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages"
@@ -25,6 +32,10 @@ INBOX_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages"
 
 def _mock_token(token: str = "test-ms-token"):
     return patch("ms_graph_mcp.get_graph_token", return_value=token)
+
+
+def _mock_pbi_token(token: str = "test-pbi-token"):
+    return patch("ms_graph_mcp.get_powerbi_token", return_value=token)
 
 
 @contextmanager
@@ -99,10 +110,10 @@ class TestCompactPath:
     async def test_str_tool_is_left_alone(self, mcp_server):
         """Markdown tools advertise a generated output schema and must keep
         their structured content, or the client rejects the result."""
-        result = await _call(mcp_server, "manage_file", {"item_id": "x", "action": "bogus"})
+        result = await _call(mcp_server, "read_teams_messages", {})
 
         assert result.structured_content == {"result": _get_text(result)}
-        assert _get_text(result).startswith("Invalid action 'bogus'")
+        assert _get_text(result) == "Provide either chat_id, or both team_id and channel_id."
 
     @respx.mock
     async def test_list_emails_renders_as_pipe_csv(self, mcp_server):
@@ -122,6 +133,61 @@ class TestCompactPath:
         )
         # Zero survives as a real answer; the empty query and notice drop out.
         assert lines[3:] == ["count: 2", "folder: inbox", "marked_read: 0"]
+
+    @respx.mock
+    async def test_list_files_renders_ragged_rows_under_one_header(self, mcp_server):
+        """A folder carries child_count and a file does not; the header is the
+        union of both, and the file's missing cell renders empty."""
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/root:/Documents:/children").mock(
+            return_value=httpx.Response(
+                200, json={"value": [SAMPLE_DRIVE_ITEM_FOLDER, SAMPLE_DRIVE_ITEM_FILE]}
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_files", {"folder_path": "Documents"})
+
+        assert result.structured_content is None
+        assert _get_text(result) == (
+            "name|type|size|child_count|id\n"
+            "Documents|folder|0|5|folder-id-001\n"
+            "report.csv|file|1024||file-id-001\n"
+            "count: 2\n"
+            "folder_path: Documents"
+        )
+
+    @respx.mock
+    async def test_query_dataset_renders_sparse_dax_rows(self, mcp_server):
+        """Power BI omits a null column from a row entirely. The header unions
+        the keys in first-seen order and the omissions render as empty cells."""
+        url = f"{POWERBI_BASE_URL}/groups/ws-1/datasets/ds-1/executeQueries"
+        respx.post(url).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "tables": [
+                                {
+                                    "rows": [
+                                        {"[Region]": "West", "[Units]": 4200},
+                                        {"[Region]": "East", "[Margin]": 0.12},
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                },
+            )
+        )
+        with _mock_pbi_token():
+            result = await _call(
+                mcp_server,
+                "query_dataset",
+                {"workspace_id": "ws-1", "dataset_id": "ds-1", "dax_query": "EVALUATE 'Sales'"},
+            )
+
+        assert result.structured_content is None
+        assert _get_text(result) == ("[Region]|[Units]|[Margin]\nWest|4200|\nEast||0.12\ncount: 2")
 
     @respx.mock
     async def test_list_emails_notice_line_is_verbatim_under_the_policy(
@@ -160,10 +226,10 @@ class TestDesktopPath:
         }
 
     async def test_str_tool_is_identical_under_both_paths(self, mcp_server):
-        args = {"item_id": "x", "action": "bogus"}
-        compact = await _call(mcp_server, "manage_file", args)
+        args: dict = {}
+        compact = await _call(mcp_server, "read_teams_messages", args)
         with _desktop_headers():
-            desktop = await _call(mcp_server, "manage_file", args)
+            desktop = await _call(mcp_server, "read_teams_messages", args)
 
         assert _get_text(compact) == _get_text(desktop)
         assert desktop.structured_content == compact.structured_content
@@ -206,4 +272,15 @@ class TestOutputSchemas:
             "send_chat_message_json",
             "inspect_file",
             "connection_status",
+            "list_teams",
+            "search_teams_messages",
+            "get_teams_activity",
+            "list_sharepoint_sites",
+            "list_files",
+            "edit_document",
+            "manage_file",
+            "list_powerbi",
+            "query_dataset",
+            "refresh_dataset",
+            "export_report",
         }

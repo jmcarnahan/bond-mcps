@@ -13,23 +13,23 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (47 tools):
+Tool summary (45 tools):
   Email     : get_profile, list_emails, sync_mail, read_email*, get_email_attachment*,
               send_email, mark_mail_read, manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
-  Teams     : list_teams*, list_chats*, read_teams_messages*, search_teams_messages*,
-              get_teams_attachment*, send_teams_message*, get_teams_activity*,
+  Teams     : list_teams, list_chats*, read_teams_messages*, search_teams_messages,
+              get_teams_attachment*, send_teams_message*, get_teams_activity,
               get_chat_members, ensure_chat, mark_chat_read
-  Files     : list_sharepoint_sites*, list_files*, inspect_file, upload_file*, edit_document*, manage_file*
-  Power BI  : list_powerbi_workspaces*, list_powerbi_content*, query_dataset*, refresh_dataset*, export_report*
+  Files     : list_sharepoint_sites, list_files, inspect_file, edit_document, manage_file
+  Power BI  : list_powerbi, query_dataset, refresh_dataset, export_report
   Directory : search_people
   Desktop JSON : get_mail_detail, get_mail_attachment_json, create_reply_draft_json,
                  create_draft_json, update_draft_body, add_draft_attachment_json, send_draft,
                  list_chats_page, list_chat_messages_page, get_chat_attachment_json,
                  send_chat_message_json, connection_status
 
-The 19 tools marked ``*`` return a prose/CSV string an LLM reads directly; the
-other 28 return a ``dict`` and declare ``output_schema=None``, which opts them into the
+The 6 tools marked ``*`` return a prose/CSV string an LLM reads directly; the
+other 39 return a ``dict`` and declare ``output_schema=None``, which opts them into the
 FormatNegotiation middleware: a caller sending ``X-Bond-Client: desktop`` (the
 desktop mail app) gets the dict as structuredContent, while every other caller
 gets a compact text rendering of the same dict. Parameters stay ``str``/``int``
@@ -43,6 +43,7 @@ callable, but hidden from tools/list by HideDeprecatedAliases.
 import base64
 import binascii
 import html as html_mod
+import json
 import logging
 import mimetypes
 import os
@@ -1365,8 +1366,8 @@ async def check_availability(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def list_teams(team_id: str = "") -> str:
+@mcp.tool(output_schema=None)
+async def list_teams(team_id: str = "") -> dict:
     """
     List joined Microsoft Teams, or list channels within a specific team.
 
@@ -1376,28 +1377,40 @@ async def list_teams(team_id: str = "") -> str:
     Args:
         team_id: Team ID to list channels for (from a previous call with no team_id).
                  Leave empty to list all joined teams.
+
+    Returns:
+        Without team_id: teams (a row per team: name, id) and count.
+        With team_id: channels (a row per channel: name, id), count, and
+        team_id.
+
+        You see this as pipe-CSV — a `name|id` header line, one line per team or
+        channel — followed by `count:` and, in channel mode, `team_id:`. Nothing
+        joined renders as `teams: (none)`; a team with no channels renders as
+        `channels: (none)`.
     """
-    token = get_graph_token()
     try:
+        token = get_graph_token()
         async with AsyncGraphClient(token) as client:
             if team_id:
                 channels = await teams_ops.alist_channels(client, team_id)
-                if not channels:
-                    return "No channels found."
-                lines = [f"Found {len(channels)} channel(s) in team `{team_id}`:\n"]
-                for ch in channels:
-                    lines.append(f"- **{ch.get('displayName', '?')}** (ID: `{ch.get('id', '?')}`)")
-                return "\n".join(lines)
-            else:
-                team_list = await teams_ops.alist_joined_teams(client)
-                if not team_list:
-                    return "No teams found."
-                lines = [f"Joined {len(team_list)} team(s):\n"]
-                for t in team_list:
-                    lines.append(f"- **{t.get('displayName', '?')}** (ID: `{t.get('id', '?')}`)")
-                return "\n".join(lines)
+                rows = [
+                    {"name": ch.get("displayName", ""), "id": ch.get("id", "")} for ch in channels
+                ]
+                return {"channels": rows, "count": len(rows), "team_id": team_id}
+
+            team_list = await teams_ops.alist_joined_teams(client)
+            rows = [{"name": t.get("displayName", ""), "id": t.get("id", "")} for t in team_list]
+            return {"teams": rows, "count": len(rows)}
+    except PermissionError as e:
+        return _not_connected(e)
     except TeamsNotAvailableError:
-        return "Microsoft Teams is not available for this account. A Microsoft 365 license is required."
+        return {
+            "error": "teams_not_available",
+            "reason": (
+                "Microsoft Teams is not available for this account. "
+                "A Microsoft 365 license is required."
+            ),
+        }
 
 
 def _is_chat_unread(chat: dict) -> bool:
@@ -1691,13 +1704,13 @@ async def read_teams_messages(
     return result
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def search_teams_messages(
     query: str,
     since: str = "",
     conversation_id: str = "",
     options: str = "",
-) -> str:
+) -> dict:
     """
     Search Teams messages across every chat and channel by hashtag or keyword.
 
@@ -1732,29 +1745,34 @@ async def search_teams_messages(
             {"max_content_length": -1}  — max characters per message body.
                 Default -1 (no limit).
 
-    Returns a header line and a '|'-delimited table with columns:
-    timestamp, sender, conversation, content, attachments, id, link.
-    The conversation column reads 'chat:<chat_id>' or
-    'channel:<team_id>/<channel_id>' — pass those ids to read_teams_messages to
-    read the surrounding thread, or the id column to get_teams_attachment.
-    The link column is the message's Teams deep link.
+    Returns:
+        messages (a row per hit: timestamp, sender, conversation, content,
+        attachments, id, link), count, query, since, conversation_id, skipped,
+        and notice. The conversation column reads 'chat:<chat_id>' or
+        'channel:<team_id>/<channel_id>' — pass those ids to read_teams_messages
+        to read the surrounding thread, or the id column to
+        get_teams_attachment. The link column is the message's Teams deep link.
+        skipped counts hits that could no longer be read.
+
+        You see this as pipe-CSV of those seven columns followed by `count:`,
+        `query:`, `since:`, `conversation_id:`, `skipped:` and `notice:` lines
+        (empty ones are dropped). No hits renders as `messages: (none)`. The
+        notice carries the hashtag-was-stemmed hint, the skipped-messages
+        sentence, and the more-results-may-exist hint when they apply.
 
     Searching is only available on work or school accounts.
     """
-    import csv
-    import io
-
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     if not query or not query.strip():
-        return "Provide a search query."
+        return {"error": "invalid_arguments", "reason": "Provide a search query."}
 
     try:
         since = teams_ops.normalize_since(since)
     except ValueError as e:
-        return str(e)
+        return {"error": "invalid_date", "reason": str(e)}
 
     max_results = opt_int(opts.get("max_results"), teams_ops.SEARCH_DEFAULT_MAX_RESULTS)
     max_content_length = opt_int(opts.get("max_content_length"), -1)
@@ -1762,8 +1780,8 @@ async def search_teams_messages(
     exact = None if exact_opt is None else opt_bool(exact_opt, True)
 
     scope_id = conversation_id.strip()
-    token = get_graph_token()
     try:
+        token = get_graph_token()
         async with AsyncGraphClient(token) as client:
             found = await teams_ops.asearch_messages(
                 client,
@@ -1773,61 +1791,67 @@ async def search_teams_messages(
                 max_results=max_results,
                 exact=exact,
             )
+    except PermissionError as e:
+        return _not_connected(e)
     except TeamsSearchUnsupportedError:
-        return (
-            "**Teams message search is not available for this account.**\n"
-            "Microsoft Search covers work and school accounts only. Read a "
-            "specific conversation with read_teams_messages instead."
-        )
+        return {
+            "error": "search_unsupported",
+            "reason": (
+                "Teams message search is not available for this account. Microsoft "
+                "Search covers work and school accounts only. Read a specific "
+                "conversation with read_teams_messages instead."
+            ),
+        }
     except TeamsNotAvailableError:
-        return "Microsoft Teams is not available for this account."
+        return {
+            "error": "teams_not_available",
+            "reason": "Microsoft Teams is not available for this account.",
+        }
 
-    scope = f" in `{scope_id}`" if scope_id else ""
-    window = f" since {since}" if since else " (all time)"
     messages = found["messages"]
-    if not messages:
-        note = ""
-        hydrated = found["candidates"] - found["skipped"]
-        if found["exact"] and found["hashtags"] and hydrated > 0:
-            note = (
-                f" The index matched {hydrated} message(s) but none carried "
-                'the hashtag literally; retry with {"exact": false} to see them.'
-            )
-        if found["skipped"]:
-            note += (
-                f" {found['skipped']} matching message(s) could not be read "
-                "(deleted, or no longer shared with you) and were skipped."
-            )
-        return f"No messages found matching `{query}`{scope}{window}.{note}"
-
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(["timestamp", "sender", "conversation", "content", "attachments", "id", "link"])
-    for msg in messages:
-        writer.writerow(
-            [
-                msg.get("createdDateTime", ""),
-                extract_message_sender(msg),
-                msg.get("_conversation", ""),
-                extract_message_text(msg, max_length=max_content_length) or "(empty)",
-                _teams_attachment_column(teams_ops.parse_message_attachments(msg)),
-                msg.get("id", ""),
-                msg.get("_web_link", ""),
-            ]
+    notes: list[str] = []
+    # The index stems, so a hashtag query can match messages that never carried
+    # the tag literally. Reporting how many were dropped is what makes the
+    # exact:false retry an informed choice rather than a guess.
+    hydrated = found["candidates"] - found["skipped"]
+    if not messages and found["exact"] and found["hashtags"] and hydrated > 0:
+        notes.append(
+            f"The index matched {hydrated} message(s) but none carried the "
+            'hashtag literally; retry with {"exact": false} to see them.'
         )
-
-    result = f"{len(messages)} message(s) matching `{query}`{scope}{window}\n{buf.getvalue()}"
     if found["skipped"]:
-        result += (
-            f"\n*{found['skipped']} matching message(s) could not be read "
-            "(deleted, or no longer shared with you) and were skipped.*"
+        notes.append(
+            f"{found['skipped']} matching message(s) could not be read "
+            "(deleted, or no longer shared with you) and were skipped."
         )
     if found["truncated"]:
-        result += (
-            "\n*More results may exist. Narrow the search with since or "
-            "conversation_id, or raise max_results.*"
+        notes.append(
+            "More results may exist. Narrow the search with since or "
+            "conversation_id, or raise max_results."
         )
-    return result
+
+    rows = [
+        {
+            "timestamp": msg.get("createdDateTime", ""),
+            "sender": extract_message_sender(msg),
+            "conversation": msg.get("_conversation", ""),
+            "content": extract_message_text(msg, max_length=max_content_length) or "(empty)",
+            "attachments": _teams_attachment_column(teams_ops.parse_message_attachments(msg)),
+            "id": msg.get("id", ""),
+            "link": msg.get("_web_link", ""),
+        }
+        for msg in messages
+    ]
+
+    return {
+        "messages": rows,
+        "count": len(rows),
+        "query": query,
+        "since": since,
+        "conversation_id": scope_id,
+        "skipped": found["skipped"],
+        "notice": " ".join(notes),
+    }
 
 
 @mcp.tool()
@@ -2210,49 +2234,44 @@ async def send_teams_message(
         )
 
 
-@mcp.tool()
-async def get_teams_activity(hours: int = 24) -> str:
+@mcp.tool(output_schema=None)
+async def get_teams_activity(hours: int = 24) -> dict:
     """
-    Get recent Teams activity across all channels and chats as a CSV digest.
+    Get recent Teams activity across all channels and chats as a digest.
 
     Scans joined teams' channels and recent chats for messages within the
     specified time window. Ideal for catching up on what you missed.
 
     Args:
         hours: Look back this many hours (default: 24).
-    """
-    import csv
-    import io
 
-    token = get_graph_token()
+    Returns:
+        activity (a row per message: source, source_name, sender, timestamp,
+        preview), count, sources (how many distinct chats and channels the rows
+        came from), and hours.
+
+        You see this as pipe-CSV of those five columns followed by `count:`,
+        `sources:` and `hours:` lines. A quiet window renders as
+        `activity: (none)`.
+    """
     try:
+        token = get_graph_token()
         async with AsyncGraphClient(token) as client:
             activity = await teams_ops.aget_teams_activity(client, hours=hours)
+    except PermissionError as e:
+        return _not_connected(e)
     except TeamsNotAvailableError:
-        return "Microsoft Teams is not available for this account."
+        return {
+            "error": "teams_not_available",
+            "reason": "Microsoft Teams is not available for this account.",
+        }
 
-    if not activity:
-        return f"No Teams activity in the last {hours} hours."
-
-    sources = {row["source_name"] for row in activity}
-    output = io.StringIO()
-    output.write(
-        f"Activity in the last {hours} hours: "
-        f"{len(activity)} messages across {len(sources)} sources\n\n"
-    )
-    writer = csv.writer(output)
-    writer.writerow(["source", "source_name", "sender", "timestamp", "preview"])
-    for row in activity:
-        writer.writerow(
-            [
-                row["source"],
-                row["source_name"],
-                row["sender"],
-                row["timestamp"],
-                row["preview"],
-            ]
-        )
-    return output.getvalue()
+    return {
+        "activity": activity,
+        "count": len(activity),
+        "sources": len({row["source_name"] for row in activity}),
+        "hours": hours,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2271,52 +2290,68 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
 
-def _format_drive_item(item: dict) -> str:
-    """Format a driveItem as a single markdown line."""
-    name = item.get("name", "?")
-    item_id = item.get("id", "?")
+def _drive_item_row(item: dict) -> dict:
+    """One list_files row: the same shape for a folder and a file.
+
+    A folder carries child_count and no mime type; a file carries neither. The
+    renderer unions the keys it sees, so the ragged pair reads as one table.
+    """
     if "folder" in item:
-        child_count = item["folder"].get("childCount", "?")
-        return f"- **{name}/** ({child_count} items) — ID: `{item_id}`"
-    mime = item.get("file", {}).get("mimeType", "")
-    size = _format_size(item.get("size", 0))
-    return f"- **{name}** ({mime}, {size}) — ID: `{item_id}`"
+        return {
+            "name": item.get("name", ""),
+            "type": "folder",
+            "size": item.get("size", 0),
+            "child_count": item["folder"].get("childCount", 0),
+            "id": item.get("id", ""),
+        }
+    return {
+        "name": item.get("name", ""),
+        "type": "file",
+        "size": item.get("size", 0),
+        "id": item.get("id", ""),
+    }
 
 
-@mcp.tool()
-async def list_sharepoint_sites(query: str = "", top: int = 10) -> str:
+@mcp.tool(output_schema=None)
+async def list_sharepoint_sites(query: str = "", top: int = 10) -> dict:
     """
     Search for SharePoint sites, or list followed sites.
 
     Args:
         query: Search query to find sites (e.g., "engineering"). Leave empty to list followed sites.
         top: Maximum number of results (default: 10).
+
+    Returns:
+        sites (a row per site: name, id, web_url), count, and the query as
+        passed. Pass a row's id as site_id to list_files, inspect_file, or
+        manage_file.
+
+        You see this as pipe-CSV — a `name|id|web_url` header line, one line per
+        site — followed by `count:` and `query:` lines (an empty query drops
+        out). No matches renders as `sites: (none)`.
     """
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        sites = await files_ops.alist_sites(client, query=query, top=top)
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            sites = await files_ops.alist_sites(client, query=query, top=top)
+    except PermissionError as e:
+        return _not_connected(e)
 
-    if not sites:
-        if query:
-            return f'No SharePoint sites found matching "{query}".'
-        return "No followed SharePoint sites found."
-
-    desc = f'matching "{query}"' if query else "followed"
-    lines = [f"Found {len(sites)} {desc} site(s):\n"]
-    for site in sites:
-        name = site.get("displayName", site.get("name", "?"))
-        site_id = site.get("id", "?")
-        web_url = site.get("webUrl", "")
-        lines.append(f"- **{name}** (ID: `{site_id}`)")
-        if web_url:
-            lines.append(f"  {web_url}")
-    return "\n".join(lines)
+    rows = [
+        {
+            "name": site.get("displayName", site.get("name", "")),
+            "id": site.get("id", ""),
+            "web_url": site.get("webUrl", ""),
+        }
+        for site in sites
+    ]
+    return {"sites": rows, "count": len(rows), "query": query}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_files(
     folder_path: str = "", site_id: str = "", query: str = "", url: str = "", top: int = 20
-) -> str:
+) -> dict:
     """
     List or search files in OneDrive or SharePoint.
 
@@ -2334,176 +2369,79 @@ async def list_files(
         query: Search query (e.g., "Q4 budget"). When set, searches across all drives.
         url: A SharePoint/OneDrive sharing URL pointing to a folder. Lists its children.
         top: Maximum number of items to return (default: 20).
+
+    Returns:
+        files (a row per item), count, and whichever of folder_path and query
+        was used. Every row carries name, type ("folder" or "file"), size in
+        bytes, and id; folders add child_count and search results add summary
+        (the matched snippet) and url. Pass a row's id to inspect_file,
+        edit_document, or manage_file.
+
+        You see this as pipe-CSV whose header is the union of the row keys
+        present — so a browse reads `name|type|size|child_count|id` and a search
+        `name|type|size|id|summary|url` — followed by `count:`, `folder_path:`
+        and `query:` lines (empty ones are dropped). Nothing found renders as
+        `files: (none)`.
+
+        A sharing link that cannot be resolved returns access_denied, not_found,
+        or invalid_link.
     """
     sharing_url = url.strip() if url else ""
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        if sharing_url:
-            try:
-                items = await files_ops.alist_sharing_link_children(client, sharing_url, top=top)
-            except GraphError as e:
-                if e.status_code == 403:
-                    return (
-                        "**Access denied** to this sharing link.\n"
-                        "You don't have permission to access this item. "
-                        "The owner may need to re-share it with you."
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            if sharing_url:
+                try:
+                    items = await files_ops.alist_sharing_link_children(
+                        client, sharing_url, top=top
                     )
-                elif e.status_code == 404:
-                    return (
-                        "**Item not found** for this sharing link.\n"
-                        "The link may have expired, been revoked, or the item was deleted."
-                    )
-                elif e.status_code == 400:
-                    return (
-                        "**Invalid sharing link.**\n"
-                        "Could not resolve this URL. Make sure it's a valid "
-                        "SharePoint or OneDrive sharing link."
-                    )
-                raise
-            if not items:
-                return "No files found in the shared folder."
-            lines = [f"Found {len(items)} item(s) in shared folder:\n"]
-            for item in items:
-                lines.append(_format_drive_item(item))
-            return "\n".join(lines)
-        elif query:
-            results = await files_ops.asearch_files_unified(client, query=query, top=top)
-            if not results:
-                return f'No files found matching "{query}".'
-            lines = [f'Found {len(results)} result(s) for "{query}":\n']
-            for i, item in enumerate(results, 1):
-                name = item.get("name", "?")
-                web_url = item.get("webUrl", "")
-                summary = item.get("_searchSummary", "")
-                size = _format_size(item.get("size", 0))
-                lines.append(f"{i}. **{name}** ({size})\n   ID: `{item.get('id', '?')}`")
-                if summary:
-                    lines.append(f"   Summary: {summary}")
-                if web_url:
-                    lines.append(f"   URL: {web_url}")
-            return "\n\n".join(lines)
-        else:
-            items = await files_ops.alist_drive_children(
-                client, folder_path=folder_path, site_id=site_id, top=top
-            )
-            if not items:
-                loc = f' in "{folder_path}"' if folder_path else " in root"
-                return f"No files found{loc}."
-            loc = f'"{folder_path}"' if folder_path else "root"
-            lines = [f"Found {len(items)} item(s) in {loc}:\n"]
-            for item in items:
-                lines.append(_format_drive_item(item))
-            return "\n".join(lines)
+                except GraphError as e:
+                    if e.status_code == 403:
+                        return {
+                            "error": "access_denied",
+                            "reason": (
+                                "You don't have permission to access this sharing link. "
+                                "The owner may need to re-share it with you."
+                            ),
+                        }
+                    if e.status_code == 404:
+                        return {
+                            "error": "not_found",
+                            "reason": (
+                                "No item found for this sharing link. The link may have "
+                                "expired, been revoked, or the item was deleted."
+                            ),
+                        }
+                    if e.status_code == 400:
+                        return {
+                            "error": "invalid_link",
+                            "reason": (
+                                "Could not resolve this URL. Make sure it's a valid "
+                                "SharePoint or OneDrive sharing link."
+                            ),
+                        }
+                    raise
+                rows = [_drive_item_row(item) for item in items]
+            elif query:
+                results = await files_ops.asearch_files_unified(client, query=query, top=top)
+                rows = [
+                    {
+                        **_drive_item_row(item),
+                        "summary": item.get("_searchSummary", ""),
+                        "url": item.get("webUrl", ""),
+                    }
+                    for item in results
+                ]
+            else:
+                items = await files_ops.alist_drive_children(
+                    client, folder_path=folder_path, site_id=site_id, top=top
+                )
+                rows = [_drive_item_row(item) for item in items]
+    except PermissionError as e:
+        return _not_connected(e)
 
-
-@mcp.tool()
-async def upload_file(
-    filename: str,
-    content: str,
-    folder_path: str = "",
-    site_id: str = "",
-    content_encoding: str = "",
-) -> str:
-    """
-    Create or overwrite a file in OneDrive or SharePoint.
-
-    Uses the simple upload endpoint (max 4 MB). The file is created if it does
-    not exist, or overwritten if it does.
-
-    Supported modes:
-      - Text files (.txt, .md, .html, .csv, .json, .xml, .yaml): provide plain
-        text content directly.
-      - Word documents (.docx): provide content as markdown text. The server
-        automatically converts markdown (headings, bold, italic, lists, tables)
-        into a formatted .docx file. Write the document content using normal
-        markdown syntax: # Heading, **bold**, *italic*, - bullets, 1. numbered,
-        and pipe tables.
-      - Excel workbooks (.xlsx): provide content as CSV text (comma-separated
-        rows) to seed the first sheet, or an empty string for a blank workbook.
-        Numeric-looking cells become numbers. Use edit_document afterwards for
-        richer, in-place edits.
-      - Binary files (any extension): set content_encoding="base64" and provide
-        the file content as a base64-encoded string. Use this for images, PDFs,
-        or other binary formats that originate from another source.
-
-    Args:
-        filename: File name including extension (e.g. "report.md", "Review.docx").
-        content: File content — plain text, markdown (.docx), CSV (.xlsx), or base64 string.
-        folder_path: Destination folder path (e.g. "Documents" or
-            "Shared Documents/Templates"). Empty string uploads to the drive root.
-        site_id: SharePoint site ID (from list_sharepoint_sites). Empty for OneDrive.
-        content_encoding: Set to "base64" when content is base64-encoded binary data.
-            Leave empty for text, markdown, or CSV content.
-    """
-    is_base64 = content_encoding.lower() == "base64" if content_encoding else False
-    lower_name = filename.lower()
-    is_docx = lower_name.endswith(".docx") and not is_base64
-    is_xlsx = lower_name.endswith(".xlsx") and not is_base64
-
-    if is_base64:
-        try:
-            data = base64.b64decode(content)
-        except Exception as e:
-            return f"Failed to decode base64 content: {e}"
-    elif is_docx:
-        try:
-            data = document_create.markdown_to_docx(content)
-        except ValueError as e:
-            return f"Failed to generate Word document: {e}"
-    elif is_xlsx:
-        try:
-            data = document_create.csv_to_xlsx(content)
-        except ValueError as e:
-            return f"Failed to generate Excel workbook: {e}"
-
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        if is_base64:
-            item = await files_ops.aupload_bytes(
-                client,
-                folder_path=folder_path,
-                filename=filename,
-                data=data,
-                content_type="application/octet-stream",
-                site_id=site_id,
-            )
-        elif is_docx:
-            item = await files_ops.aupload_bytes(
-                client,
-                folder_path=folder_path,
-                filename=filename,
-                data=data,
-                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                site_id=site_id,
-            )
-        elif is_xlsx:
-            item = await files_ops.aupload_bytes(
-                client,
-                folder_path=folder_path,
-                filename=filename,
-                data=data,
-                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                site_id=site_id,
-            )
-        else:
-            item = await files_ops.aupload_file(
-                client,
-                folder_path=folder_path,
-                filename=filename,
-                content=content,
-                site_id=site_id,
-            )
-
-    web_url = item.get("webUrl", "")
-    item_id = item.get("id", "?")
-    size = item.get("size", 0)
-    result = f"File '{filename}' uploaded successfully."
-    result += f"\nID: `{item_id}`"
-    result += f"\nSize: {_format_size(size)}"
-    if web_url:
-        result += f"\nURL: {web_url}"
-    return result
+    return {"files": rows, "count": len(rows), "folder_path": folder_path, "query": query}
 
 
 def _op_summary(op_types: list[str]) -> str:
@@ -2514,13 +2452,13 @@ def _op_summary(op_types: list[str]) -> str:
     return summary
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def edit_document(
     item_id: str,
     edits: str,
     site_id: str = "",
     options: str = "",
-) -> str:
+) -> dict:
     """
     Edit an existing Word document (.docx) or Excel workbook (.xlsx) in
     OneDrive or SharePoint. The file type is detected from its extension.
@@ -2567,31 +2505,48 @@ async def edit_document(
         options: JSON string with optional settings. Word only:
             {"track_changes": false} — apply edits directly without revision markup.
             {"author": "Name"} — override the revision/comment author (default: "Bond AI").
+
+    Returns:
+        Word: ok, kind ("word"), name, operations (how many were applied), ops
+        (their op names, first five), track_changes, author, id, web_url.
+        Excel: ok, kind ("excel"), name, operations, ops, default_sheet,
+        worksheets (comma-separated), web_url.
+
+        Both are all-scalar, so you see one `key: value` line per key.
+        A file that is neither .docx nor .xlsx returns invalid_arguments; edits
+        that will not parse return invalid_arguments; an edit the document
+        rejects (text not found, bad range) returns edit_failed.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        try:
-            item = await files_ops.aget_drive_item(client, item_id, site_id=site_id)
-        except GraphError as e:
-            if e.status_code == 404:
-                return f"File not found: {item_id}"
-            return f"Error fetching file: {e}"
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            try:
+                item = await files_ops.aget_drive_item(client, item_id, site_id=site_id)
+            except GraphError as e:
+                if e.status_code == 404:
+                    return {"error": "not_found", "reason": f"File not found: {item_id}"}
+                raise
 
-        name = item.get("name", "")
-        lower = name.lower()
-        if lower.endswith(".docx"):
-            return await _edit_word(client, item, edits, site_id, opts)
-        if lower.endswith(".xlsx"):
-            return await _edit_excel(client, item, edits, site_id)
-        return (
-            f"File '{name}' is not an editable document. Supported types: "
-            ".docx (Word) and .xlsx (Excel). Legacy .xls/.xlsb and macro-enabled "
-            ".xlsm are not supported."
-        )
+            name = item.get("name", "")
+            lower = name.lower()
+            if lower.endswith(".docx"):
+                return await _edit_word(client, item, edits, site_id, opts)
+            if lower.endswith(".xlsx"):
+                return await _edit_excel(client, item, edits, site_id)
+            return {
+                "error": "invalid_arguments",
+                "reason": (
+                    f"File '{name}' is not an editable document. Supported types: "
+                    ".docx (Word) and .xlsx (Excel). Legacy .xls/.xlsb and macro-enabled "
+                    ".xlsm are not supported."
+                ),
+            }
+    except PermissionError as e:
+        return _not_connected(e)
 
 
 async def _edit_word(
@@ -2600,7 +2555,7 @@ async def _edit_word(
     edits: str,
     site_id: str,
     opts: dict,
-) -> str:
+) -> dict:
     """Edit a .docx via download / apply / re-upload (Track Changes by default)."""
     track_changes = opt_bool(opts.get("track_changes", True), True)
     author = opts.get("author", "Bond AI")
@@ -2608,9 +2563,9 @@ async def _edit_word(
     try:
         operations = document_edit.parse_edits(edits)
     except ValueError as e:
-        return f"Invalid edits: {e}"
+        return {"error": "invalid_arguments", "reason": f"Invalid edits: {e}"}
     if not operations:
-        return "No edit operations provided."
+        return {"error": "invalid_arguments", "reason": "No edit operations provided."}
 
     name = item.get("name", "")
     base = files_ops._drive_base(site_id or None)
@@ -2621,7 +2576,7 @@ async def _edit_word(
             doc_bytes, operations, track_changes=track_changes, author=author
         )
     except document_edit.EditError as e:
-        return f"Edit failed: {e}"
+        return {"error": "edit_failed", "reason": str(e)}
 
     result_item = await files_ops.aupload_bytes_by_id(
         client,
@@ -2631,15 +2586,17 @@ async def _edit_word(
         site_id=site_id,
     )
 
-    tc_note = " with Track Changes" if track_changes else ""
-    result = f"Document '{name}' edited successfully{tc_note}."
-    result += f"\n**Operations applied:** {len(operations)} ({_op_summary([op['op'] for op in operations])})"
-    result += f"\n**Author:** {author}"
-    result += f"\n**ID:** `{result_item.get('id', item['id'])}`"
-    web_url = result_item.get("webUrl", "")
-    if web_url:
-        result += f"\n**URL:** {web_url}"
-    return result
+    return {
+        "ok": True,
+        "kind": "word",
+        "name": name,
+        "operations": len(operations),
+        "ops": _op_summary([op["op"] for op in operations]),
+        "track_changes": track_changes,
+        "author": author,
+        "id": result_item.get("id", item["id"]),
+        "web_url": result_item.get("webUrl", ""),
+    }
 
 
 async def _edit_excel(
@@ -2647,14 +2604,14 @@ async def _edit_excel(
     item: dict,
     edits: str,
     site_id: str,
-) -> str:
+) -> dict:
     """Edit an .xlsx in place via the Graph Workbook API (no download/re-upload)."""
     try:
         operations = workbook_edit.parse_workbook_edits(edits)
     except ValueError as e:
-        return f"Invalid edits: {e}"
+        return {"error": "invalid_arguments", "reason": f"Invalid edits: {e}"}
     if not operations:
-        return "No edit operations provided."
+        return {"error": "invalid_arguments", "reason": "No edit operations provided."}
 
     name = item.get("name", "")
     base = files_ops._drive_base(site_id or None)
@@ -2662,38 +2619,67 @@ async def _edit_excel(
     try:
         result = await workbook_edit.apply_workbook_edits(client, base, item["id"], operations)
     except workbook_edit.EditError as e:
-        return f"Edit failed: {e}"
+        return {"error": "edit_failed", "reason": str(e)}
     except GraphError as e:
-        return f"Edit failed: {e}"
+        # The Workbook API reports a rejected op (bad range, protected sheet) as
+        # a 4xx, which is the caller's mistake rather than a transient failure.
+        return {"error": "edit_failed", "reason": str(e)}
 
     applied = result["operations"]
-    out = f"Workbook '{name}' edited successfully in place."
-    out += f"\n**Operations applied:** {len(applied)} ({_op_summary(applied)})"
-    out += f"\n**Default sheet:** {result['default_sheet']}"
-    out += f"\n**Worksheets:** {', '.join(result['worksheets'])}"
-    web_url = item.get("webUrl", "")
-    if web_url:
-        out += f"\n**URL:** {web_url}"
-    return out
+    return {
+        "ok": True,
+        "kind": "excel",
+        "name": name,
+        "operations": len(applied),
+        "ops": _op_summary(applied),
+        "default_sheet": result["default_sheet"],
+        # Comma-joined rather than a list so the payload stays all-scalar and
+        # renders as kv lines instead of falling back to JSON.
+        "worksheets": ", ".join(result["worksheets"]),
+        "web_url": item.get("webUrl", ""),
+    }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def manage_file(
-    item_id: str,
+    item_id: str = "",
     action: str = "rename",
     new_name: str = "",
+    filename: str = "",
+    content: str = "",
+    content_encoding: str = "",
     options: str = "",
-) -> str:
+) -> dict:
     """
-    Copy, rename, or delete a file or folder.
+    Create, copy, rename, or delete a file or folder in OneDrive or SharePoint.
 
     Actions:
-      - "rename" (default): rename a file or folder in place. Requires new_name.
+      - "rename" (default): rename a file or folder in place. Requires item_id
+        and new_name.
       - "copy": create a server-side copy with a new name — works for any file
         type including Word, Excel, and PDF. Useful for creating a new document
-        from a template. Requires new_name.
+        from a template. Requires item_id and new_name.
       - "delete": move the file or folder to the recycle bin (recoverable from
-        the SharePoint/OneDrive UI). new_name is ignored.
+        the SharePoint/OneDrive UI). Requires item_id; new_name is ignored.
+      - "upload": create or overwrite a file. Requires filename and content.
+        Uses the simple upload endpoint, so the content must be under 4 MB.
+
+    Upload content modes:
+      - Text files (.txt, .md, .html, .csv, .json, .xml, .yaml): provide plain
+        text content directly.
+      - Word documents (.docx): provide content as markdown text. The server
+        automatically converts markdown (headings, bold, italic, lists, tables)
+        into a formatted .docx file. Write the document content using normal
+        markdown syntax: # Heading, **bold**, *italic*, - bullets, 1. numbered,
+        and pipe tables.
+      - Excel workbooks (.xlsx): provide content as CSV text (comma-separated
+        rows) to seed the first sheet, or an empty string for a blank workbook.
+        Numeric-looking cells become numbers. Use edit_document afterwards for
+        richer, in-place edits.
+      - Binary files (any extension): set content_encoding="base64" and provide
+        the file content as a base64-encoded string. Use this for images, PDFs,
+        or other binary formats that originate from another source. base64 wins
+        over the extension, so a base64 .docx uploads its bytes untouched.
 
     Note: a workbook edited via edit_document holds a short lock (~1-2 min)
     afterward; rename/copy/delete on it may return "locked" until that clears —
@@ -2701,61 +2687,214 @@ async def manage_file(
 
     Args:
         item_id: Drive item ID of the file or folder to act on (from list_files).
-        action: "rename" (default), "copy", or "delete".
+            Required for rename, copy, and delete.
+        action: "rename" (default), "copy", "delete", or "upload".
         new_name: New name including extension (e.g. "Final-Report.docx").
-            Required for rename and copy; ignored for delete.
+            Required for rename and copy; ignored otherwise.
+        filename: File name including extension for "upload" (e.g. "report.md").
+        content: File content for "upload" — plain text, markdown (.docx),
+            CSV (.xlsx), or a base64 string.
+        content_encoding: Set to "base64" when content is base64-encoded binary
+            data. Leave empty for text, markdown, or CSV content.
         options: JSON string with optional fields:
-            {"destination_folder_id": "...", "site_id": "...", "destination_drive_id": "...", "source_drive_id": "..."}
+            {"site_id": "..."} — act on this SharePoint site's drive instead of OneDrive.
+            {"folder_path": "Documents"} — destination folder for "upload"
+                (empty uploads to the drive root).
+            {"destination_folder_id": "...", "destination_drive_id": "...", "source_drive_id": "..."}
+                — copy targets.
+
+    Returns:
+        action, plus per action: rename → id, name, web_url; copy → id (the new
+        item), name; delete → id; upload → id, name, size (bytes), web_url.
+
+        Each is all-scalar, so you see one `key: value` line per key. A missing
+        item returns not_found; content over the 4 MB simple-upload limit
+        returns too_large with the limit in bytes.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
     destination_folder_id = opts.get("destination_folder_id", "")
     site_id = opts.get("site_id", "")
     destination_drive_id = opts.get("destination_drive_id", "")
     source_drive_id = opts.get("source_drive_id", "")
+    folder_path = opts.get("folder_path", "")
 
     action = action.lower()
-    if action not in ("rename", "copy", "delete"):
-        return f"Invalid action '{action}'. Must be 'rename', 'copy', or 'delete'."
+    if action not in ("rename", "copy", "delete", "upload"):
+        return {
+            "error": "invalid_action",
+            "reason": (
+                f"Invalid action '{action}'. Must be 'rename', 'copy', 'delete', or 'upload'."
+            ),
+        }
+    if action != "upload" and not item_id:
+        return {
+            "error": "invalid_arguments",
+            "reason": f"item_id is required for the '{action}' action.",
+        }
     if action in ("rename", "copy") and not new_name:
-        return f"new_name is required for the '{action}' action."
+        return {
+            "error": "invalid_arguments",
+            "reason": f"new_name is required for the '{action}' action.",
+        }
+    if action == "upload" and not filename:
+        return {
+            "error": "invalid_arguments",
+            "reason": "filename is required for the 'upload' action.",
+        }
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        try:
-            if action == "copy":
-                status = await files_ops.acopy_drive_item(
-                    client,
-                    item_id=item_id,
-                    new_name=new_name,
-                    destination_folder_id=destination_folder_id,
-                    site_id=site_id,
-                    destination_drive_id=destination_drive_id,
-                    source_drive_id=source_drive_id,
-                )
-                resource_id = status.get("resourceId", "?")
-                return f"File copied successfully as '{new_name}'.\nNew item ID: `{resource_id}`"
-            elif action == "delete":
-                await files_ops.adelete_drive_item(client, item_id=item_id, site_id=site_id)
-                return f"Deleted item `{item_id}` (moved to the recycle bin)."
-            else:
+    if action == "upload":
+        return await _upload_file(
+            filename=filename,
+            content=content,
+            content_encoding=content_encoding,
+            folder_path=folder_path,
+            site_id=site_id,
+        )
+
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            try:
+                if action == "copy":
+                    status = await files_ops.acopy_drive_item(
+                        client,
+                        item_id=item_id,
+                        new_name=new_name,
+                        destination_folder_id=destination_folder_id,
+                        site_id=site_id,
+                        destination_drive_id=destination_drive_id,
+                        source_drive_id=source_drive_id,
+                    )
+                    return {
+                        "action": "copy",
+                        "id": status.get("resourceId", ""),
+                        "name": new_name,
+                    }
+                if action == "delete":
+                    await files_ops.adelete_drive_item(client, item_id=item_id, site_id=site_id)
+                    return {"action": "delete", "id": item_id}
+
                 item = await files_ops.arename_drive_item(
                     client,
                     item_id=item_id,
                     new_name=new_name,
                     site_id=site_id,
                 )
-                web_url = item.get("webUrl", "")
-                result = f"Renamed to '{item.get('name', new_name)}' successfully."
-                result += f"\nID: `{item.get('id', item_id)}`"
-                if web_url:
-                    result += f"\nURL: {web_url}"
-                return result
-        except GraphError as e:
-            if e.status_code == 404:
-                return f"File not found: {item_id}"
-            return f"Error performing {action}: {e}"
+                return {
+                    "action": "rename",
+                    "id": item.get("id", item_id),
+                    "name": item.get("name", new_name),
+                    "web_url": item.get("webUrl", ""),
+                }
+            except GraphError as e:
+                # Only a 404 is the caller's problem; a throttle or a 5xx must
+                # keep propagating so the client retries instead of reading a
+                # transient failure as a permanent answer.
+                if e.status_code == 404:
+                    return {"error": "not_found", "reason": f"File not found: {item_id}"}
+                raise
+    except PermissionError as e:
+        return _not_connected(e)
+
+
+async def _upload_file(
+    filename: str,
+    content: str,
+    content_encoding: str,
+    folder_path: str,
+    site_id: str,
+) -> dict:
+    """The manage_file(action="upload") branch: convert, then simple-upload."""
+    is_base64 = content_encoding.lower() == "base64" if content_encoding else False
+    lower_name = filename.lower()
+    # An explicit base64 encoding beats the extension: the caller already has
+    # the finished bytes, so there is nothing to generate from markdown or CSV.
+    is_docx = lower_name.endswith(".docx") and not is_base64
+    is_xlsx = lower_name.endswith(".xlsx") and not is_base64
+
+    if is_base64:
+        try:
+            data = base64.b64decode(content)
+        except Exception as e:
+            return {
+                "error": "invalid_arguments",
+                "reason": f"Failed to decode base64 content: {e}",
+            }
+    elif is_docx:
+        try:
+            data = document_create.markdown_to_docx(content)
+        except ValueError as e:
+            return {
+                "error": "invalid_arguments",
+                "reason": f"Failed to generate Word document: {e}",
+            }
+    elif is_xlsx:
+        try:
+            data = document_create.csv_to_xlsx(content)
+        except ValueError as e:
+            return {
+                "error": "invalid_arguments",
+                "reason": f"Failed to generate Excel workbook: {e}",
+            }
+
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            if is_base64:
+                item = await files_ops.aupload_bytes(
+                    client,
+                    folder_path=folder_path,
+                    filename=filename,
+                    data=data,
+                    content_type="application/octet-stream",
+                    site_id=site_id,
+                )
+            elif is_docx:
+                item = await files_ops.aupload_bytes(
+                    client,
+                    folder_path=folder_path,
+                    filename=filename,
+                    data=data,
+                    content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    site_id=site_id,
+                )
+            elif is_xlsx:
+                item = await files_ops.aupload_bytes(
+                    client,
+                    folder_path=folder_path,
+                    filename=filename,
+                    data=data,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    site_id=site_id,
+                )
+            else:
+                item = await files_ops.aupload_file(
+                    client,
+                    folder_path=folder_path,
+                    filename=filename,
+                    content=content,
+                    site_id=site_id,
+                )
+    except PermissionError as e:
+        return _not_connected(e)
+    except ValueError as e:
+        # The ops layer refuses anything over the simple-upload cap before it
+        # sends a byte, so this never races a half-written file.
+        return {
+            "error": "too_large",
+            "limit": files_ops.MAX_SIMPLE_UPLOAD_BYTES,
+            "reason": str(e),
+        }
+
+    return {
+        "action": "upload",
+        "id": item.get("id", ""),
+        "name": filename,
+        "size": item.get("size", 0),
+        "web_url": item.get("webUrl", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2763,132 +2902,185 @@ async def manage_file(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def list_powerbi_workspaces() -> str:
+@mcp.tool(output_schema=None)
+async def list_powerbi(workspace_id: str = "", content_type: str = "all") -> dict:
     """
-    List all Power BI workspaces the user has access to.
+    List Power BI workspaces, or the datasets, reports, and dashboards in one.
 
-    Workspaces contain datasets, reports, and dashboards. Use the workspace ID
-    with other Power BI tools to list content or run queries.
-    """
-    token = get_powerbi_token()
-    async with AsyncPowerBIClient(token) as client:
-        workspaces = await pbi_ops.alist_workspaces(client)
-
-    # Always prepend My workspace — it exists for every user but has no group ID
-    lines = [f"Found {len(workspaces) + 1} workspace(s):\n"]
-    lines.append("- **My workspace** (ID: `me`)")
-    for ws in workspaces:
-        capacity = " [Premium]" if ws.get("isOnDedicatedCapacity") else ""
-        lines.append(f"- **{ws.get('name', '?')}**{capacity} (ID: `{ws.get('id', '?')}`)")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def list_powerbi_content(workspace_id: str, content_type: str = "all") -> str:
-    """
-    List datasets, reports, and/or dashboards in a Power BI workspace.
+    With no workspace_id, lists every workspace the user can reach. With a
+    workspace_id (or "me" for My workspace), lists that workspace's content.
 
     Args:
-        workspace_id: The workspace ID (from list_powerbi_workspaces). Use "me" for My workspace.
-        content_type: What to list: "datasets", "reports", "dashboards", or "all" (default).
+        workspace_id: The workspace ID to list content for. Use "me" for My
+            workspace. Leave empty to list the workspaces themselves.
+        content_type: What to list within a workspace: "datasets", "reports",
+            "dashboards", or "all" (default). Ignored when listing workspaces.
+
+    Returns:
+        Workspace mode: workspaces (a row per workspace: name, id, premium) and
+        count. Content mode: items (a row per item: kind — "dataset", "report",
+        or "dashboard" — name, id, plus refreshable on datasets and dataset_id
+        on reports), count, and workspace_id.
+
+        You see this as pipe-CSV whose header is the union of the row keys
+        present, followed by `count:` and, in content mode, `workspace_id:`.
+        An empty workspace renders as `items: (none)`. Pass a dataset id to
+        query_dataset or refresh_dataset, and a report id to export_report.
     """
+    if not workspace_id:
+        try:
+            token = get_powerbi_token()
+            async with AsyncPowerBIClient(token) as client:
+                workspaces = await pbi_ops.alist_workspaces(client)
+        except PermissionError as e:
+            return _not_connected(e)
+
+        # My workspace exists for every user but has no group ID, so Graph never
+        # lists it — prepend it under the sentinel id the other tools accept.
+        rows = [{"name": "My workspace", "id": "me", "premium": False}]
+        rows.extend(
+            {
+                "name": ws.get("name", ""),
+                "id": ws.get("id", ""),
+                "premium": bool(ws.get("isOnDedicatedCapacity")),
+            }
+            for ws in workspaces
+        )
+        return {"workspaces": rows, "count": len(rows)}
+
     content_type = content_type.lower()
     if content_type not in ("datasets", "reports", "dashboards", "all"):
-        return f"Invalid content_type '{content_type}'. Must be: datasets, reports, dashboards, or all."
+        return {
+            "error": "invalid_arguments",
+            "reason": (
+                f"Invalid content_type '{content_type}'. "
+                "Must be: datasets, reports, dashboards, or all."
+            ),
+        }
 
     ws = "" if workspace_id.lower() == "me" else workspace_id
-    token = get_powerbi_token()
-    async with AsyncPowerBIClient(token) as client:
-        datasets = (
-            await pbi_ops.alist_datasets(client, ws) if content_type in ("datasets", "all") else []
-        )
-        reports = (
-            await pbi_ops.alist_reports(client, ws) if content_type in ("reports", "all") else []
-        )
-        dashboards = (
-            await pbi_ops.alist_dashboards(client, ws)
-            if content_type in ("dashboards", "all")
-            else []
-        )
-
-    lines = []
-    if datasets:
-        lines.append(f"**Datasets** ({len(datasets)}):")
-        for ds in datasets:
-            refreshable = " [refreshable]" if ds.get("isRefreshable") else ""
-            lines.append(f"  - **{ds.get('name', '?')}**{refreshable} (ID: `{ds.get('id', '?')}`)")
-    if reports:
-        if lines:
-            lines.append("")
-        lines.append(f"**Reports** ({len(reports)}):")
-        for r in reports:
-            lines.append(
-                f"  - **{r.get('name', '?')}** (ID: `{r.get('id', '?')}`, dataset: `{r.get('datasetId', '?')}`)"
+    try:
+        token = get_powerbi_token()
+        async with AsyncPowerBIClient(token) as client:
+            datasets = (
+                await pbi_ops.alist_datasets(client, ws)
+                if content_type in ("datasets", "all")
+                else []
             )
-    if dashboards:
-        if lines:
-            lines.append("")
-        lines.append(f"**Dashboards** ({len(dashboards)}):")
-        for d in dashboards:
-            lines.append(f"  - **{d.get('displayName', '?')}** (ID: `{d.get('id', '?')}`)")
+            reports = (
+                await pbi_ops.alist_reports(client, ws)
+                if content_type in ("reports", "all")
+                else []
+            )
+            dashboards = (
+                await pbi_ops.alist_dashboards(client, ws)
+                if content_type in ("dashboards", "all")
+                else []
+            )
+    except PermissionError as e:
+        return _not_connected(e)
 
-    if not lines:
-        return f"No content found in workspace `{workspace_id}`."
-    return "\n".join(lines)
+    rows: list[dict] = [
+        {
+            "kind": "dataset",
+            "name": ds.get("name", ""),
+            "id": ds.get("id", ""),
+            "refreshable": bool(ds.get("isRefreshable")),
+        }
+        for ds in datasets
+    ]
+    rows.extend(
+        {
+            "kind": "report",
+            "name": r.get("name", ""),
+            "id": r.get("id", ""),
+            "dataset_id": r.get("datasetId", ""),
+        }
+        for r in reports
+    )
+    rows.extend(
+        {"kind": "dashboard", "name": d.get("displayName", ""), "id": d.get("id", "")}
+        for d in dashboards
+    )
+
+    return {"items": rows, "count": len(rows), "workspace_id": workspace_id}
 
 
-@mcp.tool()
-async def query_dataset(workspace_id: str, dataset_id: str, dax_query: str) -> str:
+@mcp.tool(output_schema=None)
+async def query_dataset(workspace_id: str, dataset_id: str, dax_query: str) -> dict:
     """
-    Execute a DAX query against a Power BI dataset and return results as CSV.
+    Execute a DAX query against a Power BI dataset.
 
     The dataset must be on Premium or Fabric capacity and you must have Build
     permission on the dataset.
 
     Args:
-        workspace_id: The workspace ID (from list_powerbi_workspaces). Use "me" for My workspace.
-        dataset_id: The dataset ID (from list_powerbi_content).
+        workspace_id: The workspace ID (from list_powerbi). Use "me" for My workspace.
+        dataset_id: The dataset ID (from list_powerbi with a workspace_id).
         dax_query: A valid DAX query (e.g., "EVALUATE TOPN(10, 'Sales', 'Sales'[Amount], DESC)").
+
+    Returns:
+        rows (the query result rows exactly as Power BI returned them, keyed by
+        DAX column name such as 'Sales'[Region]) and count.
+
+        You see this as pipe-CSV. Power BI omits null-valued columns from a row
+        rather than sending an empty cell, so rows can carry different key sets;
+        the header is the union of them in first-seen order and an omitted
+        column renders as an empty cell. No rows renders as `rows: (none)`.
     """
     ws = "" if workspace_id.lower() == "me" else workspace_id
-    token = get_powerbi_token()
-    async with AsyncPowerBIClient(token) as client:
-        result = await pbi_ops.aexecute_dax_query(client, ws, dataset_id, dax_query)
+    try:
+        token = get_powerbi_token()
+        async with AsyncPowerBIClient(token) as client:
+            result = await pbi_ops.aexecute_dax_query(client, ws, dataset_id, dax_query)
+    except PermissionError as e:
+        return _not_connected(e)
 
-    csv_output = pbi_ops._format_dax_results(result)
-    row_count = len(result.get("results", [{}])[0].get("tables", [{}])[0].get("rows", []))
-    return f"Query returned {row_count} row(s):\n\n{csv_output}"
+    try:
+        rows = result["results"][0]["tables"][0]["rows"]
+    except (KeyError, IndexError):
+        rows = []
+    return {"rows": rows, "count": len(rows)}
 
 
-@mcp.tool()
-async def refresh_dataset(workspace_id: str, dataset_id: str) -> str:
+@mcp.tool(output_schema=None)
+async def refresh_dataset(workspace_id: str, dataset_id: str) -> dict:
     """
     Trigger an on-demand refresh of a Power BI dataset.
 
-    Starts the refresh and returns immediately — the refresh runs in the background.
-    Use list_powerbi_content to find refreshable datasets (marked [refreshable]).
+    Starts the refresh and returns immediately — the refresh runs in the
+    background. Use list_powerbi to find refreshable datasets.
 
     Args:
-        workspace_id: The workspace ID (from list_powerbi_workspaces).
-        dataset_id: The dataset ID (from list_powerbi_content).
+        workspace_id: The workspace ID (from list_powerbi). Use "me" for My workspace.
+        dataset_id: The dataset ID (from list_powerbi with a workspace_id).
+
+    Returns:
+        ok, dataset_id, and workspace_id — three `key: value` lines.
+
+        There is no refresh id to return: the Power BI trigger endpoint answers
+        202 with an empty body. Refresh progress lives in the dataset's refresh
+        history, which is a separate call this tool deliberately does not make.
     """
     ws = "" if workspace_id.lower() == "me" else workspace_id
-    token = get_powerbi_token()
-    async with AsyncPowerBIClient(token) as client:
-        await pbi_ops.atrigger_refresh(client, ws, dataset_id)
+    try:
+        token = get_powerbi_token()
+        async with AsyncPowerBIClient(token) as client:
+            await pbi_ops.atrigger_refresh(client, ws, dataset_id)
+    except PermissionError as e:
+        return _not_connected(e)
 
-    return f"Refresh triggered for dataset `{dataset_id}`. The refresh runs in the background."
+    return {"ok": True, "dataset_id": dataset_id, "workspace_id": workspace_id}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def export_report(
     workspace_id: str,
     report_id: str,
     export_format: str = "PDF",
     pages: str = "",
     folder_path: str = "Power BI Exports",
-) -> str:
+) -> dict:
     """
     Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive.
 
@@ -2897,12 +3089,21 @@ async def export_report(
     be on Premium or Fabric capacity.
 
     Args:
-        workspace_id: The workspace ID (from list_powerbi_workspaces).
-        report_id: The report ID (from list_powerbi_content).
+        workspace_id: The workspace ID (from list_powerbi). Use "me" for My workspace.
+        report_id: The report ID (from list_powerbi with a workspace_id).
         export_format: "PDF" (default), "PNG", or "PPTX".
         pages: Comma-separated page names to export (e.g., "ReportSection1,ReportSection2").
                Leave empty to export all pages.
         folder_path: OneDrive folder to save the export to (default: "Power BI Exports").
+
+    Returns:
+        ok, format, filename, size (bytes), folder_path, item_id (the OneDrive
+        drive item), and web_url — one `key: value` line per key. Pass item_id
+        to manage_file or inspect_file.
+
+        An unknown format returns invalid_arguments. If the export succeeds but
+        the Microsoft connection cannot save it, the answer is a not_connected
+        error whose reason says the bytes were exported and lost.
     """
     _mime_types = {
         "PDF": "application/pdf",
@@ -2912,24 +3113,29 @@ async def export_report(
 
     export_format = export_format.upper()
     if export_format not in _mime_types:
-        return f"Invalid export_format '{export_format}'. Must be: PDF, PNG, or PPTX."
+        return {
+            "error": "invalid_arguments",
+            "reason": f"Invalid export_format '{export_format}'. Must be: PDF, PNG, or PPTX.",
+        }
 
     page_list = [p.strip() for p in pages.split(",") if p.strip()] if pages else None
     ws = "" if workspace_id.lower() == "me" else workspace_id
 
     # Step 1: Export from Power BI (uses PBI token)
-    pbi_token = get_powerbi_token()
-    async with AsyncPowerBIClient(pbi_token) as pbi_client:
-        export_id = await pbi_ops.astart_export(
-            pbi_client, ws, report_id, export_format, pages=page_list
-        )
-        status = await pbi_ops.apoll_export(pbi_client, ws, report_id, export_id)
-        file_bytes = await pbi_ops.adownload_export(pbi_client, ws, report_id, export_id)
+    try:
+        pbi_token = get_powerbi_token()
+        async with AsyncPowerBIClient(pbi_token) as pbi_client:
+            export_id = await pbi_ops.astart_export(
+                pbi_client, ws, report_id, export_format, pages=page_list
+            )
+            status = await pbi_ops.apoll_export(pbi_client, ws, report_id, export_id)
+            file_bytes = await pbi_ops.adownload_export(pbi_client, ws, report_id, export_id)
+    except PermissionError as e:
+        return _not_connected(e)
 
     ext = status.get("resourceFileExtension", f".{export_format.lower()}")
     filename = f"report-{report_id}{ext}"
     content_type = _mime_types[export_format]
-    size = _format_size(len(file_bytes))
 
     # Step 2: Upload to OneDrive (uses Graph token).
     # If the Microsoft connection is not active, degrade gracefully rather than
@@ -2944,26 +3150,30 @@ async def export_report(
                 data=file_bytes,
                 content_type=content_type,
             )
-        web_url = item.get("webUrl", "")
-        result = f"Report exported as {export_format} ({size}) and saved to OneDrive."
-        result += f"\nFilename: {filename}"
-        result += f"\nOneDrive folder: {folder_path}"
-        if web_url:
-            result += f"\nURL: {web_url}"
-    except PermissionError:
-        result = (
-            f"Report exported as {export_format} ({size}), but could not save to OneDrive "
-            f"because Microsoft auth is not active. "
-            f"Run `make login-microsoft` (standalone) or connect your Microsoft account "
-            f"in Bond AI Settings → Connections (backend mode) to enable OneDrive upload."
-        )
-    return result
+    except PermissionError as e:
+        return {
+            **_not_connected(e),
+            "reason": (
+                f"Report exported as {export_format} ({len(file_bytes)} bytes) but could "
+                "not be saved to OneDrive because the Microsoft connection is not active."
+            ),
+        }
+
+    return {
+        "ok": True,
+        "format": export_format,
+        "filename": filename,
+        "size": len(file_bytes),
+        "folder_path": folder_path,
+        "item_id": item.get("id", ""),
+        "web_url": item.get("webUrl", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
 # Dict-returning tools
 #
-# Unlike the 27 str-returning tools above, these return a canonical dict.
+# Unlike the 6 str-returning tools above, these return a canonical dict.
 # FormatNegotiation hands that dict to a programmatic caller (the desktop mail
 # app) as structuredContent and renders it compactly for everyone else.
 # Parameters remain str/int only.
@@ -2991,7 +3201,16 @@ async def export_report(
 # User.ReadBasic.All; ensure_chat returns invalid_members (an id that is
 # not a Graph user id or UPN), no_identity (the caller cannot be read off the
 # token), and no_members (nobody left after dropping blanks and the caller),
-# plus teams_unavailable — all permanent.
+# plus teams_unavailable — all permanent. The Teams read tools return
+# teams_not_available when the account has no Microsoft 365 licence, and
+# search_teams_messages adds search_unsupported for the consumer accounts
+# Microsoft Search does not index — both permanent. list_files maps an
+# unusable sharing link to access_denied, not_found, or invalid_link;
+# manage_file returns not_found for a missing item and too_large (with the
+# byte limit) for content over the simple-upload cap; edit_document returns
+# edit_failed when the document rejects an operation — all permanent, and all
+# reached from narrow exception clauses so every other Graph failure still
+# propagates.
 # Everything else — Graph 5xx, throttling, unexpected shapes, a malformed
 # policy allowlist — propagates so FastMCP raises a tool error, which is the
 # client's "transient, retry later" signal.
@@ -4362,6 +4581,41 @@ async def _alias_inspect_file_json(
 ) -> dict:
     """Deprecated alias for inspect_file."""
     return await inspect_file(item_id=item_id, url=url, read_content=read_content, site_id=site_id)
+
+
+@mcp.tool(name="upload_file", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_upload_file(
+    filename: str,
+    content: str,
+    folder_path: str = "",
+    site_id: str = "",
+    content_encoding: str = "",
+) -> dict:
+    """Deprecated alias for manage_file(action="upload")."""
+    opts = {}
+    if folder_path:
+        opts["folder_path"] = folder_path
+    if site_id:
+        opts["site_id"] = site_id
+    return await manage_file(
+        action="upload",
+        filename=filename,
+        content=content,
+        content_encoding=content_encoding,
+        options=json.dumps(opts) if opts else "",
+    )
+
+
+@mcp.tool(name="list_powerbi_workspaces", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_list_powerbi_workspaces() -> dict:
+    """Deprecated alias for list_powerbi."""
+    return await list_powerbi()
+
+
+@mcp.tool(name="list_powerbi_content", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_list_powerbi_content(workspace_id: str, content_type: str = "all") -> dict:
+    """Deprecated alias for list_powerbi."""
+    return await list_powerbi(workspace_id=workspace_id, content_type=content_type)
 
 
 if __name__ == "__main__":

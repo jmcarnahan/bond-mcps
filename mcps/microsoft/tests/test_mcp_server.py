@@ -6,7 +6,7 @@ get_graph_token() directly instead of get_http_headers().
 
 import base64
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -93,6 +93,7 @@ from .conftest import (
     SAMPLE_ONBEHALF_MESSAGE,
     SAMPLE_PBI_DASHBOARDS_RESPONSE,
     SAMPLE_PBI_DATASETS_RESPONSE,
+    SAMPLE_PBI_DAX_EMPTY,
     SAMPLE_PBI_DAX_RESULT,
     SAMPLE_PBI_EXPORT_SUCCEEDED,
     SAMPLE_PBI_REPORTS_RESPONSE,
@@ -2056,14 +2057,14 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(200, json=SAMPLE_TEAMS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_teams")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_teams", {})
-
-        text = _get_text(result)
-        assert "Engineering" in text
-        assert "2 team(s)" in text
+        assert _structured(result) == {
+            "teams": [
+                {"name": t["displayName"], "id": t["id"]} for t in SAMPLE_TEAMS_RESPONSE["value"]
+            ],
+            "count": 2,
+        }
 
     @respx.mock
     async def test_list_teams_channels(self, mcp_server):
@@ -2073,15 +2074,15 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(200, json=SAMPLE_CHANNELS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_teams", {"team_id": team_id})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_teams", {"team_id": team_id})
-
-        text = _get_text(result)
-        assert "General" in text
-        assert "2 channel(s)" in text
-        assert team_id in text
+        assert _structured(result) == {
+            "channels": [
+                {"name": c["displayName"], "id": c["id"]} for c in SAMPLE_CHANNELS_RESPONSE["value"]
+            ],
+            "count": 2,
+            "team_id": team_id,
+        }
 
     @respx.mock
     async def test_list_teams_empty(self, mcp_server):
@@ -2089,12 +2090,9 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_teams")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_teams", {})
-
-        assert "No teams found" in _get_text(result)
+        assert _structured(result) == {"teams": [], "count": 0}
 
     @respx.mock
     async def test_list_teams_not_available(self, mcp_server):
@@ -2102,12 +2100,21 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(403, json=GRAPH_ERROR_403)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_teams")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_teams", {})
+        assert _structured(result) == {
+            "error": "teams_not_available",
+            "reason": (
+                "Microsoft Teams is not available for this account. "
+                "A Microsoft 365 license is required."
+            ),
+        }
 
-        assert "not available" in _get_text(result).lower()
+    async def test_list_teams_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "list_teams")
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_list_chats(self, mcp_server):
@@ -2311,7 +2318,7 @@ class TestMCPTeamsTools:
 
     @respx.mock
     async def test_search_teams_messages_chat_hit(self, mcp_server):
-        """A chat hit renders the 7-column table with a chat: conversation label."""
+        """A chat hit fills the seven columns with a chat: conversation label."""
         respx.post(TEAMS_SEARCH_URL).mock(
             return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHAT_HIT]))
         )
@@ -2319,16 +2326,27 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(200, json=SAMPLE_HYDRATED_CHAT_MESSAGE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert "1 message(s) matching" in text
-        assert "timestamp|sender|conversation|content|attachments|id|link" in text
-        assert f"chat:{SEARCH_CHAT_ID}" in text
-        assert "https://teams.microsoft.com/l/message/chat/1750000000001" in text
+        assert _structured(result) == {
+            "messages": [
+                {
+                    "timestamp": "2026-03-02T10:00:00Z",
+                    "sender": "Alice Smith",
+                    "conversation": f"chat:{SEARCH_CHAT_ID}",
+                    "content": "The #budget2026 numbers are in",
+                    "attachments": "",
+                    "id": "1750000000001",
+                    "link": "https://teams.microsoft.com/l/message/chat/1750000000001",
+                }
+            ],
+            "count": 1,
+            "query": "#budget2026",
+            "since": "",
+            "conversation_id": "",
+            "skipped": 0,
+            "notice": "",
+        }
 
     @respx.mock
     async def test_search_teams_messages_channel_hit(self, mcp_server):
@@ -2340,13 +2358,10 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(200, json=SAMPLE_HYDRATED_CHANNEL_MESSAGE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}" in text
+        rows = _structured(result)["messages"]
+        assert rows[0]["conversation"] == f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
 
     @respx.mock
     async def test_search_teams_messages_channel_reply(self, mcp_server):
@@ -2359,16 +2374,20 @@ class TestMCPTeamsTools:
         )
         respx.get(SEARCH_REPLY_ROUTE).mock(return_value=httpx.Response(200, json=SEARCH_REPLY_BODY))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert "1 message(s) matching" in text
-        assert f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}" in text
-        assert "Moving the #budget2026 thread here" in text
-        assert "skipped" not in text
+        data = _structured(result)
+        assert data["count"] == 1
+        assert data["skipped"] == 0
+        assert data["messages"][0] == {
+            "timestamp": "2024-04-24T04:37:15Z",
+            "sender": "Jimmy Wakimoto",
+            "conversation": f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}",
+            "content": "Moving the #budget2026 thread here",
+            "attachments": "",
+            "id": SEARCH_REPLY_ID,
+            "link": f"https://teams.microsoft.com/l/message/channel/{SEARCH_REPLY_ID}",
+        }
 
     @respx.mock
     async def test_search_teams_messages_all_time_by_default(self, mcp_server):
@@ -2378,13 +2397,9 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({"m1": _search_msg("m1")})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert "(all time)" in text
+        assert _structured(result)["since"] == ""
         assert "sent>=" not in _recorded_query_string()
 
     @respx.mock
@@ -2395,58 +2410,55 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({"m1": _search_msg("m1")})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "search_teams_messages",
+                {"query": "#budget2026", "since": "2026-01-01"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "search_teams_messages",
-                    {"query": "#budget2026", "since": "2026-01-01"},
-                )
-
-        text = _get_text(result)
-        assert "since 2026-01-01T00:00:00Z" in text
+        assert _structured(result)["since"] == "2026-01-01T00:00:00Z"
         assert _recorded_query_string().endswith("sent>=2026-01-01")
 
     @respx.mock
     async def test_search_teams_messages_invalid_since(self, mcp_server):
         """A malformed cutoff is reported without touching Graph."""
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "search_teams_messages",
+                {"query": "#budget2026", "since": "last tuesday"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "search_teams_messages",
-                    {"query": "#budget2026", "since": "last tuesday"},
-                )
-
-        assert "Invalid since format" in _get_text(result)
+        data = _structured(result)
+        assert data["error"] == "invalid_date"
+        assert "Invalid since format" in data["reason"]
         assert _graph_trail() == []
 
     @respx.mock
     async def test_search_teams_messages_empty_query(self, mcp_server):
         """A blank query is a caller error, not a search for everything."""
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "   "})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "   "})
-
-        assert "Provide a search query." in _get_text(result)
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "Provide a search query.",
+        }
         assert _graph_trail() == []
 
     @respx.mock
     async def test_search_teams_messages_invalid_options(self, mcp_server):
         """Options JSON is validated before any request."""
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "search_teams_messages",
+                {"query": "#budget2026", "options": "not json"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "search_teams_messages",
-                    {"query": "#budget2026", "options": "not json"},
-                )
-
-        assert "must be valid JSON" in _get_text(result)
+        data = _structured(result)
+        assert data["error"] == "invalid_options"
+        assert "must be valid JSON" in data["reason"]
         assert _graph_trail() == []
 
     @respx.mock
@@ -2465,17 +2477,15 @@ class TestMCPTeamsTools:
             }
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "search_teams_messages",
+                {"query": "#budget2026", "conversation_id": SEARCH_CHAT_ID},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "search_teams_messages",
-                    {"query": "#budget2026", "conversation_id": SEARCH_CHAT_ID},
-                )
-
-        text = _get_text(result)
-        assert "1 message(s) matching" in text
-        assert f"in `{SEARCH_CHAT_ID}`" in text
+        data = _structured(result)
+        assert data["count"] == 1
+        assert data["conversation_id"] == SEARCH_CHAT_ID
         assert len([m for m, _ in _graph_trail() if m == "GET"]) == 1
 
     @respx.mock
@@ -2486,15 +2496,15 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({"m1": _search_msg("m1", content="budget20260 update")})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert "No messages found matching" in text
-        assert "The index matched 1 message(s)" in text
-        assert '{"exact": false}' in text
+        data = _structured(result)
+        assert data["messages"] == []
+        assert data["count"] == 0
+        assert data["notice"] == (
+            "The index matched 1 message(s) but none carried the hashtag literally; "
+            'retry with {"exact": false} to see them.'
+        )
 
     @respx.mock
     async def test_search_teams_messages_exact_false_keeps_it(self, mcp_server):
@@ -2504,15 +2514,13 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({"m1": _search_msg("m1", content="budget20260 update")})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "search_teams_messages",
+                {"query": "#budget2026", "options": '{"exact": false}'},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "search_teams_messages",
-                    {"query": "#budget2026", "options": '{"exact": false}'},
-                )
-
-        assert "1 message(s) matching" in _get_text(result)
+        assert _structured(result)["count"] == 1
 
     @respx.mock
     async def test_search_teams_messages_max_content_length(self, mcp_server):
@@ -2522,21 +2530,19 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({"m1": _search_msg("m1", content="#budget2026 " + "x" * 500)})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "search_teams_messages",
+                {"query": "#budget2026", "options": '{"max_content_length": 20}'},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "search_teams_messages",
-                    {"query": "#budget2026", "options": '{"max_content_length": 20}'},
-                )
-
-        text = _get_text(result)
-        assert "..." in text
-        assert "x" * 100 not in text
+        content = _structured(result)["messages"][0]["content"]
+        assert content.endswith("...")
+        assert len(content) <= 23
 
     @respx.mock
     async def test_search_teams_messages_max_results(self, mcp_server):
-        """max_results trims the table and prints the truncation note."""
+        """max_results trims the rows and the notice says more may exist."""
         respx.post(TEAMS_SEARCH_URL).mock(
             return_value=httpx.Response(
                 200,
@@ -2547,17 +2553,18 @@ class TestMCPTeamsTools:
             {"m1": _search_msg("m1"), "m2": _search_msg("m2"), "m3": _search_msg("m3")}
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "search_teams_messages",
+                {"query": "#budget2026", "options": '{"max_results": 1}'},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "search_teams_messages",
-                    {"query": "#budget2026", "options": '{"max_results": 1}'},
-                )
-
-        text = _get_text(result)
-        assert "1 message(s) matching" in text
-        assert "More results may exist" in text
+        data = _structured(result)
+        assert data["count"] == 1
+        assert data["notice"] == (
+            "More results may exist. Narrow the search with since or "
+            "conversation_id, or raise max_results."
+        )
 
     @respx.mock
     async def test_search_teams_messages_attachments_column(self, mcp_server):
@@ -2569,12 +2576,9 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({"chat-msg-file-001": SAMPLE_CHAT_MESSAGE_WITH_FILE})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "notes"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "notes"})
-
-        assert "[file:" in _get_text(result)
+        assert "[file:" in _structured(result)["messages"][0]["attachments"]
 
     @respx.mock
     async def test_search_teams_messages_skipped_note(self, mcp_server):
@@ -2586,14 +2590,15 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({"m1": _search_msg("m1")})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert "1 message(s) matching" in text
-        assert "could not be read" in text
+        data = _structured(result)
+        assert data["count"] == 1
+        assert data["skipped"] == 1
+        assert data["notice"] == (
+            "1 matching message(s) could not be read "
+            "(deleted, or no longer shared with you) and were skipped."
+        )
 
     @respx.mock
     async def test_search_teams_messages_only_hit_deleted(self, mcp_server):
@@ -2603,15 +2608,16 @@ class TestMCPTeamsTools:
         )
         _mock_search_hydration({})
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert "No messages found matching" in text
-        assert "1 matching message(s) could not be read" in text
-        assert "The index matched" not in text
+        data = _structured(result)
+        assert data["messages"] == []
+        assert data["skipped"] == 1
+        # Nothing was hydrated, so the stemming hint would be a lie.
+        assert data["notice"] == (
+            "1 matching message(s) could not be read "
+            "(deleted, or no longer shared with you) and were skipped."
+        )
 
     @respx.mock
     async def test_search_teams_messages_no_results(self, mcp_server):
@@ -2620,26 +2626,29 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(200, json=SAMPLE_SEARCH_MESSAGES_EMPTY)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        text = _get_text(result)
-        assert "No messages found matching" in text
-        assert "The index matched" not in text
+        assert _structured(result) == {
+            "messages": [],
+            "count": 0,
+            "query": "#budget2026",
+            "since": "",
+            "conversation_id": "",
+            "skipped": 0,
+            "notice": "",
+        }
 
     @respx.mock
     async def test_search_teams_messages_teams_unavailable(self, mcp_server):
-        """A 403 on the index is the no-Teams-licence message."""
+        """A 403 on the index is the no-Teams-licence answer."""
         respx.post(TEAMS_SEARCH_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
-
-        assert "Microsoft Teams is not available for this account." in _get_text(result)
+        assert _structured(result) == {
+            "error": "teams_not_available",
+            "reason": "Microsoft Teams is not available for this account.",
+        }
 
     @respx.mock
     async def test_search_teams_messages_consumer_account(self, mcp_server):
@@ -2648,12 +2657,22 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(400, json=SEARCH_NOT_SUPPORTED_400)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("search_teams_messages", {"query": "#budget2026"})
+        assert _structured(result) == {
+            "error": "search_unsupported",
+            "reason": (
+                "Teams message search is not available for this account. Microsoft "
+                "Search covers work and school accounts only. Read a specific "
+                "conversation with read_teams_messages instead."
+            ),
+        }
 
-        assert "work and school accounts" in _get_text(result)
+    async def test_search_teams_messages_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_read_email_max_content_length(self, mcp_server):
@@ -2870,7 +2889,7 @@ class TestMCPTeamsTools:
         assert payload["body"]["contentType"] == "text"
 
     @respx.mock
-    async def test_get_teams_activity(self, mcp_server):
+    async def test_get_teams_activity_quiet_window(self, mcp_server):
         # Wire up all the calls the activity scanner makes
         respx.get(f"{GRAPH_BASE_URL}/me/joinedTeams").mock(
             return_value=httpx.Response(200, json={"value": []})
@@ -2879,13 +2898,54 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "get_teams_activity", {"hours": 1})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("get_teams_activity", {"hours": 1})
+        assert _structured(result) == {
+            "activity": [],
+            "count": 0,
+            "sources": 0,
+            "hours": 1,
+        }
 
-        text = _get_text(result)
-        assert "No Teams activity" in text
+    @respx.mock
+    async def test_get_teams_activity_rows(self, mcp_server):
+        """A chat's last message becomes one row, and the chat is one source."""
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        chat = {
+            "id": "chat-1on1-001",
+            "chatType": "oneOnOne",
+            "topic": None,
+            "members": [{"displayName": "Alice Smith"}],
+            "lastMessagePreview": {
+                "createdDateTime": recent,
+                "body": {"content": "Standup in five"},
+                "from": {"user": {"displayName": "Alice Smith"}},
+            },
+            "viewpoint": {"lastMessageReadDateTime": recent},
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/joinedTeams").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json={"value": [chat]})
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_teams_activity", {"hours": 24})
+
+        assert _structured(result) == {
+            "activity": [
+                {
+                    "source": "chat",
+                    "source_name": "oneOnOne: Alice Smith",
+                    "sender": "Alice Smith",
+                    "timestamp": recent,
+                    "preview": "Standup in five",
+                }
+            ],
+            "count": 1,
+            "sources": 1,
+            "hours": 24,
+        }
 
     @respx.mock
     async def test_get_teams_activity_not_available(self, mcp_server):
@@ -2893,12 +2953,18 @@ class TestMCPTeamsTools:
             return_value=httpx.Response(403, json=GRAPH_ERROR_403)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "get_teams_activity")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("get_teams_activity", {})
+        assert _structured(result) == {
+            "error": "teams_not_available",
+            "reason": "Microsoft Teams is not available for this account.",
+        }
 
-        assert "not available" in _get_text(result).lower()
+    async def test_get_teams_activity_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "get_teams_activity")
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_list_chats_with_mark_as_read(self, mcp_server):
@@ -3763,14 +3829,20 @@ class TestMCPFileTools:
             return_value=httpx.Response(200, json=SAMPLE_SITES_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_sharepoint_sites", {"query": "engineering"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_sharepoint_sites", {"query": "engineering"})
-
-        text = _get_text(result)
-        assert "Engineering Hub" in text
-        assert "2" in text
+        assert _structured(result) == {
+            "sites": [
+                {
+                    "name": site["displayName"],
+                    "id": site["id"],
+                    "web_url": site["webUrl"],
+                }
+                for site in SAMPLE_SITES_RESPONSE["value"]
+            ],
+            "count": 2,
+            "query": "engineering",
+        }
 
     @respx.mock
     async def test_list_sharepoint_sites_empty(self, mcp_server):
@@ -3778,28 +3850,46 @@ class TestMCPFileTools:
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_sharepoint_sites", {"query": "nope"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_sharepoint_sites", {"query": "nope"})
+        assert _structured(result) == {"sites": [], "count": 0, "query": "nope"}
 
-        assert "No SharePoint sites found" in _get_text(result)
+    async def test_list_sharepoint_sites_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "list_sharepoint_sites")
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_list_files_onedrive_browse(self, mcp_server):
-        """No site_id, no query → OneDrive root browse."""
+        """No site_id, no query → OneDrive root browse, folders and files as one table."""
         respx.get(f"{GRAPH_BASE_URL}/me/drive/root/children").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_CHILDREN_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_files")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_files", {})
-
-        text = _get_text(result)
-        assert "Documents" in text
-        assert "report.csv" in text
+        assert _structured(result) == {
+            "files": [
+                {
+                    "name": "Documents",
+                    "type": "folder",
+                    "size": 0,
+                    "child_count": 5,
+                    "id": "folder-id-001",
+                },
+                {"name": "report.csv", "type": "file", "size": 1024, "id": "file-id-001"},
+                {
+                    "name": "presentation.pptx",
+                    "type": "file",
+                    "size": 2_500_000,
+                    "id": "file-id-002",
+                },
+            ],
+            "count": 3,
+            "folder_path": "",
+            "query": "",
+        }
 
     @respx.mock
     async def test_list_files_onedrive_subfolder(self, mcp_server):
@@ -3807,46 +3897,72 @@ class TestMCPFileTools:
             return_value=httpx.Response(200, json={"value": [SAMPLE_DRIVE_ITEM_FILE]})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_files", {"folder_path": "Documents"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_files", {"folder_path": "Documents"})
-
-        text = _get_text(result)
-        assert "report.csv" in text
-        assert "Documents" in text
+        assert _structured(result) == {
+            "files": [{"name": "report.csv", "type": "file", "size": 1024, "id": "file-id-001"}],
+            "count": 1,
+            "folder_path": "Documents",
+            "query": "",
+        }
 
     @respx.mock
     async def test_list_files_sharepoint_browse(self, mcp_server):
         """site_id set, no query → SharePoint browse."""
         site_id = "site-id-001"
         respx.get(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/root/children").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_CHILDREN_RESPONSE)
+            return_value=httpx.Response(200, json={"value": [SAMPLE_DRIVE_ITEM_FOLDER]})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_files", {"site_id": site_id})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_files", {"site_id": site_id})
-
-        text = _get_text(result)
-        assert "Documents" in text
+        assert _structured(result) == {
+            "files": [
+                {
+                    "name": "Documents",
+                    "type": "folder",
+                    "size": 0,
+                    "child_count": 5,
+                    "id": "folder-id-001",
+                }
+            ],
+            "count": 1,
+            "folder_path": "",
+            "query": "",
+        }
 
     @respx.mock
     async def test_list_files_search_query(self, mcp_server):
-        """query set → search mode, site_id and folder_path ignored."""
+        """query set → search mode, which adds the summary and url columns."""
         respx.post(f"{GRAPH_BASE_URL}/search/query").mock(
             return_value=httpx.Response(200, json=SAMPLE_SEARCH_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_files", {"query": "budget"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_files", {"query": "budget"})
-
-        text = _get_text(result)
-        assert "Q4-budget.xlsx" in text
-        assert "budget-notes.md" in text
+        assert _structured(result) == {
+            "files": [
+                {
+                    "name": "Q4-budget.xlsx",
+                    "type": "file",
+                    "size": 45000,
+                    "id": "search-file-001",
+                    "summary": "Q4 <c0>budget</c0> projections for 2025",
+                    "url": "https://contoso.sharepoint.com/sites/finance/Q4-budget.xlsx",
+                },
+                {
+                    "name": "budget-notes.md",
+                    "type": "file",
+                    "size": 2048,
+                    "id": "search-file-002",
+                    "summary": "Notes on <c0>budget</c0> review meeting",
+                    "url": "https://contoso.sharepoint.com/sites/finance/budget-notes.md",
+                },
+            ],
+            "count": 2,
+            "folder_path": "",
+            "query": "budget",
+        }
 
     @respx.mock
     async def test_list_files_search_no_results(self, mcp_server):
@@ -3854,12 +3970,14 @@ class TestMCPFileTools:
             return_value=httpx.Response(200, json=SAMPLE_SEARCH_RESPONSE_EMPTY)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_files", {"query": "nonexistent"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_files", {"query": "nonexistent"})
-
-        assert "No files found" in _get_text(result)
+        assert _structured(result) == {
+            "files": [],
+            "count": 0,
+            "folder_path": "",
+            "query": "nonexistent",
+        }
 
     @respx.mock
     async def test_list_files_empty_folder(self, mcp_server):
@@ -3867,12 +3985,69 @@ class TestMCPFileTools:
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_files")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_files", {})
+        assert _structured(result) == {
+            "files": [],
+            "count": 0,
+            "folder_path": "",
+            "query": "",
+        }
 
-        assert "No files found" in _get_text(result)
+    @respx.mock
+    async def test_list_files_sharing_url(self, mcp_server):
+        """url set → the shared folder's children, addressed by encoded share id."""
+        share_url = f"{GRAPH_BASE_URL}/shares/{_encode_sharing_url(TEAMS_FILE_URL)}/root/children"
+        respx.get(share_url).mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_DRIVE_ITEM_FILE]})
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_files", {"url": TEAMS_FILE_URL})
+
+        assert _structured(result) == {
+            "files": [{"name": "report.csv", "type": "file", "size": 1024, "id": "file-id-001"}],
+            "count": 1,
+            "folder_path": "",
+            "query": "",
+        }
+
+    @pytest.mark.parametrize(
+        ("status", "payload", "code"),
+        [
+            (403, GRAPH_ERROR_403, "access_denied"),
+            (404, GRAPH_ERROR_404, "not_found"),
+            (400, GRAPH_ERROR_400, "invalid_link"),
+        ],
+    )
+    @respx.mock
+    async def test_list_files_sharing_url_errors(self, mcp_server, status, payload, code):
+        """The three link failures a caller can act on are permanent codes."""
+        share_url = f"{GRAPH_BASE_URL}/shares/{_encode_sharing_url(TEAMS_FILE_URL)}/root/children"
+        respx.get(share_url).mock(return_value=httpx.Response(status, json=payload))
+        with _mock_token():
+            result = await _call(mcp_server, "list_files", {"url": TEAMS_FILE_URL})
+
+        assert _structured(result)["error"] == code
+
+    @respx.mock
+    async def test_list_files_sharing_url_other_error_propagates(self, mcp_server):
+        """A 500 on the share route is transient and must stay a tool error."""
+        from fastmcp.exceptions import ToolError
+
+        share_url = f"{GRAPH_BASE_URL}/shares/{_encode_sharing_url(TEAMS_FILE_URL)}/root/children"
+        respx.get(share_url).mock(
+            return_value=httpx.Response(
+                500, json={"error": {"code": "serviceNotAvailable", "message": "Try later"}}
+            )
+        )
+        with _mock_token(), pytest.raises(ToolError, match="serviceNotAvailable"):
+            await _call(mcp_server, "list_files", {"url": TEAMS_FILE_URL})
+
+    async def test_list_files_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "list_files")
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_graph_error_propagates_from_file_tool(self, mcp_server):
@@ -4113,7 +4288,7 @@ class TestMCPInspectFile:
 
 
 class TestMCPUploadTool:
-    """Tests for the upload_file MCP tool."""
+    """manage_file(action="upload") — the create-or-overwrite branch."""
 
     @respx.mock
     async def test_upload_creates_file_in_root(self, mcp_server):
@@ -4121,18 +4296,20 @@ class TestMCPUploadTool:
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"action": "upload", "filename": "notes.md", "content": "# Hello"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "upload_file",
-                    {"filename": "notes.md", "content": "# Hello"},
-                )
-
-        text = _get_text(result)
-        assert "notes.md" in text
-        assert "uploaded" in text.lower()
-        assert route.called
+        assert _structured(result) == {
+            "action": "upload",
+            "id": SAMPLE_UPLOADED_FILE["id"],
+            "name": "notes.md",
+            "size": SAMPLE_UPLOADED_FILE["size"],
+            "web_url": SAMPLE_UPLOADED_FILE["webUrl"],
+        }
+        assert route.calls[0].request.content == b"# Hello"
 
     @respx.mock
     async def test_upload_to_subfolder(self, mcp_server):
@@ -4140,15 +4317,19 @@ class TestMCPUploadTool:
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "data.csv",
+                    "content": "a,b\n1,2",
+                    "options": '{"folder_path": "Documents"}',
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "upload_file",
-                    {"filename": "data.csv", "content": "a,b\n1,2", "folder_path": "Documents"},
-                )
-
-        assert "uploaded" in _get_text(result).lower()
+        assert _structured(result)["action"] == "upload"
+        assert _graph_trail() == [("PUT", "/v1.0/me/drive/root:/Documents/data.csv:/content")]
         assert route.calls[0].request.headers["Content-Type"] == "text/csv"
 
     @respx.mock
@@ -4158,38 +4339,19 @@ class TestMCPUploadTool:
             f"{GRAPH_BASE_URL}/sites/{site_id}/drive/root:/Shared Documents/report.html:/content"
         ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "report.html",
+                    "content": "<h1>Hello</h1>",
+                    "options": json.dumps({"folder_path": "Shared Documents", "site_id": site_id}),
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "upload_file",
-                    {
-                        "filename": "report.html",
-                        "content": "<h1>Hello</h1>",
-                        "folder_path": "Shared Documents",
-                        "site_id": site_id,
-                    },
-                )
-
-        assert route.called
+        assert _structured(result)["action"] == "upload"
         assert route.calls[0].request.headers["Content-Type"] == "text/html"
-
-    @respx.mock
-    async def test_upload_result_includes_id_and_url(self, mcp_server):
-        respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/readme.txt:/content").mock(
-            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "upload_file", {"filename": "readme.txt", "content": "hello"}
-                )
-
-        text = _get_text(result)
-        assert SAMPLE_UPLOADED_FILE["id"] in text
-        assert SAMPLE_UPLOADED_FILE["webUrl"] in text
 
     @respx.mock
     async def test_upload_docx_converts_markdown(self, mcp_server):
@@ -4198,17 +4360,17 @@ class TestMCPUploadTool:
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "Review.docx",
+                    "content": "# Title\n\nA paragraph.",
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "upload_file",
-                    {"filename": "Review.docx", "content": "# Title\n\nA paragraph."},
-                )
-
-        text = _get_text(result)
-        assert "uploaded" in text.lower()
-        assert route.called
+        assert _structured(result)["action"] == "upload"
         req = route.calls[0].request
         assert req.headers["Content-Type"] == (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -4217,49 +4379,90 @@ class TestMCPUploadTool:
 
     @respx.mock
     async def test_upload_base64_binary(self, mcp_server):
-        """Uploading with content_encoding=base64 decodes and uploads binary."""
-        import base64
-
+        """content_encoding=base64 decodes and uploads the raw bytes."""
         raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
         encoded = base64.b64encode(raw).decode()
         route = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/image.png:/content").mock(
             return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "image.png",
+                    "content": encoded,
+                    "content_encoding": "base64",
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "upload_file",
-                    {
-                        "filename": "image.png",
-                        "content": encoded,
-                        "content_encoding": "base64",
-                    },
-                )
-
-        text = _get_text(result)
-        assert "uploaded" in text.lower()
-        assert route.called
+        assert _structured(result)["action"] == "upload"
         assert route.calls[0].request.content == raw
 
-    async def test_upload_base64_invalid_content(self, mcp_server):
-        """Invalid base64 returns a user-friendly error."""
+    @respx.mock
+    async def test_upload_base64_beats_the_docx_extension(self, mcp_server):
+        """A base64 .docx uploads its bytes rather than being generated again."""
+        raw = b"PK\x03\x04already-a-docx"
+        route = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/Ready.docx:/content").mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
         with _mock_token():
-            from fastmcp import Client
+            await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "Ready.docx",
+                    "content": base64.b64encode(raw).decode(),
+                    "content_encoding": "base64",
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "upload_file",
-                    {
-                        "filename": "file.bin",
-                        "content": "not-valid-base64!!!",
-                        "content_encoding": "base64",
-                    },
-                )
+        assert route.calls[0].request.content == raw
+        assert route.calls[0].request.headers["Content-Type"] == "application/octet-stream"
 
-        text = _get_text(result)
-        assert "Failed to decode" in text
+    @respx.mock
+    async def test_upload_base64_invalid_content(self, mcp_server):
+        """Invalid base64 is refused before any request."""
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "file.bin",
+                    "content": "not-valid-base64!!!",
+                    "content_encoding": "base64",
+                },
+            )
+
+        data = _structured(result)
+        assert data["error"] == "invalid_arguments"
+        assert data["reason"].startswith("Failed to decode base64 content:")
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_upload_over_the_simple_limit_is_refused(self, mcp_server):
+        """The ops layer caps simple uploads at 4 MB, before it sends anything."""
+        from ms_graph import files as files_ops
+
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "huge.txt",
+                    "content": "a" * (files_ops.MAX_SIMPLE_UPLOAD_BYTES + 1),
+                },
+            )
+
+        data = _structured(result)
+        assert data["error"] == "too_large"
+        assert data["limit"] == files_ops.MAX_SIMPLE_UPLOAD_BYTES
+        assert "4 MB simple upload limit" in data["reason"]
+        assert _graph_trail() == []
 
     @respx.mock
     async def test_upload_docx_to_sharepoint(self, mcp_server):
@@ -4269,25 +4472,42 @@ class TestMCPUploadTool:
             f"{GRAPH_BASE_URL}/sites/{site_id}/drive/root:/Contracts/Review.docx:/content"
         ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "action": "upload",
+                    "filename": "Review.docx",
+                    "content": "# Contract\n\n- Clause 1\n- Clause 2",
+                    "options": json.dumps({"folder_path": "Contracts", "site_id": site_id}),
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "upload_file",
-                    {
-                        "filename": "Review.docx",
-                        "content": "# Contract\n\n- Clause 1\n- Clause 2",
-                        "folder_path": "Contracts",
-                        "site_id": site_id,
-                    },
-                )
-
-        assert "uploaded" in _get_text(result).lower()
+        assert _structured(result)["action"] == "upload"
         assert route.called
+
+    async def test_upload_requires_a_filename(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "manage_file", {"action": "upload", "content": "hi"})
+
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "filename is required for the 'upload' action.",
+        }
+
+    async def test_upload_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"action": "upload", "filename": "x.txt", "content": "y"},
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 class TestMCPCopyOrRenameTool:
-    """Tests for the consolidated manage_file MCP tool (copy/rename/delete)."""
+    """manage_file's copy/rename/delete branches."""
 
     @pytest.fixture(autouse=True)
     def patch_sleep(self, no_sleep):
@@ -4305,18 +4525,17 @@ class TestMCPCopyOrRenameTool:
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": item_id, "new_name": "template-copy.docx", "action": "copy"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": item_id, "new_name": "template-copy.docx", "action": "copy"},
-                )
-
-        text = _get_text(result)
-        assert "copied" in text.lower()
-        assert "template-copy.docx" in text
-        assert SAMPLE_COPY_COMPLETED["resourceId"] in text
+        assert _structured(result) == {
+            "action": "copy",
+            "id": SAMPLE_COPY_COMPLETED["resourceId"],
+            "name": "template-copy.docx",
+        }
 
     @respx.mock
     async def test_copy_with_destination_folder(self, mcp_server):
@@ -4330,24 +4549,25 @@ class TestMCPCopyOrRenameTool:
         ).mock(return_value=httpx.Response(202, headers={"Location": MONITOR_URL}))
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_COMPLETED))
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "manage_file",
-                    {
-                        "item_id": item_id,
-                        "new_name": "archived.docx",
-                        "action": "copy",
-                        "options": f'{{"destination_folder_id": "{dest}"}}',
-                    },
-                )
+            await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "item_id": item_id,
+                    "new_name": "archived.docx",
+                    "action": "copy",
+                    "options": f'{{"destination_folder_id": "{dest}"}}',
+                },
+            )
 
         copy_body = json.loads(copy_route.calls[0].request.content)
         assert copy_body["parentReference"]["id"] == dest
 
     @respx.mock
-    async def test_copy_error_returns_message(self, mcp_server):
+    async def test_copy_failure_is_a_tool_error(self, mcp_server):
+        """A failed copy monitor raises — the operation is not permanently bad."""
+        from fastmcp.exceptions import ToolError
+
         item_id = SAMPLE_DRIVE_ITEM_WORD["id"]
         respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_WORD)
@@ -4356,18 +4576,12 @@ class TestMCPCopyOrRenameTool:
             return_value=httpx.Response(202, headers={"Location": MONITOR_URL})
         )
         respx.get(MONITOR_URL).mock(return_value=httpx.Response(200, json=SAMPLE_COPY_FAILED))
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": item_id, "new_name": "copy.docx", "action": "copy"},
-                )
-
-        text = _get_text(result)
-        assert "Error performing copy" in text
-        assert "accessDenied" in text
+        with _mock_token(), pytest.raises(ToolError, match="accessDenied"):
+            await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": item_id, "new_name": "copy.docx", "action": "copy"},
+            )
 
     @respx.mock
     async def test_rename_action(self, mcp_server):
@@ -4378,19 +4592,19 @@ class TestMCPCopyOrRenameTool:
             return_value=httpx.Response(200, json=renamed)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": item_id, "new_name": "final-report.csv"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": item_id, "new_name": "final-report.csv"},
-                )
-
-        text = _get_text(result)
-        assert "final-report.csv" in text
-        assert "renamed" in text.lower()
-        body = json.loads(route.calls[0].request.content)
-        assert body == {"name": "final-report.csv"}
+        assert _structured(result) == {
+            "action": "rename",
+            "id": item_id,
+            "name": "final-report.csv",
+            "web_url": SAMPLE_DRIVE_ITEM_FILE["webUrl"],
+        }
+        assert json.loads(route.calls[0].request.content) == {"name": "final-report.csv"}
 
     @respx.mock
     async def test_rename_on_sharepoint(self, mcp_server):
@@ -4401,36 +4615,34 @@ class TestMCPCopyOrRenameTool:
             return_value=httpx.Response(200, json=renamed)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "item_id": item_id,
+                    "new_name": "final-doc.docx",
+                    "options": f'{{"site_id": "{site_id}"}}',
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {
-                        "item_id": item_id,
-                        "new_name": "final-doc.docx",
-                        "options": f'{{"site_id": "{site_id}"}}',
-                    },
-                )
-
-        assert "final-doc.docx" in _get_text(result)
+        assert _structured(result)["name"] == "final-doc.docx"
+        assert _graph_trail() == [("PATCH", f"/v1.0/sites/{site_id}/drive/items/{item_id}")]
 
     async def test_invalid_action(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": "x", "new_name": "y", "action": "move"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": "x", "new_name": "y", "action": "move"},
-                )
-
-        text = _get_text(result)
-        assert "Invalid action" in text
-        assert "move" in text
+        assert _structured(result) == {
+            "error": "invalid_action",
+            "reason": "Invalid action 'move'. Must be 'rename', 'copy', 'delete', or 'upload'.",
+        }
 
     @respx.mock
-    async def test_rename_not_found_returns_message(self, mcp_server):
+    async def test_rename_not_found(self, mcp_server):
         item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
         respx.patch(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(
@@ -4438,18 +4650,19 @@ class TestMCPCopyOrRenameTool:
             )
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": item_id, "new_name": "x.csv"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": item_id, "new_name": "x.csv"},
-                )
-
-        assert "not found" in _get_text(result).lower()
+        assert _structured(result) == {
+            "error": "not_found",
+            "reason": f"File not found: {item_id}",
+        }
 
     @respx.mock
-    async def test_delete_not_found_returns_message(self, mcp_server):
+    async def test_delete_not_found(self, mcp_server):
         item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
         respx.delete(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
             return_value=httpx.Response(
@@ -4457,15 +4670,35 @@ class TestMCPCopyOrRenameTool:
             )
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": item_id, "action": "delete"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": item_id, "action": "delete"},
-                )
+        assert _structured(result) == {
+            "error": "not_found",
+            "reason": f"File not found: {item_id}",
+        }
 
-        assert "not found" in _get_text(result).lower()
+    @respx.mock
+    async def test_transient_graph_error_still_raises(self, mcp_server):
+        """Only a 404 is permanent; a 503 must reach the client as a tool error."""
+        from fastmcp.exceptions import ToolError
+
+        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
+        respx.patch(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
+            return_value=httpx.Response(
+                503,
+                json={"error": {"code": "serviceNotAvailable", "message": "Try again later."}},
+            )
+        )
+        with _mock_token(), pytest.raises(ToolError, match="serviceNotAvailable"):
+            await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": item_id, "new_name": "x.csv"},
+            )
 
     @respx.mock
     async def test_delete_action(self, mcp_server):
@@ -4475,16 +4708,14 @@ class TestMCPCopyOrRenameTool:
             return_value=httpx.Response(204)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": item_id, "action": "delete"},
-                )
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": item_id, "action": "delete"},
+            )
 
         assert route.called
-        assert "Deleted" in _get_text(result)
+        assert _structured(result) == {"action": "delete", "id": item_id}
 
     @respx.mock
     async def test_delete_on_sharepoint(self, mcp_server):
@@ -4494,32 +4725,46 @@ class TestMCPCopyOrRenameTool:
             return_value=httpx.Response(204)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {
-                        "item_id": item_id,
-                        "action": "delete",
-                        "options": f'{{"site_id": "{site_id}"}}',
-                    },
-                )
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {
+                    "item_id": item_id,
+                    "action": "delete",
+                    "options": f'{{"site_id": "{site_id}"}}',
+                },
+            )
 
         assert route.called
-        assert "Deleted" in _get_text(result)
+        assert _structured(result) == {"action": "delete", "id": item_id}
 
     async def test_rename_requires_new_name(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_file",
+                {"item_id": "x", "action": "rename"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_file",
-                    {"item_id": "x", "action": "rename"},
-                )
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "new_name is required for the 'rename' action.",
+        }
 
-        assert "new_name is required" in _get_text(result)
+    async def test_delete_requires_an_item_id(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "manage_file", {"action": "delete"})
+
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "item_id is required for the 'delete' action.",
+        }
+
+    async def test_manage_file_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "manage_file", {"item_id": "x", "new_name": "y.csv"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 # ---------------------------------------------------------------------------
@@ -4536,40 +4781,39 @@ class TestMCPPowerBITools:
 
     @respx.mock
     async def test_list_powerbi_workspaces(self, mcp_server):
+        """No workspace_id → the workspace list, led by the synthetic My workspace."""
         respx.get(f"{POWERBI_BASE_URL}/groups").mock(
             return_value=httpx.Response(200, json=SAMPLE_PBI_WORKSPACES_RESPONSE)
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_powerbi")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_powerbi_workspaces", {})
-
-        text = _get_text(result)
-        assert "Analytics Hub" in text
-        assert "Finance Reports" in text
-        assert "My workspace" in text
-        assert "3 workspace(s)" in text
+        assert _structured(result) == {
+            "workspaces": [
+                {"name": "My workspace", "id": "me", "premium": False},
+                {"name": "Analytics Hub", "id": "ws-id-001", "premium": True},
+                {"name": "Finance Reports", "id": "ws-id-002", "premium": False},
+            ],
+            "count": 3,
+        }
 
     @respx.mock
     async def test_list_powerbi_workspaces_empty(self, mcp_server):
+        """My workspace has no group ID, so it is always prepended."""
         respx.get(f"{POWERBI_BASE_URL}/groups").mock(
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_powerbi")
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_powerbi_workspaces", {})
-
-        # Even with no named workspaces, My workspace is always shown
-        text = _get_text(result)
-        assert "My workspace" in text
-        assert "1 workspace(s)" in text
+        assert _structured(result) == {
+            "workspaces": [{"name": "My workspace", "id": "me", "premium": False}],
+            "count": 1,
+        }
 
     @respx.mock
     async def test_list_powerbi_content_all(self, mcp_server):
-        """content_type=all returns datasets, reports, and dashboards."""
+        """A workspace_id → datasets, then reports, then dashboards, each tagged."""
         ws_id = "ws-id-001"
         respx.get(f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets").mock(
             return_value=httpx.Response(200, json=SAMPLE_PBI_DATASETS_RESPONSE)
@@ -4581,18 +4825,34 @@ class TestMCPPowerBITools:
             return_value=httpx.Response(200, json=SAMPLE_PBI_DASHBOARDS_RESPONSE)
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_powerbi", {"workspace_id": ws_id})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_powerbi_content", {"workspace_id": ws_id})
-
-        text = _get_text(result)
-        assert "Datasets" in text
-        assert "Sales" in text
-        assert "Reports" in text
-        assert "Q4 Dashboard" in text
-        assert "Dashboards" in text
-        assert "Executive Overview" in text
+        assert _structured(result) == {
+            "items": [
+                {"kind": "dataset", "name": "Sales", "id": "ds-id-001", "refreshable": True},
+                {
+                    "kind": "dataset",
+                    "name": "Marketing KPIs",
+                    "id": "ds-id-002",
+                    "refreshable": True,
+                },
+                {
+                    "kind": "report",
+                    "name": "Q4 Dashboard",
+                    "id": "rpt-id-001",
+                    "dataset_id": "ds-id-001",
+                },
+                {
+                    "kind": "report",
+                    "name": "Monthly Revenue",
+                    "id": "rpt-id-002",
+                    "dataset_id": "ds-id-002",
+                },
+                {"kind": "dashboard", "name": "Executive Overview", "id": "dash-id-001"},
+            ],
+            "count": 5,
+            "workspace_id": ws_id,
+        }
 
     @respx.mock
     async def test_list_powerbi_content_datasets_only(self, mcp_server):
@@ -4601,39 +4861,20 @@ class TestMCPPowerBITools:
             return_value=httpx.Response(200, json=SAMPLE_PBI_DATASETS_RESPONSE)
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "list_powerbi",
+                {"workspace_id": ws_id, "content_type": "datasets"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "list_powerbi_content",
-                    {"workspace_id": ws_id, "content_type": "datasets"},
-                )
-
-        text = _get_text(result)
-        assert "Datasets" in text
-        assert "Sales" in text
-        assert "Reports" not in text
-
-    @respx.mock
-    async def test_list_powerbi_workspaces_includes_my_workspace(self, mcp_server):
-        """list_powerbi_workspaces always includes My workspace with id='me'."""
-        respx.get(f"{POWERBI_BASE_URL}/groups").mock(
-            return_value=httpx.Response(200, json=SAMPLE_PBI_WORKSPACES_RESPONSE)
-        )
-        with _mock_pbi_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_powerbi_workspaces", {})
-
-        text = _get_text(result)
-        assert "My workspace" in text
-        assert "me" in text  # sentinel ID
-        assert "3 workspace(s)" in text  # 1 My + 2 named
+        data = _structured(result)
+        assert data["count"] == 2
+        assert {row["kind"] for row in data["items"]} == {"dataset"}
+        assert _graph_trail() == [("GET", f"/v1.0/myorg/groups/{ws_id}/datasets")]
 
     @respx.mock
     async def test_list_powerbi_content_my_workspace(self, mcp_server):
-        """workspace_id='me' routes to root /datasets endpoint, not /groups/me/."""
+        """workspace_id='me' routes to the root endpoints, not /groups/me/."""
         respx.get(f"{POWERBI_BASE_URL}/datasets").mock(
             return_value=httpx.Response(200, json=SAMPLE_PBI_DATASETS_RESPONSE)
         )
@@ -4644,26 +4885,33 @@ class TestMCPPowerBITools:
             return_value=httpx.Response(200, json=SAMPLE_PBI_DASHBOARDS_RESPONSE)
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_powerbi", {"workspace_id": "me"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_powerbi_content", {"workspace_id": "me"})
+        data = _structured(result)
+        assert data["workspace_id"] == "me"
+        assert data["count"] == 5
+        assert not any("/groups/" in path for _, path in _graph_trail())
 
-        text = _get_text(result)
-        assert "Sales" in text
-        assert "Q4 Dashboard" in text
-
-    async def test_list_powerbi_content_invalid_type(self, mcp_server):
+    async def test_list_powerbi_invalid_content_type(self, mcp_server):
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "list_powerbi",
+                {"workspace_id": "ws-id-001", "content_type": "tiles"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "list_powerbi_content",
-                    {"workspace_id": "ws-id-001", "content_type": "tiles"},
-                )
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": (
+                "Invalid content_type 'tiles'. Must be: datasets, reports, dashboards, or all."
+            ),
+        }
 
-        assert "Invalid content_type" in _get_text(result)
+    async def test_list_powerbi_not_connected(self, mcp_server):
+        with _mock_missing_pbi_connection():
+            result = await _call(mcp_server, "list_powerbi")
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_query_dataset(self, mcp_server):
@@ -4673,40 +4921,72 @@ class TestMCPPowerBITools:
             f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets/{ds_id}/executeQueries"
         ).mock(return_value=httpx.Response(200, json=SAMPLE_PBI_DAX_RESULT))
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "query_dataset",
+                {"workspace_id": ws_id, "dataset_id": ds_id, "dax_query": "EVALUATE 'Sales'"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "query_dataset",
-                    {"workspace_id": ws_id, "dataset_id": ds_id, "dax_query": "EVALUATE 'Sales'"},
-                )
-
-        text = _get_text(result)
-        assert "3 row(s)" in text
-        assert "West" in text
-        assert "[Region]" in text
+        assert _structured(result) == {
+            "rows": SAMPLE_PBI_DAX_RESULT["results"][0]["tables"][0]["rows"],
+            "count": 3,
+        }
         body = json.loads(route.calls[0].request.content)
         assert body["queries"][0]["query"] == "EVALUATE 'Sales'"
 
     @respx.mock
-    async def test_refresh_dataset(self, mcp_server):
+    async def test_query_dataset_keeps_sparse_rows(self, mcp_server):
+        """Power BI omits null columns per row; the raw rows survive untouched,
+        and the renderer unions the headers."""
         ws_id = "ws-id-001"
         ds_id = "ds-id-001"
-        route = respx.post(f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets/{ds_id}/refreshes").mock(
-            return_value=httpx.Response(202)
+        sparse = {
+            "results": [
+                {
+                    "tables": [
+                        {
+                            "rows": [
+                                {"[Region]": "West", "[Units]": 4200},
+                                {"[Region]": "East", "[Margin]": 0.12},
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+        respx.post(f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets/{ds_id}/executeQueries").mock(
+            return_value=httpx.Response(200, json=sparse)
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "query_dataset",
+                {"workspace_id": ws_id, "dataset_id": ds_id, "dax_query": "EVALUATE 'Sales'"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "refresh_dataset",
-                    {"workspace_id": ws_id, "dataset_id": ds_id},
-                )
+        assert _structured(result) == {
+            "rows": [
+                {"[Region]": "West", "[Units]": 4200},
+                {"[Region]": "East", "[Margin]": 0.12},
+            ],
+            "count": 2,
+        }
 
-        text = _get_text(result)
-        assert "Refresh triggered" in text
-        assert route.called
+    @respx.mock
+    async def test_query_dataset_no_rows(self, mcp_server):
+        ws_id = "ws-id-001"
+        ds_id = "ds-id-001"
+        respx.post(f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets/{ds_id}/executeQueries").mock(
+            return_value=httpx.Response(200, json=SAMPLE_PBI_DAX_EMPTY)
+        )
+        with _mock_pbi_token():
+            result = await _call(
+                mcp_server,
+                "query_dataset",
+                {"workspace_id": ws_id, "dataset_id": ds_id, "dax_query": "EVALUATE 'Sales'"},
+            )
+
+        assert _structured(result) == {"rows": [], "count": 0}
 
     @respx.mock
     async def test_query_dataset_my_workspace(self, mcp_server):
@@ -4716,17 +4996,45 @@ class TestMCPPowerBITools:
             return_value=httpx.Response(200, json=SAMPLE_PBI_DAX_RESULT)
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "query_dataset",
+                {"workspace_id": "me", "dataset_id": ds_id, "dax_query": "EVALUATE 'Sales'"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "query_dataset",
-                    {"workspace_id": "me", "dataset_id": ds_id, "dax_query": "EVALUATE 'Sales'"},
-                )
-
-        assert "3 row(s)" in _get_text(result)
-        assert route.called
+        assert _structured(result)["count"] == 3
         assert "/groups/" not in str(route.calls[0].request.url)
+
+    async def test_query_dataset_not_connected(self, mcp_server):
+        with _mock_missing_pbi_connection():
+            result = await _call(
+                mcp_server,
+                "query_dataset",
+                {"workspace_id": "ws-1", "dataset_id": "ds-1", "dax_query": "EVALUATE {1}"},
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+    @respx.mock
+    async def test_refresh_dataset(self, mcp_server):
+        ws_id = "ws-id-001"
+        ds_id = "ds-id-001"
+        route = respx.post(f"{POWERBI_BASE_URL}/groups/{ws_id}/datasets/{ds_id}/refreshes").mock(
+            return_value=httpx.Response(202)
+        )
+        with _mock_pbi_token():
+            result = await _call(
+                mcp_server,
+                "refresh_dataset",
+                {"workspace_id": ws_id, "dataset_id": ds_id},
+            )
+
+        assert _structured(result) == {
+            "ok": True,
+            "dataset_id": ds_id,
+            "workspace_id": ws_id,
+        }
+        assert route.called
 
     @respx.mock
     async def test_refresh_dataset_my_workspace(self, mcp_server):
@@ -4736,21 +5044,29 @@ class TestMCPPowerBITools:
             return_value=httpx.Response(202)
         )
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "refresh_dataset",
+                {"workspace_id": "me", "dataset_id": ds_id},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "refresh_dataset",
-                    {"workspace_id": "me", "dataset_id": ds_id},
-                )
-
-        assert "Refresh triggered" in _get_text(result)
-        assert route.called
+        assert _structured(result) == {"ok": True, "dataset_id": ds_id, "workspace_id": "me"}
         assert "/groups/" not in str(route.calls[0].request.url)
+
+    async def test_refresh_dataset_not_connected(self, mcp_server):
+        with _mock_missing_pbi_connection():
+            result = await _call(
+                mcp_server,
+                "refresh_dataset",
+                {"workspace_id": "ws-1", "dataset_id": "ds-1"},
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_export_report_onedrive_upload_failure_degrades_gracefully(self, mcp_server):
-        """If Graph token is missing, export still succeeds with a helpful message."""
+        """The bytes are already downloaded, so a dead Graph connection reports
+        the loss rather than raising mid-flight."""
         ws_id = "ws-id-001"
         rpt_id = "rpt-id-001"
         export_id = "export-id-001"
@@ -4765,27 +5081,25 @@ class TestMCPPowerBITools:
         respx.get(
             f"{POWERBI_BASE_URL}/groups/{ws_id}/reports/{rpt_id}/exports/{export_id}/file"
         ).mock(return_value=httpx.Response(200, content=b"%PDF fake"))
-        with (
-            _mock_pbi_token(),
-            patch("ms_graph_mcp.get_graph_token", side_effect=PermissionError("Not connected.")),
-        ):
-            from fastmcp import Client
+        with _mock_pbi_token(), _mock_missing_connection():
+            result = await _call(
+                mcp_server,
+                "export_report",
+                {"workspace_id": ws_id, "report_id": rpt_id, "export_format": "PDF"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "export_report",
-                    {"workspace_id": ws_id, "report_id": rpt_id, "export_format": "PDF"},
-                )
-
-        text = _get_text(result)
-        assert "exported" in text.lower()
-        assert "OneDrive" in text
-        assert "Microsoft auth" in text
-        assert "PDF" in text
+        assert _structured(result) == {
+            "error": "not_connected",
+            "connect_url": CONNECT_URL,
+            "reason": (
+                "Report exported as PDF (9 bytes) but could not be saved to OneDrive "
+                "because the Microsoft connection is not active."
+            ),
+        }
 
     @respx.mock
     async def test_export_report_success(self, mcp_server):
-        """Export flow: PBI export → download bytes → upload to OneDrive → return URL."""
+        """Export flow: PBI export → download bytes → upload to OneDrive."""
         ws_id = "ws-id-001"
         rpt_id = "rpt-id-001"
         export_id = "export-id-001"
@@ -4808,38 +5122,50 @@ class TestMCPPowerBITools:
         )
 
         with _mock_pbi_token(), _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "export_report",
+                {"workspace_id": ws_id, "report_id": rpt_id, "export_format": "PDF"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "export_report",
-                    {"workspace_id": ws_id, "report_id": rpt_id, "export_format": "PDF"},
-                )
-
-        text = _get_text(result)
-        assert "exported" in text.lower()
-        assert "PDF" in text
-        assert "OneDrive" in text
-        assert SAMPLE_UPLOADED_FILE["webUrl"] in text
-        # Verify correct content-type was sent for PDF
+        assert _structured(result) == {
+            "ok": True,
+            "format": "PDF",
+            "filename": f"report-{rpt_id}.pdf",
+            "size": len(fake_pdf),
+            "folder_path": "Power BI Exports",
+            "item_id": SAMPLE_UPLOADED_FILE["id"],
+            "web_url": SAMPLE_UPLOADED_FILE["webUrl"],
+        }
         assert upload_route.calls[0].request.headers["Content-Type"] == "application/pdf"
-        # Verify the bytes uploaded match what was downloaded
         assert upload_route.calls[0].request.content == fake_pdf
 
     async def test_export_report_invalid_format(self, mcp_server):
         with _mock_pbi_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "export_report",
+                {"workspace_id": "ws-1", "report_id": "rpt-1", "export_format": "DOCX"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "export_report",
-                    {"workspace_id": "ws-1", "report_id": "rpt-1", "export_format": "DOCX"},
-                )
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "Invalid export_format 'DOCX'. Must be: PDF, PNG, or PPTX.",
+        }
 
-        assert "Invalid export_format" in _get_text(result)
+    async def test_export_report_not_connected(self, mcp_server):
+        with _mock_missing_pbi_connection():
+            result = await _call(
+                mcp_server,
+                "export_report",
+                {"workspace_id": "ws-1", "report_id": "rpt-1"},
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
-    async def test_powerbi_auth_error_propagates(self, mcp_server):
+    async def test_powerbi_graph_error_propagates(self, mcp_server):
+        """A Power BI 401 is transient auth trouble, not a permanent answer."""
         from fastmcp.exceptions import ToolError
 
         respx.get(f"{POWERBI_BASE_URL}/groups").mock(
@@ -4847,12 +5173,8 @@ class TestMCPPowerBITools:
                 401, json={"error": {"code": "Unauthorized", "message": "Token expired."}}
             )
         )
-        with _mock_pbi_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="Unauthorized"):
-                    await client.call_tool("list_powerbi_workspaces", {})
+        with _mock_pbi_token(), pytest.raises(ToolError, match="Unauthorized"):
+            await _call(mcp_server, "list_powerbi")
 
 
 # ---------------------------------------------------------------------------
@@ -4872,7 +5194,7 @@ class TestMCPAuth:
         ):
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="Authorization required"):
-                    await client.call_tool("list_teams", {})
+                    await client.call_tool("list_chats", {})
 
     async def test_all_tools_require_auth(self, mcp_server):
         """Verify every tool rejects unauthenticated requests."""
@@ -4884,41 +5206,15 @@ class TestMCPAuth:
         # own not-connected tests rather than listed here.
         graph_tools = [
             ("read_email", {"message_id": "fake-id"}),
-            ("list_teams", {}),
             ("list_chats", {}),
             ("read_teams_messages", {"chat_id": "c1"}),
-            ("search_teams_messages", {"query": "#budget2026"}),
             ("send_teams_message", {"message": "Hi", "chat_id": "c1"}),
-            ("get_teams_activity", {}),
-            ("list_sharepoint_sites", {}),
-            ("list_files", {}),
-            ("upload_file", {"filename": "x.txt", "content": "y"}),
-            ("manage_file", {"item_id": "x", "new_name": "y"}),
         ]
         with patch(
             "ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")
         ):
             async with Client(mcp_server) as client:
                 for tool_name, args in graph_tools:
-                    with pytest.raises(ToolError, match="Authorization required"):
-                        await client.call_tool(tool_name, args)
-
-        # Power BI tools — blocked by get_powerbi_token failing
-        pbi_tools = [
-            ("list_powerbi_workspaces", {}),
-            ("list_powerbi_content", {"workspace_id": "ws-1"}),
-            (
-                "query_dataset",
-                {"workspace_id": "ws-1", "dataset_id": "ds-1", "dax_query": "EVALUATE {1}"},
-            ),
-            ("refresh_dataset", {"workspace_id": "ws-1", "dataset_id": "ds-1"}),
-            ("export_report", {"workspace_id": "ws-1", "report_id": "rpt-1"}),
-        ]
-        with patch(
-            "ms_graph_mcp.get_powerbi_token", side_effect=PermissionError("Authorization required.")
-        ):
-            async with Client(mcp_server) as client:
-                for tool_name, args in pbi_tools:
                     with pytest.raises(ToolError, match="Authorization required"):
                         await client.call_tool(tool_name, args)
 
@@ -4945,6 +5241,16 @@ def _mock_missing_connection(connect_url=CONNECT_URL):
         "ms_graph_mcp.get_graph_token",
         side_effect=MissingProviderConnection(
             provider="microsoft", user_key="u", connect_url=connect_url
+        ),
+    )
+
+
+def _mock_missing_pbi_connection(connect_url=CONNECT_URL):
+    """The same, for the separate Power BI connection entry."""
+    return patch(
+        "ms_graph_mcp.get_powerbi_token",
+        side_effect=MissingProviderConnection(
+            provider="microsoft_powerbi", user_key="u", connect_url=connect_url
         ),
     )
 
@@ -8845,7 +9151,20 @@ RENAMED_TOOLS = [
     ("ensure_chat_json", "ensure_chat", {"user_ids": "u"}),
     ("mark_chat_read_json", "mark_chat_read", {"chat_id": "c"}),
     ("inspect_file_json", "inspect_file", {"item_id": "x"}),
+    ("list_powerbi_workspaces", "list_powerbi", {}),
+    ("list_powerbi_content", "list_powerbi", {"workspace_id": "ws-1"}),
+    ("upload_file", "manage_file", {"filename": "x.txt", "content": "hi"}),
 ]
+
+# The aliases whose target needs the Power BI connection rather than the Graph
+# one — test_the_alias_answers_exactly_as_the_new_name mocks the right getter.
+PBI_ALIASES = {"list_powerbi_workspaces", "list_powerbi_content"}
+
+# Where a merge changed the signature, the new name needs its own arguments to
+# reach the same place the old name reaches with its ancestor's arguments.
+NEW_NAME_ARGS = {
+    "upload_file": {"action": "upload", "filename": "x.txt", "content": "hi"},
+}
 
 
 class TestDeprecatedAliases:
@@ -8868,9 +9187,12 @@ class TestDeprecatedAliases:
         Graph request; the pairs that validate their arguments first short-
         circuit before the token and still answer identically.
         """
-        with _mock_missing_connection():
+        missing = (
+            _mock_missing_pbi_connection() if old in PBI_ALIASES else _mock_missing_connection()
+        )
+        with missing:
             aliased = await _call(mcp_server, old, args)
-            renamed = await _call(mcp_server, new, args)
+            renamed = await _call(mcp_server, new, NEW_NAME_ARGS.get(old, args))
 
         assert _structured(aliased) == _structured(renamed)
 
@@ -8894,6 +9216,25 @@ class TestDeprecatedAliases:
                 {"ok": False, "error": "chat_id must not be empty"},
             ),
             ("inspect_file_json", {}, {"error": "missing_target"}),
+            (
+                "list_powerbi_content",
+                {"workspace_id": "ws-1", "content_type": "tiles"},
+                {
+                    "error": "invalid_arguments",
+                    "reason": (
+                        "Invalid content_type 'tiles'. "
+                        "Must be: datasets, reports, dashboards, or all."
+                    ),
+                },
+            ),
+            (
+                "upload_file",
+                {"filename": "", "content": "hi"},
+                {
+                    "error": "invalid_arguments",
+                    "reason": "filename is required for the 'upload' action.",
+                },
+            ),
         ],
     )
     @respx.mock
@@ -8907,6 +9248,50 @@ class TestDeprecatedAliases:
 
         assert _structured(result) == expected
         assert _graph_trail() == []
+
+    @respx.mock
+    async def test_the_workspaces_alias_lists_workspaces(self, mcp_server):
+        """list_powerbi_workspaces has no arguments to get wrong, so it is
+        pinned on the one shape only the workspace branch produces."""
+        respx.get(f"{POWERBI_BASE_URL}/groups").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        with _mock_pbi_token():
+            result = await _call(mcp_server, "list_powerbi_workspaces")
+
+        assert _structured(result) == {
+            "workspaces": [{"name": "My workspace", "id": "me", "premium": False}],
+            "count": 1,
+        }
+
+    @respx.mock
+    async def test_the_upload_alias_carries_folder_and_site(self, mcp_server):
+        """folder_path and site_id were flat parameters; they now ride the
+        options JSON, so the forwarder has to rebuild them."""
+        site_id = "site-id-001"
+        route = respx.put(
+            f"{GRAPH_BASE_URL}/sites/{site_id}/drive/root:/Contracts/notes.md:/content"
+        ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "upload_file",
+                {
+                    "filename": "notes.md",
+                    "content": "# Hello",
+                    "folder_path": "Contracts",
+                    "site_id": site_id,
+                },
+            )
+
+        assert route.called
+        assert _structured(result) == {
+            "action": "upload",
+            "id": SAMPLE_UPLOADED_FILE["id"],
+            "name": "notes.md",
+            "size": SAMPLE_UPLOADED_FILE["size"],
+            "web_url": SAMPLE_UPLOADED_FILE["webUrl"],
+        }
 
     @respx.mock
     async def test_the_merged_profile_alias_returns_the_merged_dict(self, mcp_server):

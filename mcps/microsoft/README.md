@@ -282,7 +282,7 @@ If the browser path fails (SSH, headless), MSAL falls back to device code flow �
 poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
-### Available Tools (47)
+### Available Tools (45)
 
 | Tool | Description |
 |------|-------------|
@@ -296,23 +296,21 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 | `get_calendar_event` | Get detailed information about a specific calendar event; returns its `attendees` table plus the event's own fields |
 | `create_calendar_event` | Create a new calendar event; returns its id, times, and links |
 | `check_availability` | Check free/busy availability for one or more people; returns a `busy` table of every block, a per-person free-time `summary`, and `busy_count` |
-| `list_teams` | List joined Microsoft Teams, or list channels within a specific team |
+| `list_teams` | List joined Microsoft Teams, or list channels within a specific team; returns a `teams` or `channels` table plus `count` |
 | `list_chats` | List Teams chats (1:1, group, meeting) with last message preview |
 | `read_teams_messages` | Read recent messages from a Teams channel or chat, with an attachments column |
-| `search_teams_messages` | Search all Teams chats and channels for messages by hashtag or keyword |
+| `search_teams_messages` | Search all Teams chats and channels for messages by hashtag or keyword; returns a `messages` table plus `count`, `query`, `since`, `conversation_id`, `skipped`, `notice` |
 | `get_teams_attachment` | Read, download (base64), or save to OneDrive a file or inline image from a Teams message |
 | `send_teams_message` | Send a message to a Teams channel or chat, optionally with files and inline images |
-| `get_teams_activity` | Get recent Teams activity across all channels and chats as a CSV digest |
-| `list_sharepoint_sites` | Search for SharePoint sites, or list followed sites |
-| `list_files` | List or search files in OneDrive or SharePoint |
-| `upload_file` | Create or overwrite a text file in OneDrive or SharePoint |
-| `edit_document` | Edit an existing Word document or Excel workbook in place |
-| `manage_file` | Copy, rename, or delete a file or folder |
-| `list_powerbi_workspaces` | List all Power BI workspaces the user has access to |
-| `list_powerbi_content` | List datasets, reports, and/or dashboards in a Power BI workspace |
-| `query_dataset` | Execute a DAX query against a Power BI dataset and return results as CSV |
-| `refresh_dataset` | Trigger an on-demand refresh of a Power BI dataset |
-| `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive |
+| `get_teams_activity` | Get recent Teams activity across all channels and chats; returns an `activity` table plus `count`, `sources`, `hours` |
+| `list_sharepoint_sites` | Search for SharePoint sites, or list followed sites; returns a `sites` table plus `count` and `query` |
+| `list_files` | List or search files in OneDrive, SharePoint, or a sharing link; returns one `files` table plus `count`, `folder_path`, `query` |
+| `edit_document` | Edit an existing Word document or Excel workbook in place; returns what was applied, the sheet names or the revision author, and the item's link |
+| `manage_file` | Create, copy, rename, or delete a file or folder; returns the `action` taken and the item's id, name, and link |
+| `list_powerbi` | List Power BI workspaces, or the datasets, reports, and dashboards in one; returns a `workspaces` or `items` table plus `count` |
+| `query_dataset` | Execute a DAX query against a Power BI dataset; returns the result `rows` plus `count` |
+| `refresh_dataset` | Trigger an on-demand refresh of a Power BI dataset; returns the acknowledgement |
+| `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive; returns the file's size, `item_id`, and link |
 | `get_profile` | Get the signed-in user's identity, including the mailbox address to send from |
 | `search_people` | Search the organisation directory by name or mail prefix |
 | `sync_mail` | Fetch one page of a mail folder's delta feed for incremental sync |
@@ -340,11 +338,17 @@ All parameters use simple `str`/`int` types for Bedrock compatibility. Teams too
 
 ### Desktop JSON tools
 
-Twenty-eight of the tools in the table return a canonical `dict` rather than prose, because the desktop mail client needs cursors, timestamps, and IDs it can act on. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
+Thirty-nine of the tools in the table return a canonical `dict` rather than prose, because the desktop mail client needs cursors, timestamps, and IDs it can act on. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
 
-That one dict serves both audiences. A caller sending the header `X-Bond-Client: desktop` gets it as `structuredContent`; every other caller — the LLMs — gets a compact text rendering of the same dict, with `structuredContent` omitted. A dict holding one list of flat rows renders as pipe-CSV with the remaining scalars as trailing `key: value` lines; an all-scalar dict renders as `key: value` lines; an error dict leads with `error: <code>`. The 19 str-returning tools are untouched by this.
+That one dict serves both audiences. A caller sending the header `X-Bond-Client: desktop` gets it as `structuredContent`; every other caller — the LLMs — gets a compact text rendering of the same dict, with `structuredContent` omitted. A dict holding one list of flat rows renders as pipe-CSV with the remaining scalars as trailing `key: value` lines; an all-scalar dict renders as `key: value` lines; an error dict leads with `error: <code>`. The six str-returning tools are untouched by this.
 
 The mail and calendar tools joined that set after the desktop ones: `list_emails`, `send_email`, `manage_inbox_rules`, `manage_mail_folders`, `list_calendar_events`, `get_calendar_event`, `create_calendar_event`, and `check_availability` all answer with a dict. Their argument-validation failures come back as error dicts rather than prose — `invalid_options`, `invalid_action`, `missing_rule_id`, `missing_folder_id`, `invalid_attachments`, `invalid_date`, `invalid_arguments`, `no_data`, and `folder_not_found` — and, like the desktop tools, they answer `not_connected` instead of raising when Microsoft is not connected. `send_email` now always sends through a draft, because Graph's `sendMail` answers 202 with no body: creating the draft first is the only way to learn the `internet_message_id` and `conversation_id` that identify the Sent Items copy. `check_availability` lists every busy block it was told about rather than the first ten.
+
+The Teams, file, and Power BI tools followed: `list_teams`, `search_teams_messages`, `get_teams_activity`, `list_sharepoint_sites`, `list_files`, `edit_document`, `manage_file`, `list_powerbi`, `query_dataset`, `refresh_dataset`, and `export_report` all answer with a dict, and with `not_connected` rather than raising when Microsoft is not connected. They add these permanent error codes: `teams_not_available` (the account has no Microsoft 365 licence), `search_unsupported` (Microsoft Search does not index consumer accounts), `access_denied`, `not_found`, and `invalid_link` for a sharing link `list_files` cannot resolve, `too_large` (with the byte `limit`) for upload content over the 4 MB simple-upload cap, and `edit_failed` when a document rejects an edit operation.
+
+Two merges came with them. `list_powerbi` absorbed `list_powerbi_workspaces` and `list_powerbi_content`: an empty `workspace_id` lists the workspaces, and a workspace id — or `"me"` for My workspace — lists its contents with a `kind` column. `manage_file` absorbed `upload_file` as `action="upload"`, where `folder_path` and `site_id` move into `options`; base64 content still wins over the file extension, so a base64 `.docx` uploads its bytes rather than being generated from markdown. Both old names remain as hidden aliases.
+
+`manage_file` also fixed its error handling: it used to catch every `GraphError` and turn it into a success-shaped string, so a throttle or a 5xx read as a permanent answer. It now maps only 404 to `not_found` and lets everything else propagate as a tool error, and `edit_document` does the same on its item fetch. `query_dataset` returns the DAX rows exactly as Power BI sent them instead of pre-formatting CSV; Power BI omits null-valued columns from a row, and the shared renderer unions the row keys in first-seen order and renders the omissions as empty cells.
 
 Some of these tools were renamed when they stopped being desktop-only (`get_profile`, `search_people`, `sync_mail`, `mark_mail_read`, `get_chat_members`, `ensure_chat`, `mark_chat_read`, `inspect_file`). Every old name still answers, but is hidden from `tools/list` so a model never sees two names for one tool.
 
