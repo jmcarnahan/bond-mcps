@@ -173,6 +173,23 @@ type = "directory"
 url = "../../auth"
 
 [[package]]
+name = "bond-common"
+version = "0.1.0"
+description = "Shared FastMCP response-format middleware for Bond MCP servers"
+optional = false
+python-versions = ">=3.10,<4.0"
+groups = ["main"]
+files = []
+develop = true
+
+[package.dependencies]
+fastmcp = ">=3.0.0,<4.0"
+
+[package.source]
+type = "directory"
+url = "../../common"
+
+[[package]]
 name = "boto3"
 version = "1.43.83"
 description = "The AWS SDK for Python"
@@ -3269,4 +3286,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "e9d5031369e83de184310247a38ab6d95464eecebbe863d94cc8f97ae71a8a1d"
+content-hash = "55489e285200b5ad41bac56261d6224ecfac0446cae246cc38df502c09ae4db6"

@@ -46,6 +46,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from bond_common import FormatNegotiation, HideDeprecatedAliases
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from starlette.responses import JSONResponse
@@ -220,6 +221,17 @@ async def _lifespan(app):
 mcp = FastMCP(
     "Microsoft Graph MCP Server", lifespan=_lifespan, auth=build_remote_auth_provider("ms-graph")
 )
+
+# Per-tool compact renderers land in later phases; the default rules in
+# bond_common.render cover every tool today.
+RENDER_OVERRIDES: dict = {}
+
+# Dict-returning tools declare `output_schema=None` so FormatNegotiation may
+# drop structuredContent on the compact path — the MCP spec requires structured
+# results from any tool that advertises an output schema, and that declaration
+# is also how the middleware tells the dict tools from the markdown ones.
+mcp.add_middleware(FormatNegotiation(overrides=RENDER_OVERRIDES))
+mcp.add_middleware(HideDeprecatedAliases())
 
 # Per-user provider OAuth bootstrap (JWT mode only).
 register_connect_routes(mcp, MICROSOFT_CONNECT_CONFIG)
@@ -3170,7 +3182,7 @@ def _stored_graph_scopes() -> list[str]:
         return []
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_profile_json() -> dict:
     """
     Get the signed-in user's identity as structured JSON.
@@ -3189,7 +3201,7 @@ async def get_profile_json() -> dict:
     return _profile_json(profile)
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def search_people_json(query: str, top: int = 10) -> dict:
     """
     Search the organisation directory as structured JSON.
@@ -3227,7 +3239,7 @@ async def search_people_json(query: str, top: int = 10) -> dict:
     return {"people": [_person_json(u) for u in users]}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received: str = "") -> dict:
     """
     Fetch ONE page of a mail folder's delta feed as structured JSON.
@@ -3278,7 +3290,7 @@ async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received:
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_mail_detail(message_id: str) -> dict:
     """
     Get a message's plain-text body, internet headers, and attachment list.
@@ -3383,7 +3395,7 @@ def _attachment_item_fields(item: dict) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_mail_attachment_json(
     message_id: str, attachment_id: str, mode: str = "bytes"
 ) -> dict:
@@ -3479,7 +3491,7 @@ async def get_mail_attachment_json(
     return {**summary, "content_base64": base64.b64encode(data).decode("ascii")}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
     """
     Create a reply draft for a message and return its ID as structured JSON.
@@ -3510,7 +3522,7 @@ async def create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
     return _draft_json(draft)
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def create_draft_json(
     to: str, subject: str, body: str = "", cc: str = "", bcc: str = ""
 ) -> dict:
@@ -3563,7 +3575,7 @@ async def create_draft_json(
     return _draft_json(draft)
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def update_draft_body(draft_id: str, text: str) -> dict:
     """
     Replace a draft's body with plain text. Returns structured JSON.
@@ -3584,7 +3596,7 @@ async def update_draft_body(draft_id: str, text: str) -> dict:
     return {"ok": True}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def add_draft_attachment_json(
     draft_id: str, name: str, content_base64: str, content_type: str = ""
 ) -> dict:
@@ -3639,7 +3651,7 @@ async def add_draft_attachment_json(
     return {"attachment_id": attachment_id}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def send_draft(draft_id: str) -> dict:
     """
     Send an existing draft. Returns structured JSON.
@@ -3687,7 +3699,7 @@ async def send_draft(draft_id: str) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def mark_mail_read_json(message_ids: str, is_read: str = "true") -> dict:
     """
     Mark messages read (or unread) in bulk. Returns structured JSON.
@@ -3734,7 +3746,7 @@ async def mark_mail_read_json(message_ids: str, is_read: str = "true") -> dict:
     return {"updated": updated, "failed": failed}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
     """
     Fetch ONE page of the user's Teams chats as structured JSON.
@@ -3776,7 +3788,7 @@ async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
     return {"chats": chats, "next_cursor": data.get("@odata.nextLink", "")}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_chat_members_json(chat_id: str) -> dict:
     """
     List a chat's members as structured JSON.
@@ -3805,7 +3817,7 @@ async def get_chat_members_json(chat_id: str) -> dict:
 _CHAT_MEMBER_ID_RE = re.compile(r"[A-Za-z0-9._@+-]+")
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def ensure_chat_json(user_ids: str, topic: str = "") -> dict:
     """
     Find or create a Teams chat with the given people. Returns structured JSON.
@@ -3857,7 +3869,7 @@ async def ensure_chat_json(user_ids: str, topic: str = "") -> dict:
     return {"chat_id": chat.get("id"), "chat_type": chat.get("chatType")}
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "") -> dict:
     """
     Fetch ONE page of a chat's messages as structured JSON.
@@ -3902,7 +3914,7 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_chat_attachment_json(
     chat_id: str, message_id: str, attachment_id: str, thumbnail: str = ""
 ) -> dict:
@@ -4015,7 +4027,7 @@ async def get_chat_attachment_json(
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def mark_chat_read_json(chat_id: str) -> dict:
     """
     Mark a Teams chat read for the signed-in user. Returns structured JSON.
@@ -4101,7 +4113,7 @@ def _desktop_attachments(raw: str) -> tuple[list, str]:
     return resolved, ""
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def send_chat_message_json(chat_id: str, text: str, attachments: str = "") -> dict:
     """
     Send a plain-text message, optionally with files, to a Teams chat. Returns JSON.
@@ -4197,7 +4209,7 @@ def _drive_item_json(item: dict) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def inspect_file_json(
     item_id: str = "", url: str = "", read_content: str = "false", site_id: str = ""
 ) -> dict:
@@ -4284,7 +4296,7 @@ async def inspect_file_json(
     return result
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def connection_status() -> dict:
     """
     Report whether Microsoft is connected, and with which scopes.

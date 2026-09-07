@@ -29,6 +29,18 @@ locals {
     ],
   )))
 
+  # The vendored response-format middleware, staged into
+  # <context>/_shared_common_pkg/ the same way (`COPY _shared_common_pkg/
+  # /common/`). No .mako sweep here — the tree is pure Python.
+  common_pkg_hash = md5(join("", concat(
+    [for f in fileset("${local.repo_root}/common/bond_common", "**/*.py") :
+    filemd5("${local.repo_root}/common/bond_common/${f}")],
+    [
+      filemd5("${local.repo_root}/common/pyproject.toml"),
+      filemd5("${local.repo_root}/common/poetry.lock"),
+    ],
+  )))
+
   # Build matrix. src_dirs/src_files are relative to `context` and mirror each
   # Dockerfile's COPY lines exactly — tests/, *_cli.py and README.md are
   # .dockerignore'd, so hashing them would roll pods for changes that cannot
@@ -37,39 +49,44 @@ locals {
   # (validation blocks cannot read locals, so the list is duplicated there).
   build_matrix = {
     auth = {
-      context           = "auth"
-      dockerfile        = "auth/Dockerfile"
-      needs_shared_auth = false
-      src_dirs          = ["auth"]
-      src_files         = ["pyproject.toml", "poetry.lock"]
+      context             = "auth"
+      dockerfile          = "auth/Dockerfile"
+      needs_shared_auth   = false
+      needs_shared_common = false
+      src_dirs            = ["auth"]
+      src_files           = ["pyproject.toml", "poetry.lock"]
     }
     microsoft = {
-      context           = "mcps/microsoft"
-      dockerfile        = "mcps/microsoft/Dockerfile"
-      needs_shared_auth = true
-      src_dirs          = ["ms_graph"]
-      src_files         = ["pyproject.toml", "poetry.lock", "ms_graph_mcp.py"]
+      context             = "mcps/microsoft"
+      dockerfile          = "mcps/microsoft/Dockerfile"
+      needs_shared_auth   = true
+      needs_shared_common = true
+      src_dirs            = ["ms_graph"]
+      src_files           = ["pyproject.toml", "poetry.lock", "ms_graph_mcp.py"]
     }
     atlassian = {
-      context           = "mcps/atlassian"
-      dockerfile        = "mcps/atlassian/Dockerfile"
-      needs_shared_auth = true
-      src_dirs          = ["atlassian"]
-      src_files         = ["pyproject.toml", "poetry.lock", "atlassian_mcp.py"]
+      context             = "mcps/atlassian"
+      dockerfile          = "mcps/atlassian/Dockerfile"
+      needs_shared_auth   = true
+      needs_shared_common = false
+      src_dirs            = ["atlassian"]
+      src_files           = ["pyproject.toml", "poetry.lock", "atlassian_mcp.py"]
     }
     github = {
-      context           = "mcps/github"
-      dockerfile        = "mcps/github/Dockerfile"
-      needs_shared_auth = true
-      src_dirs          = ["github"]
-      src_files         = ["pyproject.toml", "poetry.lock", "github_mcp.py"]
+      context             = "mcps/github"
+      dockerfile          = "mcps/github/Dockerfile"
+      needs_shared_auth   = true
+      needs_shared_common = false
+      src_dirs            = ["github"]
+      src_files           = ["pyproject.toml", "poetry.lock", "github_mcp.py"]
     }
     databricks = {
-      context           = "mcps/databricks"
-      dockerfile        = "mcps/databricks/Dockerfile"
-      needs_shared_auth = true
-      src_dirs          = ["dbx"]
-      src_files         = ["pyproject.toml", "poetry.lock", "databricks_mcp.py"]
+      context             = "mcps/databricks"
+      dockerfile          = "mcps/databricks/Dockerfile"
+      needs_shared_auth   = true
+      needs_shared_common = false
+      src_dirs            = ["dbx"]
+      src_files           = ["pyproject.toml", "poetry.lock", "databricks_mcp.py"]
     }
   }
 
@@ -88,6 +105,7 @@ locals {
         filemd5("${local.repo_root}/${b.context}/${d}/${f}")
       ]]),
       b.needs_shared_auth ? [local.auth_pkg_hash] : [],
+      b.needs_shared_common ? [local.common_pkg_hash] : [],
       # The hash covers files, not the python:3.12-slim base image or PyPI/apt
       # resolution inside the build. Bump var.force_rebuild to mint fresh tags
       # (a new tag can never hit the skip-if-exists path below).
@@ -156,7 +174,8 @@ resource "null_resource" "build" {
       BUILD_KEY="${each.key}"
       CONTEXT="${each.value.context}"
       DOCKERFILE="${each.value.dockerfile}"
-      NEEDS_SHARED="${each.value.needs_shared_auth}"
+      NEEDS_SHARED_AUTH="${each.value.needs_shared_auth}"
+      NEEDS_SHARED_COMMON="${each.value.needs_shared_common}"
       REGION="${var.aws_region}"
       ECR_REGISTRY="$${REPO_URL%%/*}"
 
@@ -184,16 +203,31 @@ resource "null_resource" "build" {
       docker buildx inspect bond-mcps-builder > /dev/null 2>&1 \
         || docker buildx create --name bond-mcps-builder > /dev/null
 
-      # MCP Dockerfiles resolve `bond-auth = {path = "../../auth"}` to /auth
-      # via `COPY _shared_auth_pkg/ /auth/`. Stage it fresh every time (a
+      # MCP Dockerfiles resolve their path deps from the build context:
+      # `bond-auth = {path = "../../auth"}` via `COPY _shared_auth_pkg/ /auth/`
+      # and `bond-common = {path = "../../common"}` via
+      # `COPY _shared_common_pkg/ /common/`. Stage them fresh every time (a
       # stale leftover is invisible to the content hash) and always clean up.
-      if [ "$NEEDS_SHARED" = "true" ]; then
-        SHARED="$CONTEXT/_shared_auth_pkg"
-        trap 'rm -rf "$SHARED"' EXIT
-        rm -rf "$SHARED"
-        mkdir -p "$SHARED"
-        cp -R auth/auth "$SHARED/auth"
-        cp auth/pyproject.toml auth/poetry.lock "$SHARED/"
+      #
+      # ONE trap for both dirs: `trap ... EXIT` REPLACES the previous EXIT
+      # trap instead of stacking, so a second trap would leak the first dir.
+      # Setting it before the staging runs also covers a failed cp.
+      SHARED_AUTH="$CONTEXT/_shared_auth_pkg"
+      SHARED_COMMON="$CONTEXT/_shared_common_pkg"
+      trap 'rm -rf "$SHARED_AUTH" "$SHARED_COMMON"' EXIT
+
+      if [ "$NEEDS_SHARED_AUTH" = "true" ]; then
+        rm -rf "$SHARED_AUTH"
+        mkdir -p "$SHARED_AUTH"
+        cp -R auth/auth "$SHARED_AUTH/auth"
+        cp auth/pyproject.toml auth/poetry.lock "$SHARED_AUTH/"
+      fi
+
+      if [ "$NEEDS_SHARED_COMMON" = "true" ]; then
+        rm -rf "$SHARED_COMMON"
+        mkdir -p "$SHARED_COMMON"
+        cp -R common/bond_common "$SHARED_COMMON/bond_common"
+        cp common/pyproject.toml common/poetry.lock "$SHARED_COMMON/"
       fi
 
       GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)

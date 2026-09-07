@@ -13,6 +13,7 @@ exclude: |
     \.terraform/.*|
     \.venv/.*|
     mcps/[^/]+/_shared_auth_pkg/.*|
+    mcps/[^/]+/_shared_common_pkg/.*|
     poetry\.lock$|
     .*/poetry\.lock$|
     tmp/.*

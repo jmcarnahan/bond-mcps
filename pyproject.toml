@@ -8,7 +8,7 @@
 # repo root, so config applies uniformly.
 
 [tool.bandit]
-exclude_dirs = [".venv", "tests", "_shared_auth_pkg", "tmp"]
+exclude_dirs = [".venv", "tests", "_shared_auth_pkg", "_shared_common_pkg", "tmp"]
 skips = [
   "B101", # assert_used — fine in tests and asserts-for-invariants
   "B105", # hardcoded_password_string — false positives on env-var NAME constants (e.g. "BOND_MCPS_AS_ACCESS_TOKEN_TTL_SECONDS")
@@ -20,7 +20,7 @@ skips = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["_shared_auth_pkg", ".terraform", "tmp"]
+extend-exclude = ["_shared_auth_pkg", "_shared_common_pkg", ".terraform", "tmp"]
 
 [tool.ruff.lint]
 # Initial baseline for a codebase that's never been linted. We start narrow:

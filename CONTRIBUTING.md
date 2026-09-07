@@ -18,6 +18,7 @@ Branch protection should be configured in GitHub repo settings to enforce this (
 bond-mcps/
 ├── auth/                       # Python package `auth` — OAuth proxy + token store
 │   └── tests/                  # http.server + token_store tests
+├── common/                     # Python package `bond_common` — shared FastMCP response-format middleware
 ├── mcps/
 │   ├── microsoft/              # Microsoft Graph MCP — port 18001, CLI: ms-graph-cli
 │   ├── github/                 # GitHub MCP — port 18002, CLI: github-cli

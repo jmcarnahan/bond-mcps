@@ -3,9 +3,11 @@
 # Build (with mcps/microsoft/ as the context, after CI prep):
 #   docker build -t bond-mcps-mcp-microsoft -f mcps/microsoft/Dockerfile mcps/microsoft/
 #
-# CI prep step copies auth/ → mcps/microsoft/_shared_auth_pkg/ first so the
-# path dependency `bond-auth = {path = "../../auth"}` resolves inside the
-# container (../../auth from /app/pyproject.toml → /auth).
+# CI prep steps copy auth/ → mcps/microsoft/_shared_auth_pkg/ and common/ →
+# mcps/microsoft/_shared_common_pkg/ first so the path dependencies
+# `bond-auth = {path = "../../auth"}` and `bond-common = {path =
+# "../../common"}` resolve inside the container (../../auth and ../../common
+# from /app/pyproject.toml → /auth and /common).
 
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
@@ -14,6 +16,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir poetry==2.1.3
 
 COPY _shared_auth_pkg/ /auth/
+COPY _shared_common_pkg/ /common/
 
 COPY pyproject.toml poetry.lock ./
 

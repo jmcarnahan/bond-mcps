@@ -303,6 +303,21 @@ def _docx_bytes() -> bytes:
     return document_create.markdown_to_docx("# Quarterly Title\n\nBody text here.")
 
 
+@pytest.fixture(autouse=True)
+def _desktop_client_header():
+    """Pin this module to the desktop JSON contract.
+
+    In-process clients carry no HTTP headers, so FormatNegotiation would
+    render every dict tool compactly and `_structured` would have no dict to
+    read. The compact rendering is covered by test_format_middleware.py.
+    """
+    with patch(
+        "bond_common.middleware.get_http_headers",
+        return_value={"x-bond-client": "desktop"},
+    ):
+        yield
+
+
 def _mock_token(token: str = "test-ms-token"):
     """Patch get_graph_token to return a test token."""
     return patch("ms_graph_mcp.get_graph_token", return_value=token)

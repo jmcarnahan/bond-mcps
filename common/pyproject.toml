@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "bond-common"
+version = "0.1.0"
+description = "Shared FastMCP response-format middleware for Bond MCP servers"
+packages = [{include = "bond_common"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+# Unlike auth/, fastmcp is a genuine runtime dependency here: the middleware
+# subclasses fastmcp's Middleware and returns its ToolResult type.
+fastmcp = ">=3.0.0,<4.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.24"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
