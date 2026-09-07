@@ -3533,8 +3533,10 @@ async def export_report(
 # attachment reader (get_teams_attachment) returns not_found (with the
 # available ids), access_denied, no_thumbnail, invalid_thumbnail, is_folder,
 # too_large, invalid_mode, invalid_options, invalid_arguments, and
-# teams_unavailable; inspect_file returns missing_target, access_denied,
-# not_found, and invalid_link — all permanent.
+# teams_unavailable; inspect_file returns missing_target, invalid_options,
+# invalid_mode, invalid_thumbnail, is_folder, too_large, no_thumbnail,
+# access_denied, not_found, and invalid_link — all permanent, and its bytes
+# and thumbnail modes share the same 10 MB cap as the attachment readers.
 # send_teams_message returns invalid_attachments and files_scope_missing
 # (the account's connection lacks Files.ReadWrite) — both permanent. The mail
 # tools return external_sender when the mail sender policy hides a message —
@@ -4285,51 +4287,142 @@ def _drive_item_json(item: dict) -> dict:
     }
 
 
+def _binary_refusal(item: dict, mode: str) -> dict | None:
+    """Why a driveItem's bytes cannot be returned, or None when they can.
+
+    The size comes from the metadata, so an oversized file is refused before
+    its bytes cross the wire; a thumbnail is small whatever the file weighs.
+    """
+    if "folder" in item:
+        return {"error": "is_folder"}
+    raw_size = item.get("size")
+    size = raw_size if isinstance(raw_size, int) else 0
+    if mode == "bytes" and size > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+        return {
+            "error": "too_large",
+            "size": size,
+            "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+        }
+    return None
+
+
 @mcp.tool(output_schema=None)
 async def inspect_file(
-    item_id: str = "", url: str = "", read_content: str = "false", site_id: str = ""
+    item_id: str = "",
+    url: str = "",
+    read_content: str = "false",
+    site_id: str = "",
+    mode: str = "",
+    options: str = "",
 ) -> dict:
     """
-    Get a file's metadata from OneDrive or SharePoint, and optionally its text.
+    Get a file's metadata from OneDrive or SharePoint, plus text, bytes, or a
+    thumbnail.
 
     Accepts either a drive item id (from list_files) or a SharePoint/OneDrive
     sharing URL pasted from the browser or Teams. An item_id that looks like a
     sharing URL is treated as one. This is also how a Teams attachment's
     content_url or a mail link attachment's source_url is resolved into
-    something readable.
+    something readable — or, in the two binary modes, into something a client
+    can preview.
 
-    Returns item_id, name, size, content_type, web_url, modified, and
-    is_folder. With read_content "true" it also returns text — extracted from
-    Word, PowerPoint, Excel, and PDF documents (up to 50 MB; tables and notes
-    included, images noted but not shown), or decoded for text files (up to
-    2 MB) — and null when the content is binary, a folder, or over those
-    limits.
+    Every mode returns item_id, name, size, content_type, web_url, modified,
+    and is_folder. "text" adds text — extracted from Word, PowerPoint, Excel,
+    and PDF documents (up to 50 MB; tables and notes included, images noted
+    but not shown), or decoded for text files (up to 2 MB) — and null when the
+    content is binary, a folder, or over those limits. "bytes" adds
+    content_base64, the whole file, and fills content_type from the name when
+    Graph reported none. "thumbnail" adds content_base64 and
+    thumbnail_content_type (the image's own MIME; content_type keeps
+    describing the file). Both cap at 10 MB, and both are meant for
+    programmatic callers that render or save the file — base64 tells a model
+    nothing.
 
-    Permanent errors: missing_target (neither an id nor a url was given), and
-    for sharing URLs access_denied (403), not_found (404), and invalid_link
-    (400); plus not_connected. Everything else, including a 404 for an unknown
-    item id, propagates as a tool error.
+    mode is "metadata", "text", "bytes", or "thumbnail". Left empty it follows
+    read_content, so a caller written before the modes existed keeps its exact
+    behavior; an explicit mode wins and read_content is then ignored.
+
+    Permanent errors: missing_target (neither an id nor a url was given),
+    invalid_options, invalid_mode, invalid_thumbnail, is_folder (a folder has
+    no bytes and no thumbnail), too_large (with size and limit, or with reason
+    from the download guard), no_thumbnail (Graph renders none for this file),
+    and for sharing URLs access_denied (403), not_found (404), and
+    invalid_link (400); plus not_connected. Everything else — a 404 for an
+    unknown item id, throttling, 5xx — propagates as a tool error, the
+    caller's "transient, retry later" signal.
 
     Args:
         item_id: A drive item ID (from list_files), or a sharing URL.
         url: A SharePoint/OneDrive sharing URL. Wins over item_id.
-        read_content: "true" to also download and return the text.
+        read_content: "true" to also download and return the text. Ignored
+            when mode is set.
         site_id: SharePoint site ID. Leave empty for OneDrive. Ignored for URLs.
+        mode: "metadata", "text", "bytes", or "thumbnail". Empty follows
+            read_content.
+        options: JSON object. {"thumbnail": "small|medium|large"} picks the
+            thumbnail size (default "medium"); ignored in every other mode.
     """
+    opts, err = parse_options(options)
+    if err:
+        return {"error": "invalid_options", "reason": err}
+
+    mode = mode.strip().lower()
+    if not mode:
+        mode = "text" if read_content.strip().lower() in ("true", "1", "yes") else "metadata"
+    if mode not in ("metadata", "text", "bytes", "thumbnail"):
+        return {
+            "error": "invalid_mode",
+            "reason": f"mode must be one of: metadata, text, bytes, thumbnail; got {mode!r}",
+        }
+
+    thumb = opt_str(opts.get("thumbnail")) or "medium"
+    # Judged before the token, so a bad size costs no request.
+    if mode == "thumbnail" and thumb not in _THUMBNAIL_WORDS:
+        return {
+            "error": "invalid_thumbnail",
+            "reason": f"thumbnail must be one of: small, medium, large; got {thumb!r}",
+        }
+
     sharing_url = url.strip()
     if not sharing_url and item_id and files_ops.is_sharing_url(item_id):
         sharing_url = item_id.strip()
     if not sharing_url and not item_id.strip():
         return {"error": "missing_target"}
 
-    read = read_content.strip().lower() in ("true", "1", "yes")
+    read = mode == "text"
+    binary = mode in ("bytes", "thumbnail")
+    content: str | None = None
+    data = b""
+    header_type = ""
 
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
             if sharing_url:
                 try:
-                    if read:
+                    if binary:
+                        item = await files_ops.aresolve_sharing_link(client, sharing_url)
+                        refusal = _binary_refusal(item, mode)
+                        if refusal:
+                            return refusal
+                        if mode == "bytes":
+                            try:
+                                _, data = await files_ops.aresolve_sharing_link_bytes(
+                                    client, sharing_url, item=item
+                                )
+                            except ValueError as e:
+                                # The ops download guard has a ceiling of its
+                                # own; ours refuses first for anything Graph
+                                # reported a size for.
+                                return {"error": "too_large", "reason": str(e)}
+                        else:
+                            found = await files_ops.aget_sharing_link_thumbnail(
+                                client, sharing_url, size=thumb
+                            )
+                            if found is None:
+                                return {"error": "no_thumbnail"}
+                            data, header_type = found
+                    elif read:
                         item, content = await files_ops.aresolve_sharing_link_content(
                             client, sharing_url
                         )
@@ -4352,7 +4445,23 @@ async def inspect_file(
                         return {"error": "invalid_link"}
                     raise
             else:
-                if read:
+                if binary:
+                    item = await files_ops.aget_drive_item(client, item_id, site_id=site_id)
+                    refusal = _binary_refusal(item, mode)
+                    if refusal:
+                        return refusal
+                    if mode == "bytes":
+                        data = await files_ops.aget_drive_item_bytes(
+                            client, item_id, site_id=site_id
+                        )
+                    else:
+                        found = await files_ops.aget_drive_item_thumbnail(
+                            client, item_id, size=thumb, site_id=site_id
+                        )
+                        if found is None:
+                            return {"error": "no_thumbnail"}
+                        data, header_type = found
+                elif read:
                     item, content = await files_ops.aget_drive_item_content(
                         client, item_id, site_id=site_id
                     )
@@ -4369,6 +4478,20 @@ async def inspect_file(
     result = _drive_item_json(item)
     if read:
         result["text"] = content
+    elif binary:
+        # A thumbnail announces no size up front, and a sharing link may serve
+        # more than its driveItem claimed, so the cap judges what arrived too.
+        if len(data) > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+            return {
+                "error": "too_large",
+                "size": len(data),
+                "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+            }
+        if mode == "bytes" and result["content_type"] is None:
+            result["content_type"] = attachment_ops.guess_content_type(result["name"] or "")
+        result["content_base64"] = base64.b64encode(data).decode("ascii")
+        if mode == "thumbnail":
+            result["thumbnail_content_type"] = _mime_from_header(header_type, "image/jpeg")
     return result
 
 
