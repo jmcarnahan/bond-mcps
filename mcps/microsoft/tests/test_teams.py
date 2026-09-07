@@ -2,7 +2,7 @@
 
 import base64
 import json
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 import pytest
@@ -13,15 +13,26 @@ from ms_graph.graph_client import GRAPH_BASE_URL, AsyncGraphClient, GraphClient,
 from ms_graph.teams import (
     FilesScopeMissingError,
     TeamsNotAvailableError,
+    TeamsSearchUnsupportedError,
     _attachment_from_drive_item,
     _chat_create_payload,
     _hosted_contents,
     _member_emails,
     _message_base,
     _prepare_teams_body,
+    build_search_query_string,
     extract_message_sender,
     extract_message_text,
+    hashtag_pattern,
+    hit_matches_conversation,
+    is_channel_hit,
+    message_has_all_hashtags,
+    message_match_text,
+    normalize_search_hit,
+    normalize_since,
     parse_message_attachments,
+    reply_parent_id,
+    split_search_query,
 )
 
 from .conftest import (
@@ -46,16 +57,25 @@ from .conftest import (
     SAMPLE_CHATS_PAGE,
     SAMPLE_CHATS_PAGE_NEXT_LINK,
     SAMPLE_CHATS_RESPONSE,
+    SAMPLE_HYDRATED_CHANNEL_MESSAGE,
+    SAMPLE_HYDRATED_CHAT_MESSAGE,
     SAMPLE_INVITE_RESPONSE,
+    SAMPLE_SEARCH_CHANNEL_HIT,
+    SAMPLE_SEARCH_CHAT_HIT,
+    SAMPLE_SEARCH_MESSAGES_EMPTY,
     SAMPLE_TEAMS_RESPONSE,
     SAMPLE_TEAMS_UPLOAD_RESPONSE,
     SAMPLE_TEAMS_UPLOADED_ITEM,
+    SEARCH_CHANNEL_ID,
+    SEARCH_CHAT_ID,
+    SEARCH_TEAM_ID,
     TEAMS_FILE_ATTACHMENT_ID,
     TEAMS_FILE_URL,
     TEAMS_HOSTED_ID,
     TEAMS_HOSTED_URL,
     TEAMS_UPLOAD_GUID,
     TEAMS_WEBDAV_URL,
+    search_response,
 )
 
 # ---------------------------------------------------------------------------
@@ -67,6 +87,10 @@ class TestExtractMessageText:
     def test_plain_text(self):
         msg = {"body": {"contentType": "text", "content": "Hello world"}, "attachments": []}
         assert extract_message_text(msg) == "Hello world"
+
+    def test_html_entities_are_unescaped(self):
+        msg = {"body": {"contentType": "html", "content": "<p>Fish &amp; chips&nbsp;now</p>"}}
+        assert extract_message_text(msg) == "Fish & chips now"
 
     def test_html_strips_tags(self):
         msg = {
@@ -2247,3 +2271,929 @@ class TestCreateChat:
                 teams.create_chat(client, ["me-oid", "nobody"])
 
         assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Teams message search
+# ---------------------------------------------------------------------------
+
+SEARCH_URL = f"{GRAPH_BASE_URL}/search/query"
+CHAT_HYDRATE_BASE = f"{GRAPH_BASE_URL}/chats/{quote(SEARCH_CHAT_ID, safe='')}/messages"
+CHANNEL_HYDRATE_BASE = f"{GRAPH_BASE_URL}/chats/{quote(SEARCH_CHANNEL_ID, safe='')}/messages"
+BAD_REQUEST_400 = {"error": {"code": "BadRequest", "message": "Invalid query"}}
+NOT_SUPPORTED_400 = {
+    "error": {"code": "BadRequest", "message": "This API is not supported for MSA accounts"}
+}
+
+# A channel thread reply: the index returns it, but the chat route refuses it and
+# names the parent in the error text. Shapes verified live 2026-09-06.
+REPLY_ID = "1713933434104"
+REPLY_PARENT_ID = "1713933312527"
+REPLY_HIT = {
+    "summary": "budget2026",
+    "resource": {
+        "id": REPLY_ID,
+        "chatId": SEARCH_CHANNEL_ID,
+        "channelIdentity": {"channelId": SEARCH_CHANNEL_ID, "teamId": SEARCH_TEAM_ID},
+        "createdDateTime": "2024-04-24T04:37:15Z",
+        "webLink": f"https://teams.microsoft.com/l/message/{quote(SEARCH_CHANNEL_ID)}/{REPLY_ID}",
+    },
+}
+IS_A_REPLY_400 = {
+    "error": {
+        "code": "BadRequest",
+        "message": (
+            f"The message '{REPLY_ID}' is a reply and is not supported on this route. "
+            "Only root message identifiers are supported; retrieve replies via "
+            f"/chats({SEARCH_CHANNEL_ID})/messages({REPLY_PARENT_ID})/replies({REPLY_ID})."
+        ),
+    }
+}
+REPLY_ROUTE = (
+    f"{GRAPH_BASE_URL}/teams/{quote(SEARCH_TEAM_ID, safe='')}"
+    f"/channels/{quote(SEARCH_CHANNEL_ID, safe='')}"
+    f"/messages/{REPLY_PARENT_ID}/replies/{REPLY_ID}"
+)
+REPLY_BODY = {
+    "id": REPLY_ID,
+    "replyToId": REPLY_PARENT_ID,
+    "messageType": "message",
+    "createdDateTime": "2024-04-24T04:37:15Z",
+    "from": {"user": {"displayName": "Jimmy Wakimoto"}, "application": None},
+    "body": {"contentType": "html", "content": "<p>Moving the #budget2026 thread here</p>"},
+    "attachments": [],
+}
+
+
+def _get_trail():
+    """Every GET respx saw, in order, as (method, url)."""
+    return [
+        (c.request.method, str(c.request.url)) for c in respx.calls if c.request.method == "GET"
+    ]
+
+
+def _hit(msg_id, created="2026-03-02T10:00:00Z", chat_id=SEARCH_CHAT_ID):
+    """A chat search hit for the given message id."""
+    return {
+        "summary": "budget2026",
+        "resource": {
+            "id": msg_id,
+            "chatId": chat_id,
+            "channelIdentity": {"channelId": chat_id},
+            "createdDateTime": created,
+            "webLink": f"https://teams.microsoft.com/l/message/chat/{msg_id}",
+        },
+    }
+
+
+def _msg(msg_id, content="The #budget2026 numbers are in", created="2026-03-02T10:00:00Z"):
+    """A hydrated chat message for the given id."""
+    return {
+        "id": msg_id,
+        "messageType": "message",
+        "createdDateTime": created,
+        "from": {"user": {"displayName": "Alice Smith"}, "application": None},
+        "body": {"contentType": "text", "content": content},
+        "attachments": [],
+    }
+
+
+def _mock_hydration(bodies):
+    """Serve GET /chats/*/messages/<id> from a {message id: body} map.
+
+    An id that is not in the map answers 404, which is how the "one deleted
+    message is skipped" tests are built.
+    """
+
+    def _handler(request):
+        msg_id = str(request.url).rsplit("/", 1)[-1]
+        body = bodies.get(msg_id)
+        if body is None:
+            return httpx.Response(404, json=GRAPH_ERROR_404)
+        return httpx.Response(200, json=body)
+
+    return respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(side_effect=_handler)
+
+
+def _search_paths():
+    """Every /search/query request body respx saw, in order."""
+    return [
+        json.loads(c.request.content)
+        for c in respx.calls
+        if c.request.url.path.endswith("/search/query")
+    ]
+
+
+class TestNormalizeSince:
+    """The cutoff wording matches read_teams_messages exactly."""
+
+    def test_empty_stays_empty(self):
+        assert normalize_since("") == ""
+
+    def test_date_gets_midnight_zulu(self):
+        assert normalize_since("2026-01-01") == "2026-01-01T00:00:00Z"
+
+    def test_datetime_passes_through(self):
+        assert normalize_since("2026-01-01T09:30:00Z") == "2026-01-01T09:30:00Z"
+
+    def test_garbage_raises_with_the_house_message(self):
+        with pytest.raises(ValueError) as exc:
+            normalize_since("last tuesday")
+        assert str(exc.value) == (
+            "Invalid since format: 'last tuesday'. Use YYYY-MM-DD or ISO datetime."
+        )
+
+    def test_unpadded_date_raises(self):
+        with pytest.raises(ValueError):
+            normalize_since("2026-1-1")
+
+
+class TestSplitSearchQuery:
+    """Hashtags come out bare and lowercased; everything else is untouched."""
+
+    def test_single_hashtag(self):
+        assert split_search_query("#budget2026") == (["budget2026"], [])
+
+    def test_hashtag_is_lowercased(self):
+        assert split_search_query("#Budget2026") == (["budget2026"], [])
+
+    def test_multiple_hashtags(self):
+        assert split_search_query("#budget2026 #q3") == (["budget2026", "q3"], [])
+
+    def test_duplicate_hashtags_collapse(self):
+        assert split_search_query("#a #A") == (["a"], [])
+
+    def test_plain_keywords_pass_through(self):
+        assert split_search_query("invoice approved") == ([], ["invoice", "approved"])
+
+    def test_kql_passes_through(self):
+        hashtags, others = split_search_query("from:todd sent>=2026-01-01")
+        assert hashtags == []
+        assert others == ["from:todd", "sent>=2026-01-01"]
+
+    def test_mixed(self):
+        assert split_search_query("#budget2026 invoice") == (["budget2026"], ["invoice"])
+
+    def test_malformed_hash_is_a_plain_token(self):
+        assert split_search_query("# #-x #") == ([], ["#", "#-x", "#"])
+
+    def test_trailing_punctuation_is_not_part_of_the_tag(self):
+        assert split_search_query("#budget2026, #q3.") == (["budget2026", "q3"], [])
+
+    def test_hyphen_inside_tag_is_kept(self):
+        assert split_search_query("#q3-plan") == (["q3-plan"], [])
+
+    def test_empty_query(self):
+        assert split_search_query("") == ([], [])
+
+
+class TestBuildSearchQueryString:
+    """The index strips '#', so a tag is searched as a quoted bare term."""
+
+    def test_hashtag_is_quoted_and_stripped(self):
+        built = build_search_query_string(["budget2026"], [], "")
+        assert built == '"budget2026"'
+        assert "#" not in built
+
+    def test_others_are_untouched(self):
+        assert build_search_query_string([], ["from:todd"], "") == "from:todd"
+
+    def test_since_appends_kql_date(self):
+        assert (
+            build_search_query_string(["a"], [], "2026-01-01T00:00:00Z") == '"a" sent>=2026-01-01'
+        )
+
+    def test_order_is_tags_then_others_then_since(self):
+        built = build_search_query_string(["a", "b"], ["invoice"], "2026-01-01T00:00:00Z")
+        assert built == '"a" "b" invoice sent>=2026-01-01'
+
+    def test_all_empty_is_blank(self):
+        assert build_search_query_string([], [], "") == ""
+
+
+class TestHashtagMatching:
+    """Literal '#tag' matching over the hydrated body — the point of the tool."""
+
+    def _body(self, content, content_type="text", **extra):
+        return {"body": {"contentType": content_type, "content": content}, **extra}
+
+    def test_exact_tag_matches(self):
+        assert message_has_all_hashtags(self._body("see #budget2026 now"), ["budget2026"])
+
+    def test_longer_tag_does_not_match(self):
+        assert not message_has_all_hashtags(self._body("#budget20260"), ["budget2026"])
+
+    def test_prefix_word_does_not_match(self):
+        assert not message_has_all_hashtags(self._body("x#budget2026"), ["budget2026"])
+
+    def test_case_insensitive(self):
+        assert message_has_all_hashtags(self._body("#BUDGET2026"), ["budget2026"])
+
+    def test_stemmed_word_without_hash_does_not_match(self):
+        assert not message_has_all_hashtags(self._body("budget2026 update"), ["budget2026"])
+
+    def test_all_hashtags_required(self):
+        one = self._body("#budget2026 only")
+        both = self._body("#budget2026 and #q3")
+        assert not message_has_all_hashtags(one, ["budget2026", "q3"])
+        assert message_has_all_hashtags(both, ["budget2026", "q3"])
+
+    def test_html_body_tags_are_replaced_by_space(self):
+        msg = self._body("<p>hi</p><p>#tag</p>", content_type="html")
+        assert message_has_all_hashtags(msg, ["tag"])
+
+    def test_html_entity_hash_matches(self):
+        assert message_has_all_hashtags(self._body("&#35;tag"), ["tag"])
+
+    def test_subject_is_searched(self):
+        msg = self._body("nothing to see", subject="#q3")
+        assert message_has_all_hashtags(msg, ["q3"])
+
+    def test_empty_body_falls_back_to_card_text(self):
+        card = {
+            "body": {"contentType": "text", "content": ""},
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": (
+                        '{"type":"AdaptiveCard","body":[{"type":"TextBlock",'
+                        '"text":"Release #tag is out"}]}'
+                    ),
+                }
+            ],
+        }
+        assert "#tag" in message_match_text(card)
+        assert message_has_all_hashtags(card, ["tag"])
+
+    def test_no_hashtags_is_always_true(self):
+        assert message_has_all_hashtags(self._body("anything"), [])
+
+    def test_trailing_punctuation_still_matches(self):
+        assert message_has_all_hashtags(self._body("done #budget2026."), ["budget2026"])
+
+    def test_pattern_is_reusable(self):
+        pattern = hashtag_pattern("q3")
+        assert pattern.search("ship #q3 now")
+        assert not pattern.search("ship #q30 now")
+
+
+class TestNormalizeSearchHit:
+    """teamId is the chat/channel discriminator — channelIdentity is not."""
+
+    def test_chat_hit(self):
+        candidate = normalize_search_hit(SAMPLE_SEARCH_CHAT_HIT)
+        assert candidate["is_channel"] is False
+        assert candidate["chat_id"] == SEARCH_CHAT_ID
+        assert candidate["team_id"] == ""
+        assert candidate["conversation"] == f"chat:{SEARCH_CHAT_ID}"
+
+    def test_channel_hit(self):
+        candidate = normalize_search_hit(SAMPLE_SEARCH_CHANNEL_HIT)
+        assert candidate["is_channel"] is True
+        assert candidate["chat_id"] == SEARCH_CHANNEL_ID
+        assert candidate["conversation"] == f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
+
+    def test_chat_hit_with_nonempty_channel_identity_is_still_a_chat(self):
+        assert SAMPLE_SEARCH_CHAT_HIT["resource"]["channelIdentity"]
+        assert is_channel_hit(SAMPLE_SEARCH_CHAT_HIT["resource"]) is False
+        assert is_channel_hit(SAMPLE_SEARCH_CHANNEL_HIT["resource"]) is True
+
+    def test_missing_resource_returns_none(self):
+        assert normalize_search_hit({}) is None
+
+    def test_missing_id_returns_none(self):
+        assert normalize_search_hit({"resource": {"chatId": "c1"}}) is None
+
+    def test_missing_weblink_is_empty_string(self):
+        candidate = normalize_search_hit({"resource": {"id": "m1", "chatId": "c1"}})
+        assert candidate["web_link"] == ""
+        assert candidate["created"] == ""
+
+
+class TestHitMatchesConversation:
+    """Scoping is client-side: the index has no chat/channel filter."""
+
+    def _chat(self):
+        return normalize_search_hit(SAMPLE_SEARCH_CHAT_HIT)
+
+    def _channel(self):
+        return normalize_search_hit(SAMPLE_SEARCH_CHANNEL_HIT)
+
+    def test_empty_scope_matches_everything(self):
+        assert hit_matches_conversation(self._chat(), "")
+        assert hit_matches_conversation(self._channel(), "")
+
+    def test_chat_id_matches_chat_hit(self):
+        assert hit_matches_conversation(self._chat(), SEARCH_CHAT_ID)
+
+    def test_channel_id_matches_channel_hit(self):
+        assert hit_matches_conversation(self._channel(), SEARCH_CHANNEL_ID)
+
+    def test_other_id_does_not_match(self):
+        assert not hit_matches_conversation(self._chat(), SEARCH_CHANNEL_ID)
+
+    def test_case_insensitive(self):
+        assert hit_matches_conversation(self._chat(), SEARCH_CHAT_ID.upper())
+
+
+class TestReplyParentId:
+    """The 400 the chat route answers for a channel reply names the parent."""
+
+    def _error(self, status, body):
+        err = body["error"]
+        return GraphError(status, err["code"], err["message"])
+
+    def test_parses_the_parent_from_the_400(self):
+        assert reply_parent_id(self._error(400, IS_A_REPLY_400), REPLY_ID) == REPLY_PARENT_ID
+
+    def test_other_status_is_ignored(self):
+        assert reply_parent_id(self._error(404, IS_A_REPLY_400), REPLY_ID) == ""
+
+    def test_other_reply_id_is_ignored(self):
+        assert reply_parent_id(self._error(400, IS_A_REPLY_400), "9999999999999") == ""
+
+    def test_plain_400_has_no_parent(self):
+        assert reply_parent_id(self._error(400, BAD_REQUEST_400), REPLY_ID) == ""
+
+
+class TestSearchMessages:
+    """The sync twin: index page(s), then sequential hydration."""
+
+    @respx.mock
+    def test_sync_search_returns_hydrated_messages(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHAT_HIT]))
+        )
+        # Exact URL: the chat id's ':' and '@' are percent-encoded by _safe_id.
+        hydrate = respx.get(f"{CHAT_HYDRATE_BASE}/1750000000001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_HYDRATED_CHAT_MESSAGE)
+        )
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        msg = found["messages"][0]
+        assert "#budget2026" in msg["body"]["content"]
+        assert msg["_conversation"] == f"chat:{SEARCH_CHAT_ID}"
+        assert msg["_web_link"].startswith("https://teams.microsoft.com/l/message/")
+        assert found["candidates"] == 1
+        assert found["exact"] is True
+        assert found["skipped"] == 0
+        assert found["truncated"] is False
+        assert hydrate.called
+
+    @respx.mock
+    def test_sync_request_body_carries_the_query_string(self):
+        route = respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHAT_HIT]))
+        )
+        _mock_hydration({"1750000000001": SAMPLE_HYDRATED_CHAT_MESSAGE})
+        with GraphClient("tok") as client:
+            teams.search_messages(client, "#budget2026")
+
+        assert json.loads(route.calls[0].request.content) == {
+            "requests": [
+                {
+                    "entityTypes": ["chatMessage"],
+                    "query": {"queryString": '"budget2026"'},
+                    "from": 0,
+                    "size": 25,
+                }
+            ]
+        }
+
+    @respx.mock
+    def test_channel_hit_hydrates_via_the_chats_endpoint(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHANNEL_HIT]))
+        )
+        hydrate = respx.get(f"{CHANNEL_HYDRATE_BASE}/1750000000002").mock(
+            return_value=httpx.Response(200, json=SAMPLE_HYDRATED_CHANNEL_MESSAGE)
+        )
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert hydrate.called
+        assert len(found["messages"]) == 1
+        assert found["messages"][0]["_conversation"] == (
+            f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
+        )
+        assert not [c for c in respx.calls if "/teams/" in c.request.url.path]
+
+    @respx.mock
+    def test_conversation_id_filters_before_hydration(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=search_response([SAMPLE_SEARCH_CHAT_HIT, SAMPLE_SEARCH_CHANNEL_HIT]),
+            )
+        )
+        _mock_hydration(
+            {
+                "1750000000001": SAMPLE_HYDRATED_CHAT_MESSAGE,
+                "1750000000002": SAMPLE_HYDRATED_CHANNEL_MESSAGE,
+            }
+        )
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026", conversation_id=SEARCH_CHAT_ID)
+
+        assert len(found["messages"]) == 1
+        gets = [c for c in respx.calls if c.request.method == "GET"]
+        assert len(gets) == 1
+
+    @respx.mock
+    def test_paging_follows_more_results_available(self):
+        respx.post(SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json=search_response([_hit("m1"), _hit("m2")], more=True),
+                ),
+                httpx.Response(200, json=search_response([_hit("m3")], more=False)),
+            ]
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2"), "m3": _msg("m3")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        bodies = _search_paths()
+        assert len(bodies) == 2
+        assert bodies[0]["requests"][0]["from"] == 0
+        assert bodies[1]["requests"][0]["from"] == 2
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2", "m3"]
+
+    @respx.mock
+    def test_page_cap_sets_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1")], more=True))
+        )
+        _mock_hydration({"m1": _msg("m1")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert len(_search_paths()) == teams.SEARCH_MAX_PAGES
+        assert found["truncated"] is True
+        assert len(found["messages"]) == 1
+
+    @respx.mock
+    def test_duplicate_hits_across_pages_are_deduped(self):
+        respx.post(SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=search_response([_hit("m1")], more=True)),
+                httpx.Response(200, json=search_response([_hit("m1")], more=False)),
+            ]
+        )
+        _mock_hydration({"m1": _msg("m1")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        assert found["candidates"] == 1
+        assert len([c for c in respx.calls if c.request.method == "GET"]) == 1
+
+    @respx.mock
+    def test_since_filters_hits_older_than_a_datetime_cutoff(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHANNEL_HIT]))
+        )
+        _mock_hydration({"1750000000002": SAMPLE_HYDRATED_CHANNEL_MESSAGE})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026", since="2026-03-01T12:00:00Z")
+
+        assert found["messages"] == []
+        assert found["candidates"] == 0
+        assert not [c for c in respx.calls if c.request.method == "GET"]
+        assert _search_paths()[0]["requests"][0]["query"]["queryString"] == (
+            '"budget2026" sent>=2026-03-01'
+        )
+
+    @respx.mock
+    def test_exact_filters_a_stemmed_false_positive(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1")]))
+        )
+        _mock_hydration({"m1": _msg("m1", content="budget20260 update")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["candidates"] == 1
+
+    @respx.mock
+    def test_non_exact_keeps_everything(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1")]))
+        )
+        _mock_hydration({"m1": _msg("m1", content="budget20260 update")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026", exact=False)
+
+        assert len(found["messages"]) == 1
+        assert found["exact"] is False
+
+    @respx.mock
+    def test_exact_defaults_off_for_plain_keywords(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1")]))
+        )
+        _mock_hydration({"m1": _msg("m1", content="invoice approved")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "invoice")
+
+        assert found["exact"] is False
+        assert len(found["messages"]) == 1
+        assert found["query_string"] == "invoice"
+
+    @respx.mock
+    def test_hydration_404_is_skipped(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1"), _hit("gone")]))
+        )
+        _mock_hydration({"m1": _msg("m1")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        assert found["skipped"] == 1
+
+    @respx.mock
+    def test_single_deleted_hit_is_skipped_not_fatal(self):
+        """A lone 404 is a deleted message, not a withdrawn licence."""
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("gone")]))
+        )
+        _mock_hydration({})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["skipped"] == 1
+        assert found["candidates"] == 1
+
+    @respx.mock
+    def test_all_hydrations_failing_raises(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1")]))
+        )
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with GraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                teams.search_messages(client, "#budget2026")
+
+    @respx.mock
+    def test_search_403_is_teams_unavailable(self):
+        respx.post(SEARCH_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with GraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                teams.search_messages(client, "#budget2026")
+
+        assert not [c for c in respx.calls if c.request.method == "GET"]
+
+    @respx.mock
+    def test_search_400_not_supported_is_unsupported(self):
+        respx.post(SEARCH_URL).mock(return_value=httpx.Response(400, json=NOT_SUPPORTED_400))
+        with GraphClient("tok") as client:
+            with pytest.raises(TeamsSearchUnsupportedError) as exc:
+                teams.search_messages(client, "#budget2026")
+
+        assert "work or school accounts" in str(exc.value)
+
+    @respx.mock
+    def test_search_400_other_propagates(self):
+        respx.post(SEARCH_URL).mock(return_value=httpx.Response(400, json=BAD_REQUEST_400))
+        with GraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                teams.search_messages(client, "#budget2026")
+
+        assert exc.value.status_code == 400
+
+    @respx.mock
+    def test_empty_query_makes_no_request(self):
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "   ")
+
+        assert found["messages"] == []
+        assert found["candidates"] == 0
+        assert list(respx.calls) == []
+
+    @respx.mock
+    def test_max_results_trims_and_marks_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_hit("m1"), _hit("m2"), _hit("m3")])
+            )
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2"), "m3": _msg("m3")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026", max_results=2)
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2"]
+        assert found["truncated"] is True
+
+    @respx.mock
+    def test_budget_filled_exactly_on_the_last_hit_is_not_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1"), _hit("m2")]))
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "budget", max_results=2)
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2"]
+        assert found["truncated"] is False
+
+    @respx.mock
+    def test_budget_filled_with_hits_left_on_the_page_is_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_hit("m1"), _hit("m2"), _hit("m3")])
+            )
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "budget", max_results=2)
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2"]
+        assert found["truncated"] is True
+        assert found["candidates"] == 2
+
+    @respx.mock
+    def test_budget_filled_on_the_last_hit_with_more_available_is_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_hit("m1"), _hit("m2")], more=True)
+            )
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "budget", max_results=2)
+
+        assert found["truncated"] is True
+
+    @respx.mock
+    def test_max_results_is_capped_at_100(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1")], more=True))
+        )
+        _mock_hydration({"m1": _msg("m1")})
+        with GraphClient("tok") as client:
+            teams.search_messages(client, "#budget2026", max_results=5000)
+
+        bodies = _search_paths()
+        assert len(bodies) == teams.SEARCH_MAX_PAGES
+        assert all(b["requests"][0]["size"] == teams.SEARCH_PAGE_SIZE for b in bodies)
+
+    @respx.mock
+    def test_empty_container_returns_no_messages(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SEARCH_MESSAGES_EMPTY)
+        )
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["truncated"] is False
+        assert not [c for c in respx.calls if c.request.method == "GET"]
+
+    @respx.mock
+    def test_channel_reply_hydrates_via_the_replies_route(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(400, json=IS_A_REPLY_400)
+        )
+        respx.get(REPLY_ROUTE).mock(return_value=httpx.Response(200, json=REPLY_BODY))
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        msg = found["messages"][0]
+        assert msg["id"] == REPLY_ID
+        assert msg["_conversation"] == f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
+        assert found["skipped"] == 0
+        assert _get_trail() == [
+            ("GET", f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}"),
+            ("GET", REPLY_ROUTE),
+        ]
+
+    @respx.mock
+    def test_reply_400_without_a_parent_is_skipped(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "BadRequest",
+                        "message": "The message is a reply and is not supported on this route.",
+                    }
+                },
+            )
+        )
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["skipped"] == 1
+        assert not [c for c in respx.calls if "/teams/" in c.request.url.path]
+
+    @respx.mock
+    def test_reply_route_403_is_teams_unavailable(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(400, json=IS_A_REPLY_400)
+        )
+        respx.get(REPLY_ROUTE).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with GraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                teams.search_messages(client, "#budget2026")
+
+
+class TestASearchMessages:
+    """The async twin: same contract, concurrent hydration."""
+
+    @respx.mock
+    async def test_async_happy_path_chat(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHAT_HIT]))
+        )
+        _mock_hydration({"1750000000001": SAMPLE_HYDRATED_CHAT_MESSAGE})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        assert found["messages"][0]["_conversation"] == f"chat:{SEARCH_CHAT_ID}"
+        assert found["candidates"] == 1
+
+    @respx.mock
+    async def test_async_channel_hit(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([SAMPLE_SEARCH_CHANNEL_HIT]))
+        )
+        _mock_hydration({"1750000000002": SAMPLE_HYDRATED_CHANNEL_MESSAGE})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert found["messages"][0]["_conversation"] == (
+            f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
+        )
+        assert not [c for c in respx.calls if "/teams/" in c.request.url.path]
+
+    @respx.mock
+    async def test_async_conversation_scope(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=search_response([SAMPLE_SEARCH_CHAT_HIT, SAMPLE_SEARCH_CHANNEL_HIT]),
+            )
+        )
+        _mock_hydration(
+            {
+                "1750000000001": SAMPLE_HYDRATED_CHAT_MESSAGE,
+                "1750000000002": SAMPLE_HYDRATED_CHANNEL_MESSAGE,
+            }
+        )
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(
+                client, "#budget2026", conversation_id=SEARCH_CHANNEL_ID
+            )
+
+        assert len(found["messages"]) == 1
+        assert len([c for c in respx.calls if c.request.method == "GET"]) == 1
+
+    @respx.mock
+    async def test_async_paging(self):
+        respx.post(SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=search_response([_hit("m1"), _hit("m2")], more=True)),
+                httpx.Response(200, json=search_response([_hit("m3")], more=False)),
+            ]
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2"), "m3": _msg("m3")})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        bodies = _search_paths()
+        assert len(bodies) == 2
+        assert bodies[1]["requests"][0]["from"] == 2
+        assert len(found["messages"]) == 3
+
+    @respx.mock
+    async def test_async_hydration_404_is_skipped(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1"), _hit("gone")]))
+        )
+        _mock_hydration({"m1": _msg("m1")})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        assert found["skipped"] == 1
+
+    @respx.mock
+    async def test_async_single_deleted_hit_is_skipped_not_fatal(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("gone")]))
+        )
+        _mock_hydration({})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["skipped"] == 1
+
+    @respx.mock
+    async def test_async_all_hydrations_403_raises(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1")]))
+        )
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(TeamsNotAvailableError):
+                await teams.asearch_messages(client, "#budget2026")
+
+    @respx.mock
+    async def test_async_preserves_hit_order(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_hit("m1"), _hit("m2"), _hit("m3")])
+            )
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2"), "m3": _msg("m3")})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2", "m3"]
+
+    @respx.mock
+    async def test_async_search_400_not_supported(self):
+        respx.post(SEARCH_URL).mock(return_value=httpx.Response(400, json=NOT_SUPPORTED_400))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(TeamsSearchUnsupportedError):
+                await teams.asearch_messages(client, "#budget2026")
+
+    @respx.mock
+    async def test_async_budget_filled_exactly_on_the_last_hit_is_not_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1"), _hit("m2")]))
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "budget", max_results=2)
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2"]
+        assert found["truncated"] is False
+
+    @respx.mock
+    async def test_async_channel_reply_hydrates_via_the_replies_route(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(400, json=IS_A_REPLY_400)
+        )
+        respx.get(REPLY_ROUTE).mock(return_value=httpx.Response(200, json=REPLY_BODY))
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert len(found["messages"]) == 1
+        msg = found["messages"][0]
+        assert msg["id"] == REPLY_ID
+        assert msg["_conversation"] == f"channel:{SEARCH_TEAM_ID}/{SEARCH_CHANNEL_ID}"
+        assert found["skipped"] == 0
+        assert _get_trail() == [
+            ("GET", f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}"),
+            ("GET", REPLY_ROUTE),
+        ]
+
+    @respx.mock
+    async def test_async_reply_400_without_a_parent_is_skipped(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([REPLY_HIT]))
+        )
+        respx.get(f"{CHANNEL_HYDRATE_BASE}/{REPLY_ID}").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "BadRequest",
+                        "message": "The message is a reply and is not supported on this route.",
+                    }
+                },
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "#budget2026")
+
+        assert found["messages"] == []
+        assert found["skipped"] == 1
+        assert not [c for c in respx.calls if "/teams/" in c.request.url.path]

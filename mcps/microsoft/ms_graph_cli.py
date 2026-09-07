@@ -34,6 +34,7 @@ Usage:
     ms-graph-cli teams chats [--type oneOnOne|group|meeting] [--top 20]
     ms-graph-cli teams read --chat-id <chat_id> [--top 20]
     ms-graph-cli teams read --team-id <team_id> --channel-id <channel_id> [--top 20]
+    ms-graph-cli teams search <query> [--since <iso>] [--conversation-id <id>] [--max-results 25] [--exact auto|yes|no]
     ms-graph-cli teams attachment <message_id> <attachment_id> --chat-id <chat_id> [--out PATH]
     ms-graph-cli teams attachment <message_id> <attachment_id> --team-id <team_id> --channel-id <channel_id> [--out PATH]
     ms-graph-cli teams send <message> --chat-id <chat_id> [--attach PATH ...] [--image PATH ...]
@@ -679,6 +680,67 @@ def cmd_teams_read(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_teams_search(args: argparse.Namespace) -> None:
+    if not args.query.strip():
+        print("Error: provide a search query.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        since = teams.normalize_since(args.since)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    exact = {"auto": None, "yes": True, "no": False}[args.exact]
+
+    token = get_local_token()
+    with GraphClient(token) as client:
+        try:
+            found = teams.search_messages(
+                client,
+                args.query,
+                since=since,
+                conversation_id=args.conversation_id,
+                max_results=args.max_results,
+                exact=exact,
+            )
+        except teams.TeamsSearchUnsupportedError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    messages = found["messages"]
+    if not messages:
+        print(f"No messages matching '{args.query}'.")
+        hydrated = found["candidates"] - found["skipped"]
+        if found["exact"] and found["hashtags"] and hydrated > 0:
+            print(
+                f"The index matched {hydrated} message(s) but none carried the hashtag "
+                "literally; retry with --exact no to see them."
+            )
+    else:
+        print(f"Messages matching '{args.query}' ({len(messages)}):\n")
+        for i, msg in enumerate(messages, 1):
+            sender = teams.extract_message_sender(msg)
+            content = teams.extract_message_text(msg)
+            print(
+                f"[{i}] {sender}  ({msg.get('createdDateTime', '?')})  "
+                f"[{msg.get('_conversation', '?')}]"
+            )
+            print(f"     {content or '(empty)'}")
+            if msg.get("_web_link"):
+                print(f"     {msg['_web_link']}")
+            print()
+
+    if found["skipped"]:
+        print(
+            f"{found['skipped']} matching message(s) could not be read "
+            "(deleted, or no longer shared with you) and were skipped."
+        )
+    if found["truncated"]:
+        print(
+            "More results may exist. Narrow the search with --since or "
+            "--conversation-id, or raise --max-results."
+        )
+
+
 def cmd_teams_attachment(args: argparse.Namespace) -> None:
     if not args.chat_id and not (args.team_id and args.channel_id):
         print("Error: provide --chat-id, or both --team-id and --channel-id.", file=sys.stderr)
@@ -1265,6 +1327,21 @@ def main() -> None:
     p.add_argument("--chat-id", dest="chat_id", default="")
     p.add_argument("--top", type=int, default=20)
     p.set_defaults(func=cmd_teams_read)
+
+    p = teams_sub.add_parser("search", help="Search all chats and channels by hashtag or keyword")
+    p.add_argument("query", help="Hashtags (#tag, matched literally) and/or keywords")
+    p.add_argument("--since", default="", help="YYYY-MM-DD or ISO datetime; default is all time")
+    p.add_argument(
+        "--conversation-id", dest="conversation_id", default="", help="Limit to one chat or channel"
+    )
+    p.add_argument("--max-results", dest="max_results", type=int, default=25)
+    p.add_argument(
+        "--exact",
+        choices=("auto", "yes", "no"),
+        default="auto",
+        help="Require the literal #tag in the body (auto: yes when the query has a hashtag)",
+    )
+    p.set_defaults(func=cmd_teams_search)
 
     p = teams_sub.add_parser(
         "attachment", help="Download a file or inline image from a Teams message"

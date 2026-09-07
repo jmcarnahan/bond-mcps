@@ -46,6 +46,18 @@ def _check_teams_access(e: GraphError) -> None:
     raise e
 
 
+class TeamsSearchUnsupportedError(Exception):
+    """Raised when /search/query refuses chatMessage for this account type.
+
+    Personal (consumer) Microsoft accounts answer 400 "not supported" — the
+    Microsoft Search API is a work/school feature. This is permanent for the
+    account, so callers report it rather than retrying.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Teams message search is only available on work or school accounts.")
+
+
 class FilesScopeMissingError(Exception):
     """Raised when a Teams file send fails because the connection cannot write files."""
 
@@ -61,6 +73,25 @@ def _raise_scope_missing(e: GraphError) -> None:
     if e.status_code == 403:
         raise FilesScopeMissingError() from e
     raise e
+
+
+# --- Teams message search -------------------------------------------------
+
+SEARCH_PAGE_SIZE = 25  # hits requested per /search/query call
+SEARCH_MAX_PAGES = 8  # hard stop: 8 * 25 = 200 hits examined
+SEARCH_MAX_CANDIDATES = 200  # hard stop on candidates kept for hydration
+SEARCH_DEFAULT_MAX_RESULTS = 25
+SEARCH_MAX_RESULTS_CAP = 100
+HYDRATE_CONCURRENCY = 5  # concurrent GET /chats/{id}/messages/{id}
+EXACT_OVERFETCH = 2  # exact mode hydrates 2x max_results candidates
+
+# A '#token' in the user's query. The index strips '#', so the tag is searched
+# as a bare quoted term and re-checked against the message body afterwards.
+HASHTAG_RE = re.compile(r"^#([A-Za-z0-9_][\w-]*)$")
+
+# The parent/reply pair Graph names when a channel reply is fetched on the
+# root message route: "... retrieve replies via /chats(...)/messages(<parent>)/replies(<id>)".
+REPLY_ROUTE_RE = re.compile(r"messages\((\d+)\)/replies\((\d+)\)")
 
 
 def decode_token_claims(token: str) -> dict[str, str]:
@@ -288,9 +319,11 @@ def extract_message_text(msg: dict[str, Any], max_length: int = -1) -> str:
     body = msg.get("body") or {}
     content = body.get("content", "")
 
-    # Strip HTML tags if needed
+    # Strip HTML tags if needed, then the entities the tags carried between
+    # them: '&nbsp;' and '&amp;' are markup, not what the person typed.
     if body.get("contentType") == "html" and content:
-        content = re.sub(r"<[^>]+>", "", content).strip()
+        content = re.sub(r"<[^>]+>", "", content)
+        content = html_mod.unescape(content).replace("\xa0", " ").strip()
 
     # If body is empty, try adaptive card attachments
     if not content.strip():
@@ -325,6 +358,257 @@ def extract_message_sender(msg: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Teams message search helpers (pure, shared by both twins)
+# ---------------------------------------------------------------------------
+
+
+def normalize_since(value: str) -> str:
+    """Normalize a caller-supplied cutoff to an ISO datetime, or "" for all time.
+
+    Same rules and wording as the inline validation in read_teams_messages:
+    a bare date grows a midnight-Zulu time, an ISO datetime passes through,
+    and anything else is a caller error.
+    """
+    if not value:
+        return ""
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return value + "T00:00:00Z"
+    if re.match(r"^\d{4}-\d{2}-\d{2}T", value):
+        return value
+    raise ValueError(f"Invalid since format: '{value}'. Use YYYY-MM-DD or ISO datetime.")
+
+
+def split_search_query(query: str) -> tuple[list[str], list[str]]:
+    """Split a user query into (hashtags, other tokens).
+
+    A token that matches HASHTAG_RE is a hashtag and is returned lowercased
+    WITHOUT its '#'. Everything else passes through untouched, so KQL a user
+    typed ('from:todd', 'sent>=2026-01-01') and plain keywords keep working.
+    A malformed '#' token (bare '#', '#-x') is not a hashtag; it stays a
+    plain token. Trailing prose punctuation ('#tag,' '#tag.') is not part of
+    the tag.
+    """
+    hashtags: list[str] = []
+    others: list[str] = []
+    seen: set[str] = set()
+    for token in query.split():
+        m = HASHTAG_RE.match(token.rstrip(".,;:!?)"))
+        if m:
+            tag = m.group(1).lower()
+            if tag not in seen:
+                seen.add(tag)
+                hashtags.append(tag)
+        else:
+            others.append(token)
+    return hashtags, others
+
+
+def build_search_query_string(hashtags: list[str], others: list[str], since: str = "") -> str:
+    """The queryString sent to /search/query.
+
+    The Teams index strips '#' from indexed text, so '"#tag"' returns zero
+    hits. A hashtag is therefore searched as the QUOTED bare term — quoting
+    also suppresses stemming, so '"budget2026"' does not also match
+    'budget20260'. A 'sent>=' KQL clause narrows the server side when a cutoff
+    was given; it is day-granular, so the caller still filters timestamps
+    itself.
+    """
+    parts = [f'"{tag}"' for tag in hashtags]
+    parts.extend(others)
+    if since:
+        parts.append(f"sent>={since[:10]}")
+    return " ".join(parts)
+
+
+def hashtag_pattern(tag: str) -> re.Pattern[str]:
+    """Compiled matcher for one hashtag inside message text.
+
+    '#budget2026' must not match '#budget20260' or 'my#budget2026', so the tag
+    is fenced by a lookbehind rejecting word chars and '#', and a lookahead
+    rejecting word chars and '-'.
+    """
+    return re.compile(rf"(?<![\w#])#{re.escape(tag)}(?![\w-])", re.IGNORECASE)
+
+
+def message_match_text(msg: dict[str, Any]) -> str:
+    """The text a hashtag is matched against: subject + body, tags removed.
+
+    HTML tags become a SPACE, not nothing — '<p>hi</p><p>#tag</p>' must not
+    collapse to 'hi#tag', which the fenced pattern would then reject. HTML
+    entities are unescaped afterwards so a body carrying '&#35;tag' still
+    matches. An empty body falls back to extract_message_text so a card-only
+    message is still searchable.
+    """
+    body = msg.get("body") or {}
+    content = body.get("content") or ""
+    if body.get("contentType") == "html" and content:
+        content = re.sub(r"<[^>]+>", " ", content)
+    text = html_mod.unescape(content)
+    if not text.strip():
+        text = extract_message_text(msg, max_length=-1)
+    subject = msg.get("subject") or ""
+    return f"{subject} {text}"
+
+
+def message_has_all_hashtags(msg: dict[str, Any], hashtags: list[str]) -> bool:
+    """True when EVERY hashtag appears literally in the message (AND, not OR)."""
+    if not hashtags:
+        return True
+    text = message_match_text(msg)
+    return all(hashtag_pattern(tag).search(text) for tag in hashtags)
+
+
+def is_channel_hit(resource: dict[str, Any]) -> bool:
+    """A channel hit carries channelIdentity.teamId; a chat hit does not.
+
+    Verified against the tenant: for a CHAT hit channelIdentity is non-empty
+    ({"channelId": <the chatId>}) with no teamId, so the presence of
+    channelIdentity is NOT the discriminator — teamId is.
+    """
+    identity = resource.get("channelIdentity") or {}
+    return bool(identity.get("teamId"))
+
+
+def normalize_search_hit(hit: dict[str, Any]) -> dict[str, Any] | None:
+    """One /search/query hit -> the candidate the hydrator and the CSV need.
+
+    Returns None for a hit with no resource or no id — one malformed hit must
+    not sink a page. 'chat_id' is what GET /chats/{chat_id}/messages/{id}
+    takes; for a channel hit that is the channel thread id, which the same
+    endpoint accepts (verified).
+    """
+    resource = hit.get("resource")
+    if not isinstance(resource, dict):
+        return None
+    message_id = resource.get("id")
+    if not message_id:
+        return None
+    identity = resource.get("channelIdentity") or {}
+    channel_id = identity.get("channelId") or ""
+    team_id = identity.get("teamId") or ""
+    chat_id = resource.get("chatId") or channel_id
+    channel = is_channel_hit(resource)
+    return {
+        "id": str(message_id),
+        "chat_id": str(chat_id),
+        "team_id": str(team_id),
+        "channel_id": str(channel_id),
+        "is_channel": channel,
+        "created": resource.get("createdDateTime") or "",
+        "web_link": resource.get("webLink") or "",
+        "conversation": (f"channel:{team_id}/{channel_id}" if channel else f"chat:{chat_id}"),
+    }
+
+
+def hit_matches_conversation(candidate: dict[str, Any], conversation_id: str) -> bool:
+    """Client-side scope filter: the Teams index cannot scope by chat/channel.
+
+    Matches the candidate's chatId OR its channelIdentity.channelId, so the
+    caller may pass either a chat id (19:...@unq.gbl.spaces / @thread.v2) or a
+    channel id (19:...@thread.tacv2).
+    """
+    if not conversation_id:
+        return True
+    wanted = conversation_id.strip().casefold()
+    return wanted in {
+        candidate["chat_id"].casefold(),
+        candidate["channel_id"].casefold(),
+    }
+
+
+def reply_parent_id(e: GraphError, message_id: str) -> str:
+    """The parent id Graph names when a channel reply is fetched on the root route.
+
+    The Search index returns channel replies, but a hit carries no parent id and
+    ``/chats/{id}/messages/{id}`` answers 400 "is a reply ... retrieve replies via
+    /chats(...)/messages(<parent>)/replies(<id>)". That chat-scoped replies route
+    is not allowed on a delegated token; the team-scoped one is (verified live
+    2026-09-06). Returns "" for any other error, or when the id Graph names is
+    not the one asked for.
+    """
+    if e.status_code != 400:
+        return ""
+    m = REPLY_ROUTE_RE.search(str(e))
+    if not m or m.group(2) != message_id:
+        return ""
+    return m.group(1)
+
+
+def _search_payload(query_string: str, offset: int) -> dict[str, Any]:
+    """The POST /search/query body for one page of chatMessage hits."""
+    return {
+        "requests": [
+            {
+                "entityTypes": ["chatMessage"],
+                "query": {"queryString": query_string},
+                "from": offset,
+                "size": SEARCH_PAGE_SIZE,
+            }
+        ]
+    }
+
+
+def _search_container(data: dict[str, Any] | None) -> dict[str, Any]:
+    """The first hitsContainer of a search response, or {}.
+
+    Deliberately NOT files._parse_search_response: that one injects
+    _searchSummary and throws away moreResultsAvailable, which is the only
+    paging signal Teams search gives (its 'total' is per-page and must never
+    be surfaced).
+    """
+    for entry in (data or {}).get("value") or []:
+        for container in entry.get("hitsContainers") or []:
+            if isinstance(container, dict):
+                return container
+    return {}
+
+
+def _search_error(e: GraphError) -> None:
+    """Translate a /search/query failure, then re-raise."""
+    if e.status_code == 400 and "not supported" in str(e).lower():
+        raise TeamsSearchUnsupportedError() from e
+    _check_teams_access(e)  # 403 -> TeamsNotAvailableError; else re-raise
+
+
+def _collect(
+    container: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    seen: set[str],
+    conversation_id: str,
+    since: str,
+    budget: int,
+) -> int:
+    """Fold one page's hits into `candidates`. Returns how many hits it examined.
+
+    Stops as soon as the budget is full, so a return value below the page's
+    hit count means hits were left unread — that, or moreResultsAvailable, is
+    what makes a search "truncated"; a budget that fills exactly on the last
+    hit the index had is not.
+
+    Filters BEFORE counting toward the budget, so a conversation_id scope
+    keeps paging until enough scoped hits exist or the index is exhausted.
+    Dedupes by message id: the index can repeat a hit across pages when it
+    shifts under us.
+    """
+    examined = 0
+    for hit in container.get("hits") or []:
+        examined += 1
+        candidate = normalize_search_hit(hit if isinstance(hit, dict) else {})
+        if candidate is None or candidate["id"] in seen:
+            continue
+        if not hit_matches_conversation(candidate, conversation_id):
+            continue
+        if since and candidate["created"] and candidate["created"] < since:
+            # 'sent>=' KQL is day-granular; this honours a datetime cutoff.
+            continue
+        seen.add(candidate["id"])
+        candidates.append(candidate)
+        if len(candidates) >= budget:
+            break
+    return examined
+
+
+# ---------------------------------------------------------------------------
 # Synchronous
 # ---------------------------------------------------------------------------
 
@@ -351,12 +635,35 @@ def get_message(
     team_id: str = "",
     channel_id: str = "",
 ) -> dict[str, Any]:
-    """Fetch ONE chat or channel message. Top-level messages only, not replies."""
+    """Fetch ONE chat or channel message. Top-level messages only; replies need get_reply."""
     base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
     try:
         return client.get(f"{base}/{_safe_id(message_id)}")
     except GraphError as e:
         _check_teams_access(e)
+
+
+def get_reply(
+    client: GraphClient, team_id: str, channel_id: str, parent_id: str, reply_id: str
+) -> dict[str, Any]:
+    """Fetch ONE reply in a channel thread."""
+    base = _message_base(team_id=team_id, channel_id=channel_id)
+    try:
+        return client.get(f"{base}/{_safe_id(parent_id)}/replies/{_safe_id(reply_id)}")
+    except GraphError as e:
+        _check_teams_access(e)
+
+
+def _hydrate_candidate(client: GraphClient, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Full message for a search hit — root messages via the chat route, channel
+    replies via the team replies route once Graph has named the parent."""
+    try:
+        return get_message(client, candidate["id"], chat_id=candidate["chat_id"])
+    except GraphError as e:
+        parent = reply_parent_id(e, candidate["id"])
+        if not parent or not candidate["team_id"]:
+            raise
+    return get_reply(client, candidate["team_id"], candidate["channel_id"], parent, candidate["id"])
 
 
 def get_hosted_content(
@@ -486,6 +793,101 @@ def list_chat_messages(
     return data.get("value", [])
 
 
+def search_messages(
+    client: GraphClient,
+    query: str,
+    since: str = "",
+    conversation_id: str = "",
+    max_results: int = SEARCH_DEFAULT_MAX_RESULTS,
+    exact: bool | None = None,
+) -> dict[str, Any]:
+    """Sync twin of asearch_messages, for the CLI.
+
+    Hydration is sequential — a CLI search of 25 hits is 25 GETs in a row,
+    which is fine at a human's pace and keeps the CLI free of asyncio.
+    """
+    hashtags, others = split_search_query(query)
+    if exact is None:
+        exact = bool(hashtags)
+    max_results = max(1, min(max_results or SEARCH_DEFAULT_MAX_RESULTS, SEARCH_MAX_RESULTS_CAP))
+    query_string = build_search_query_string(hashtags, others, since)
+    empty: dict[str, Any] = {
+        "messages": [],
+        "hashtags": hashtags,
+        "exact": exact,
+        "query_string": query_string,
+        "candidates": 0,
+        "skipped": 0,
+        "truncated": False,
+    }
+    if not query_string.strip():
+        return empty
+
+    budget = min(
+        max_results * EXACT_OVERFETCH if (exact and hashtags) else max_results,
+        SEARCH_MAX_CANDIDATES,
+    )
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    offset = 0
+    truncated = False
+    for page in range(SEARCH_MAX_PAGES):
+        try:
+            data = client.post("/search/query", json_data=_search_payload(query_string, offset))
+        except GraphError as e:
+            _search_error(e)
+        container = _search_container(data)
+        hits = container.get("hits") or []
+        examined = _collect(container, candidates, seen, conversation_id, since, budget)
+        offset += len(hits)
+        if len(candidates) >= budget:
+            # Budget full. Only "more may exist" when something was left unread.
+            truncated = examined < len(hits) or bool(container.get("moreResultsAvailable"))
+            break
+        if not hits or not container.get("moreResultsAvailable"):
+            break
+        if page == SEARCH_MAX_PAGES - 1:
+            truncated = True
+    if not candidates:
+        return {**empty, "truncated": truncated}
+
+    messages: list[dict[str, Any]] = []
+    skipped = 0
+    errors: list[BaseException] = []
+    for candidate in candidates:
+        try:
+            msg = _hydrate_candidate(client, candidate)
+        except Exception as e:  # noqa: BLE001 — one bad id must not sink the search
+            skipped += 1
+            errors.append(e)
+            logger.warning("Teams search: skipping unreadable message: %s", e)
+            continue
+        msg["_conversation"] = candidate["conversation"]
+        msg["_web_link"] = candidate["web_link"]
+        messages.append(msg)
+    # Every hydration answered 403 => not "one deleted message" but a withdrawn
+    # licence or scope (_check_teams_access already turned each 403 into
+    # TeamsNotAvailableError). Anything else — a lone deleted hit, a 5xx — is
+    # skipped and counted, so the caller sees "0 results, N skipped".
+    if not messages and errors and all(isinstance(e, TeamsNotAvailableError) for e in errors):
+        raise errors[0]
+
+    if exact and hashtags:
+        messages = [m for m in messages if message_has_all_hashtags(m, hashtags)]
+    if len(messages) > max_results:
+        messages = messages[:max_results]
+        truncated = True
+    return {
+        "messages": messages,
+        "hashtags": hashtags,
+        "exact": exact,
+        "query_string": query_string,
+        "candidates": len(candidates),
+        "skipped": skipped,
+        "truncated": truncated,
+    }
+
+
 def send_chat_message(
     client: GraphClient,
     chat_id: str,
@@ -526,12 +928,39 @@ async def aget_message(
     team_id: str = "",
     channel_id: str = "",
 ) -> dict[str, Any]:
-    """Fetch ONE chat or channel message (async)."""
+    """Fetch ONE chat or channel message (async). Replies need aget_reply."""
     base = _message_base(chat_id=chat_id, team_id=team_id, channel_id=channel_id)
     try:
         return await client.get(f"{base}/{_safe_id(message_id)}")
     except GraphError as e:
         _check_teams_access(e)
+
+
+async def aget_reply(
+    client: AsyncGraphClient, team_id: str, channel_id: str, parent_id: str, reply_id: str
+) -> dict[str, Any]:
+    """Fetch ONE reply in a channel thread (async)."""
+    base = _message_base(team_id=team_id, channel_id=channel_id)
+    try:
+        return await client.get(f"{base}/{_safe_id(parent_id)}/replies/{_safe_id(reply_id)}")
+    except GraphError as e:
+        _check_teams_access(e)
+
+
+async def _ahydrate_candidate(
+    client: AsyncGraphClient, candidate: dict[str, Any]
+) -> dict[str, Any]:
+    """Full message for a search hit — root messages via the chat route, channel
+    replies via the team replies route once Graph has named the parent (async)."""
+    try:
+        return await aget_message(client, candidate["id"], chat_id=candidate["chat_id"])
+    except GraphError as e:
+        parent = reply_parent_id(e, candidate["id"])
+        if not parent or not candidate["team_id"]:
+            raise
+    return await aget_reply(
+        client, candidate["team_id"], candidate["channel_id"], parent, candidate["id"]
+    )
 
 
 async def aget_hosted_content(
@@ -681,6 +1110,131 @@ async def alist_chat_messages(
     except GraphError as e:
         _check_teams_access(e)
     return []
+
+
+async def asearch_messages(
+    client: AsyncGraphClient,
+    query: str,
+    since: str = "",
+    conversation_id: str = "",
+    max_results: int = SEARCH_DEFAULT_MAX_RESULTS,
+    exact: bool | None = None,
+) -> dict[str, Any]:
+    """Search Teams chats and channels for messages, then hydrate the hits.
+
+    /search/query returns metadata only — no body, and 'fields' cannot add one
+    — so every hit is fetched again through GET /chats/{chatId}/messages/{id},
+    which serves channel messages too (a channel hit's chatId is its channel
+    thread id).
+
+    Args:
+        query: raw user query. '#tags' are extracted and matched exactly after
+            hydration; everything else is passed to the index as-is.
+        since: normalized ISO datetime cutoff, or "" for all time.
+        conversation_id: chat id or channel id to scope to, client-side.
+        max_results: messages to return, capped at SEARCH_MAX_RESULTS_CAP.
+        exact: None (default) means "exact when the query has hashtags".
+
+    Returns:
+        {"messages": [...], "hashtags": [...], "exact": bool,
+         "query_string": str, "candidates": int, "skipped": int,
+         "truncated": bool}
+        Each message is the full Graph chatMessage with the candidate's
+        '_conversation' and '_web_link' merged in for the caller to render.
+
+    Raises:
+        TeamsSearchUnsupportedError: consumer account.
+        TeamsNotAvailableError: 403 on search, or every hydration failed with
+            403 (no Teams licence / scope withdrawn).
+    """
+    hashtags, others = split_search_query(query)
+    if exact is None:
+        exact = bool(hashtags)
+    max_results = max(1, min(max_results or SEARCH_DEFAULT_MAX_RESULTS, SEARCH_MAX_RESULTS_CAP))
+    query_string = build_search_query_string(hashtags, others, since)
+    empty: dict[str, Any] = {
+        "messages": [],
+        "hashtags": hashtags,
+        "exact": exact,
+        "query_string": query_string,
+        "candidates": 0,
+        "skipped": 0,
+        "truncated": False,
+    }
+    if not query_string.strip():
+        return empty
+
+    budget = min(
+        max_results * EXACT_OVERFETCH if (exact and hashtags) else max_results,
+        SEARCH_MAX_CANDIDATES,
+    )
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    offset = 0
+    truncated = False
+    for page in range(SEARCH_MAX_PAGES):
+        try:
+            data = await client.post(
+                "/search/query", json_data=_search_payload(query_string, offset)
+            )
+        except GraphError as e:
+            _search_error(e)
+        container = _search_container(data)
+        hits = container.get("hits") or []
+        examined = _collect(container, candidates, seen, conversation_id, since, budget)
+        offset += len(hits)
+        if len(candidates) >= budget:
+            # Budget full. Only "more may exist" when something was left unread.
+            truncated = examined < len(hits) or bool(container.get("moreResultsAvailable"))
+            break
+        if not hits or not container.get("moreResultsAvailable"):
+            break
+        if page == SEARCH_MAX_PAGES - 1:
+            truncated = True
+    if not candidates:
+        return {**empty, "truncated": truncated}
+
+    sem = asyncio.Semaphore(HYDRATE_CONCURRENCY)
+
+    async def _hydrate(candidate: dict[str, Any]) -> dict[str, Any]:
+        async with sem:
+            msg = await _ahydrate_candidate(client, candidate)
+        msg["_conversation"] = candidate["conversation"]
+        msg["_web_link"] = candidate["web_link"]
+        return msg
+
+    results = await asyncio.gather(*[_hydrate(c) for c in candidates], return_exceptions=True)
+    messages: list[dict[str, Any]] = []
+    skipped = 0
+    errors: list[BaseException] = []
+    for item in results:
+        if isinstance(item, BaseException):
+            skipped += 1
+            errors.append(item)
+            logger.warning("Teams search: skipping unreadable message: %s", item)
+            continue
+        messages.append(item)
+    # Every hydration answered 403 => not "one deleted message" but a withdrawn
+    # licence or scope (_check_teams_access already turned each 403 into
+    # TeamsNotAvailableError). Anything else — a lone deleted hit, a 5xx — is
+    # skipped and counted, so the caller sees "0 results, N skipped".
+    if not messages and errors and all(isinstance(e, TeamsNotAvailableError) for e in errors):
+        raise errors[0]
+
+    if exact and hashtags:
+        messages = [m for m in messages if message_has_all_hashtags(m, hashtags)]
+    if len(messages) > max_results:
+        messages = messages[:max_results]
+        truncated = True
+    return {
+        "messages": messages,
+        "hashtags": hashtags,
+        "exact": exact,
+        "query_string": query_string,
+        "candidates": len(candidates),
+        "skipped": skipped,
+        "truncated": truncated,
+    }
 
 
 async def amark_chat_read(
