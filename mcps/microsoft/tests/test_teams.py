@@ -88,6 +88,10 @@ class TestExtractMessageText:
         msg = {"body": {"contentType": "text", "content": "Hello world"}, "attachments": []}
         assert extract_message_text(msg) == "Hello world"
 
+    def test_html_entities_are_unescaped(self):
+        msg = {"body": {"contentType": "html", "content": "<p>Fish &amp; chips&nbsp;now</p>"}}
+        assert extract_message_text(msg) == "Fish & chips now"
+
     def test_html_strips_tags(self):
         msg = {
             "body": {"contentType": "html", "content": "<p>Hello <b>world</b></p>"},
@@ -2889,6 +2893,46 @@ class TestSearchMessages:
         assert found["truncated"] is True
 
     @respx.mock
+    def test_budget_filled_exactly_on_the_last_hit_is_not_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1"), _hit("m2")]))
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "budget", max_results=2)
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2"]
+        assert found["truncated"] is False
+
+    @respx.mock
+    def test_budget_filled_with_hits_left_on_the_page_is_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_hit("m1"), _hit("m2"), _hit("m3")])
+            )
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "budget", max_results=2)
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2"]
+        assert found["truncated"] is True
+        assert found["candidates"] == 2
+
+    @respx.mock
+    def test_budget_filled_on_the_last_hit_with_more_available_is_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=search_response([_hit("m1"), _hit("m2")], more=True)
+            )
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        with GraphClient("tok") as client:
+            found = teams.search_messages(client, "budget", max_results=2)
+
+        assert found["truncated"] is True
+
+    @respx.mock
     def test_max_results_is_capped_at_100(self):
         respx.post(SEARCH_URL).mock(
             return_value=httpx.Response(200, json=search_response([_hit("m1")], more=True))
@@ -3096,6 +3140,18 @@ class TestASearchMessages:
         async with AsyncGraphClient("tok") as client:
             with pytest.raises(TeamsSearchUnsupportedError):
                 await teams.asearch_messages(client, "#budget2026")
+
+    @respx.mock
+    async def test_async_budget_filled_exactly_on_the_last_hit_is_not_truncated(self):
+        respx.post(SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=search_response([_hit("m1"), _hit("m2")]))
+        )
+        _mock_hydration({"m1": _msg("m1"), "m2": _msg("m2")})
+        async with AsyncGraphClient("tok") as client:
+            found = await teams.asearch_messages(client, "budget", max_results=2)
+
+        assert [m["id"] for m in found["messages"]] == ["m1", "m2"]
+        assert found["truncated"] is False
 
     @respx.mock
     async def test_async_channel_reply_hydrates_via_the_replies_route(self):

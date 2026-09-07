@@ -1663,7 +1663,7 @@ async def search_teams_messages(
     Args:
         query: Hashtags ('#budget2026'), keywords ('invoice approved'), or both.
         since: ISO date or datetime cutoff, e.g. '2026-01-01' or
-               '2026-01-01T00:00:00Z'. EMPTY MEANS ALL TIME — unlike
+               '2026-01-01T00:00:00Z' (UTC). EMPTY MEANS ALL TIME — unlike
                read_teams_messages, which defaults to the last 7 days.
         conversation_id: Restrict to one conversation. Accepts a chat id from
                list_chats or a channel id from list_teams. Empty searches

@@ -319,9 +319,11 @@ def extract_message_text(msg: dict[str, Any], max_length: int = -1) -> str:
     body = msg.get("body") or {}
     content = body.get("content", "")
 
-    # Strip HTML tags if needed
+    # Strip HTML tags if needed, then the entities the tags carried between
+    # them: '&nbsp;' and '&amp;' are markup, not what the person typed.
     if body.get("contentType") == "html" and content:
-        content = re.sub(r"<[^>]+>", "", content).strip()
+        content = re.sub(r"<[^>]+>", "", content)
+        content = html_mod.unescape(content).replace("\xa0", " ").strip()
 
     # If body is empty, try adaptive card attachments
     if not content.strip():
@@ -575,15 +577,22 @@ def _collect(
     conversation_id: str,
     since: str,
     budget: int,
-) -> bool:
-    """Fold one page's hits into `candidates`. Returns True when full.
+) -> int:
+    """Fold one page's hits into `candidates`. Returns how many hits it examined.
+
+    Stops as soon as the budget is full, so a return value below the page's
+    hit count means hits were left unread — that, or moreResultsAvailable, is
+    what makes a search "truncated"; a budget that fills exactly on the last
+    hit the index had is not.
 
     Filters BEFORE counting toward the budget, so a conversation_id scope
     keeps paging until enough scoped hits exist or the index is exhausted.
     Dedupes by message id: the index can repeat a hit across pages when it
     shifts under us.
     """
+    examined = 0
     for hit in container.get("hits") or []:
+        examined += 1
         candidate = normalize_search_hit(hit if isinstance(hit, dict) else {})
         if candidate is None or candidate["id"] in seen:
             continue
@@ -595,8 +604,8 @@ def _collect(
         seen.add(candidate["id"])
         candidates.append(candidate)
         if len(candidates) >= budget:
-            return True
-    return False
+            break
+    return examined
 
 
 # ---------------------------------------------------------------------------
@@ -829,10 +838,11 @@ def search_messages(
             _search_error(e)
         container = _search_container(data)
         hits = container.get("hits") or []
-        full = _collect(container, candidates, seen, conversation_id, since, budget)
+        examined = _collect(container, candidates, seen, conversation_id, since, budget)
         offset += len(hits)
-        if full:
-            truncated = True  # more may exist behind the budget
+        if len(candidates) >= budget:
+            # Budget full. Only "more may exist" when something was left unread.
+            truncated = examined < len(hits) or bool(container.get("moreResultsAvailable"))
             break
         if not hits or not container.get("moreResultsAvailable"):
             break
@@ -1171,10 +1181,11 @@ async def asearch_messages(
             _search_error(e)
         container = _search_container(data)
         hits = container.get("hits") or []
-        full = _collect(container, candidates, seen, conversation_id, since, budget)
+        examined = _collect(container, candidates, seen, conversation_id, since, budget)
         offset += len(hits)
-        if full:
-            truncated = True  # more may exist behind the budget
+        if len(candidates) >= budget:
+            # Budget full. Only "more may exist" when something was left unread.
+            truncated = examined < len(hits) or bool(container.get("moreResultsAvailable"))
             break
         if not hits or not container.get("moreResultsAvailable"):
             break
