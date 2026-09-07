@@ -1,9 +1,9 @@
 """Directory lookups: who is in the organisation.
 
-One endpoint, /users with $search, under User.ReadBasic.All. Everything else in
-this package reads the signed-in user's own data; this is the only place the
-server looks at other users, and it returns only the address-book properties a
-typeahead needs.
+/users with $search, plus a single-user lookup, both under
+User.ReadBasic.All. Everything else in this package reads the signed-in user's
+own data; this is the only place the server looks at other users, and it
+returns only the address-book properties a typeahead needs.
 """
 
 from urllib.parse import quote
@@ -44,6 +44,37 @@ def _raise_directory_scope_missing(e: GraphError) -> None:
     if e.status_code == 403:
         raise DirectoryScopeMissingError() from e
     raise e
+
+
+def _user_path(user: str) -> str:
+    """/users/{user} with the id or UPN quoted as ONE path segment.
+
+    Guest UPNs carry '#EXT#' and a hostile value could carry '/', so the
+    segment is quoted with only '@' left bare.
+    """
+    return f"/users/{quote(user, safe='@')}"
+
+
+def get_user(client: GraphClient, user: str) -> dict:
+    """Basic directory profile of one user (sync).
+
+    403 -> DirectoryScopeMissingError; a 404 (unknown user) propagates as
+    GraphError so a caller can tell "no such user" from "no permission".
+    """
+    try:
+        return client.get(f"{_user_path(user)}?$select={DIRECTORY_SELECT}")
+    except GraphError as e:
+        _raise_directory_scope_missing(e)
+        raise  # unreachable: _raise_directory_scope_missing always raises
+
+
+async def aget_user(client: AsyncGraphClient, user: str) -> dict:
+    """Basic directory profile of one user (async). See get_user."""
+    try:
+        return await client.get(f"{_user_path(user)}?$select={DIRECTORY_SELECT}")
+    except GraphError as e:
+        _raise_directory_scope_missing(e)
+        raise  # unreachable: _raise_directory_scope_missing always raises
 
 
 def search_users(client: GraphClient, query: str, top: int = 10) -> list[dict]:

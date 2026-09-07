@@ -19,15 +19,18 @@ from ms_graph.graph_client import GRAPH_BASE_URL
 from ms_graph.power_bi import POWERBI_BASE_URL
 
 from .conftest import (
+    GRAPH_ERROR_404,
     SAMPLE_CHAT_MESSAGE_SYSTEM,
     SAMPLE_CHAT_MESSAGE_WITH_FILE,
     SAMPLE_DRIVE_ITEM_FILE,
     SAMPLE_DRIVE_ITEM_FOLDER,
     SAMPLE_EXTERNAL_MESSAGE,
+    SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
     SAMPLE_MESSAGES_RESPONSE,
     SAMPLE_NEW_DRAFT,
     SAMPLE_READ_DETAIL,
+    SAMPLE_USER_PROFILE,
     TEAMS_FILE_ATTACHMENT_ID,
 )
 
@@ -131,6 +134,26 @@ class TestCompactPath:
         text = _get_text(result)
         assert text.startswith("error: not_connected")
         assert CONNECT_URL in text
+
+    @respx.mock
+    async def test_profile_photo_keys_render_as_flat_lines(self, mcp_server):
+        """Every photo key is a scalar, so nothing nests and has_photo shows."""
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/photo").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "metadata"})
+
+        assert result.structured_content is None
+        text = _get_text(result)
+        assert "has_photo: false" in text.splitlines()
+        assert "{" not in text
 
     async def test_str_tool_is_left_alone(self, str_specimen_server):
         """A tool that advertises an output schema must keep its structured

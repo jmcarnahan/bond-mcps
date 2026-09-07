@@ -70,6 +70,7 @@ from ms_graph import files as files_ops
 from ms_graph import folders as folder_ops
 from ms_graph import mail as mail_ops
 from ms_graph import people as people_ops
+from ms_graph import photos as photos_ops
 from ms_graph import power_bi as pbi_ops
 from ms_graph import teams as teams_ops
 from ms_graph.auth import get_graph_token, get_powerbi_token
@@ -3679,10 +3680,20 @@ def _stored_graph_scopes() -> list[str]:
         return []
 
 
+_PROFILE_SCOPE_MISSING = {
+    "error": "directory_scope_missing",
+    "reason": (
+        "Could not retrieve the profile: this connection lacks the User.ReadBasic.All permission."
+    ),
+}
+_PHOTO_MODES = ("metadata", "bytes")
+
+
 @mcp.tool(output_schema=None)
-async def get_profile() -> dict:
+async def get_profile(user: str = "", photo: str = "", photo_size: str = "") -> dict:
     """
-    Get the signed-in user's identity.
+    Get the signed-in user's identity, or another directory user's, and their
+    profile photo.
 
     Returns id, display_name, mail, user_principal_name, mailbox_address, and
     job_title. Every key is always present; mailbox_address and job_title are
@@ -3693,22 +3704,119 @@ async def get_profile() -> dict:
     IMPORTANT: when mailbox_address is set, use it as the from_address when
     sending email. That is the address the mail server is authorized to send
     from, and using it avoids "via" warnings and spam filtering. When it is
-    null, omit from_address and let the default sender apply.
+    null, omit from_address and let the default sender apply. mailbox_address
+    applies to the signed-in user only; for `user` it is null.
 
     The id is the Graph user object ID — Teams messages carry the same ID, so
     clients use it to tell their own messages apart from everyone else's.
+
+    With `photo` set, the result gains has_photo, photo_width, photo_height,
+    and photo_content_type. photo="bytes" adds content_base64, content_type,
+    size (byte count), and photo_size (the variant actually served). Those keys
+    are always present in the mode that adds them and null when the person has
+    no photo: has_photo false is a normal result, not an error. content_base64
+    is for programmatic callers that will decode and store the image; it is not
+    readable text.
+
+    Your own identity and photo need only User.Read. Looking up `user`, and
+    that user's photo, needs User.ReadBasic.All. Without it the tool returns
+    {"error": "directory_scope_missing", "reason": ...} ALONE — no profile
+    data, no photo keys — which is permanent until the connection is widened
+    (see connection_status.scopes); a tenant policy that denies even your own
+    photo surfaces the same error. Other errors: user_not_found (no such
+    directory user), invalid_arguments (Graph could not parse `user` as an id
+    or UPN), invalid_photo, invalid_photo_size (both rejected before any
+    request), too_large (the image exceeded the JSON cap), and not_connected.
+
+    Args:
+        user: Directory user id or UPN to look up; empty (default) is the
+            signed-in user, whose path makes no directory call.
+        photo: "metadata" for size and MIME only, "bytes" to also fetch the
+            image; empty (default) makes no photo request at all.
+        photo_size: Only with photo="bytes". One of Graph's fixed sizes
+            48x48, 64x64, 96x96, 120x120, 240x240, 360x360, 432x432, 504x504,
+            648x648, or "original" for the stored image; default 240x240.
     """
+    user = user.strip()
+    photo = photo.strip().lower()
+    photo_size = photo_size.strip().lower()
+    if photo and photo not in _PHOTO_MODES:
+        return {
+            "error": "invalid_photo",
+            "reason": f"photo must be one of: metadata, bytes; got {photo!r}",
+        }
+    if photo_size and photo != "bytes":
+        return {
+            "error": "invalid_photo_size",
+            "reason": "photo_size only applies to photo='bytes'",
+        }
+    try:
+        size = photos_ops.check_photo_size(photo_size)
+    except ValueError as e:
+        return {"error": "invalid_photo_size", "reason": str(e)}
+
+    meta = None
+    found = None
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
-            profile = await mail_ops.aget_profile(client)
+            if user:
+                try:
+                    profile = await people_ops.aget_user(client, user)
+                except GraphError as e:
+                    if e.status_code == 404:
+                        return {"error": "user_not_found"}
+                    if e.status_code == 400:
+                        # Graph could not parse the identifier at all: permanent,
+                        # so an error dict rather than a "retry later" tool error.
+                        return {
+                            "error": "invalid_arguments",
+                            "reason": f"user must be a directory user id or UPN; got {user!r}",
+                        }
+                    raise
+            else:
+                profile = await mail_ops.aget_profile(client)
+            if photo:
+                meta = await photos_ops.aget_photo_metadata(client, user)
+                if photo == "bytes" and meta is not None:
+                    found = await photos_ops.aget_photo_bytes(client, user, size)
+                    if found is None:
+                        # The photo vanished between the two requests; report it
+                        # as absent rather than as metadata without bytes.
+                        meta = None
     except PermissionError as e:
         return _not_connected(e)
-    return {
+    except DirectoryScopeMissingError:
+        return dict(_PROFILE_SCOPE_MISSING)
+
+    result = {
         **_profile_json(profile),
         "mailbox_address": profile.get("mailboxAddress"),
         "job_title": profile.get("jobTitle"),
     }
+    if photo:
+        result["has_photo"] = meta is not None
+        result["photo_width"] = meta.get("width") if meta else None
+        result["photo_height"] = meta.get("height") if meta else None
+        result["photo_content_type"] = meta.get("@odata.mediaContentType") if meta else None
+    if photo == "bytes":
+        if found is None:
+            result.update(content_base64=None, content_type=None, size=None, photo_size=None)
+        else:
+            data, header_type = found
+            if len(data) > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+                return {
+                    "error": "too_large",
+                    "size": len(data),
+                    "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+                }
+            result["content_base64"] = base64.b64encode(data).decode("ascii")
+            result["content_type"] = _mime_from_header(
+                header_type, result["photo_content_type"] or "image/jpeg"
+            )
+            result["size"] = len(data)
+            result["photo_size"] = size
+    return result
 
 
 @mcp.tool(output_schema=None)
