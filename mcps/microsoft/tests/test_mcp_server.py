@@ -1235,146 +1235,71 @@ class TestMCPEmailTools:
         assert _structured(result)["attachments"] == ""
 
 
-class TestMCPGetEmailAttachment:
-    """get_email_attachment — the markdown attachment reader."""
+class TestMCPGetMailAttachment:
+    """get_mail_attachment — the modes and parameters, as canonical dicts."""
 
     @respx.mock
-    async def test_text_mode_extracts_a_word_document(self, mcp_server):
-        docx = _docx_bytes()
-        meta = {
-            **SAMPLE_FILE_ATTACHMENT,
-            "name": "report.docx",
-            "contentType": DOCX_MIME,
-            "size": len(docx),
-        }
-        respx.get(f"{ATT_FILE_URL}/$value").mock(
-            return_value=httpx.Response(200, content=docx, headers={"Content-Type": DOCX_MIME})
-        )
-        respx.get(ATT_FILE_URL).mock(return_value=httpx.Response(200, json=meta))
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
-            )
-
-        text = _get_text(result)
-        assert "**Name:** report.docx" in text
-        assert f"**ID:** `{SAMPLE_FILE_ATTACHMENT['id']}`" in text
-        assert "Quarterly Title" in text
-        assert "Body text here." in text
-
-    @respx.mock
-    async def test_text_mode_decodes_a_plain_text_attachment(self, mcp_server):
-        meta = {
-            **SAMPLE_FILE_ATTACHMENT,
-            "name": "notes.txt",
-            "contentType": "text/plain",
-            "size": 11,
-        }
-        respx.get(f"{ATT_FILE_URL}/$value").mock(
-            return_value=httpx.Response(
-                200, content=b"hello there", headers={"Content-Type": "text/plain"}
-            )
-        )
-        respx.get(ATT_FILE_URL).mock(return_value=httpx.Response(200, json=meta))
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
-            )
-
-        text = _get_text(result)
-        assert "**Type:** text/plain (11 B)" in text
-        assert text.endswith("---\nhello there")
-
-    @respx.mock
-    async def test_text_mode_on_a_binary_says_so(self, mcp_server):
-        respx.get(f"{ATT_FILE_URL}/$value").mock(
-            return_value=httpx.Response(
-                200, content=b"\x89PNG\r\n\x1a\n", headers={"Content-Type": "image/png"}
-            )
-        )
-        respx.get(ATT_FILE_URL).mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    **SAMPLE_FILE_ATTACHMENT,
-                    "name": "logo.png",
-                    "contentType": "image/png",
-                    "size": 8,
-                },
-            )
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
-            )
-
-        text = _get_text(result)
-        assert "binary file and cannot be displayed as text" in text
-        assert 'Use mode "onedrive" to save it, or "base64" if it is under 1 MB.' in text
-
-    @respx.mock
-    async def test_base64_mode_returns_the_bytes(self, mcp_server):
-        payload = b"\x89PNG\r\n\x1a\n"
-        respx.get(f"{ATT_FILE_URL}/$value").mock(
-            return_value=httpx.Response(200, content=payload, headers={"Content-Type": "image/png"})
-        )
-        respx.get(ATT_FILE_URL).mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    **SAMPLE_FILE_ATTACHMENT,
-                    "name": "logo.png",
-                    "contentType": "image/png",
-                    "size": len(payload),
-                },
-            )
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {
-                    "message_id": ATT_MSG_ID,
-                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
-                    "mode": "base64",
-                },
-            )
-
-        text = _get_text(result)
-        assert f"**Base64 ({len(payload)} bytes):**" in text
-        assert base64.b64encode(payload).decode("ascii") in text
-
-    @respx.mock
-    async def test_base64_refuses_oversize_without_downloading(self, mcp_server):
-        """The metadata size decides, so the bytes never cross the wire."""
+    async def test_metadata_mode_fetches_no_content(self, mcp_server):
         value_route = respx.get(f"{ATT_FILE_URL}/$value").mock(
             return_value=httpx.Response(200, content=b"x")
         )
+        respx.get(ATT_FILE_URL).mock(return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                    "mode": "metadata",
+                },
+            )
+
+        assert _structured(result) == {
+            "id": SAMPLE_FILE_ATTACHMENT["id"],
+            "name": "report.pdf",
+            "content_type": "application/pdf",
+            "size": 1_258_291,
+            "is_inline": False,
+            "content_id": None,
+            "kind": "file",
+            "source_url": None,
+        }
+        assert not value_route.called
+
+    @respx.mock
+    async def test_text_is_the_default_mode(self, mcp_server):
+        docx = _docx_bytes()
+        respx.get(f"{ATT_FILE_URL}/$value").mock(
+            return_value=httpx.Response(200, content=docx, headers={"Content-Type": DOCX_MIME})
+        )
         respx.get(ATT_FILE_URL).mock(
-            return_value=httpx.Response(200, json={**SAMPLE_FILE_ATTACHMENT, "size": 2_000_000})
+            return_value=httpx.Response(
+                200,
+                json={
+                    **SAMPLE_FILE_ATTACHMENT,
+                    "name": "report.docx",
+                    "contentType": DOCX_MIME,
+                    "size": len(docx),
+                },
+            )
         )
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
-                {
-                    "message_id": ATT_MSG_ID,
-                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
-                    "mode": "base64",
-                },
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
             )
 
-        assert "Too large to return as base64 (limit 976.6 KB)." in _get_text(result)
-        assert not value_route.called
+        data = _structured(result)
+        assert "Quarterly Title" in data["text"]
+        assert data["truncated"] is False
+        assert "reason" not in data
+        assert data["name"] == "report.docx"
+        assert data["kind"] == "file"
 
     @respx.mock
-    async def test_text_mode_refuses_oversize_without_downloading(self, mcp_server):
+    async def test_text_mode_refuses_an_oversized_file_without_downloading(self, mcp_server):
         value_route = respx.get(f"{ATT_FILE_URL}/$value").mock(
             return_value=httpx.Response(200, content=b"x")
         )
@@ -1384,12 +1309,53 @@ class TestMCPGetEmailAttachment:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
             )
 
-        assert "too large for text extraction (limit: 50 MB)" in _get_text(result)
+        data = _structured(result)
+        assert data["text"] is None
+        assert data["reason"] == "too_large"
+        assert data["truncated"] is False
         assert not value_route.called
+
+    @respx.mock
+    async def test_text_mode_on_an_html_item_falls_back_to_the_preview(self, mcp_server):
+        inner = {
+            "subject": "Budget draft",
+            "bodyPreview": "Numbers attached",
+            "body": {"contentType": "html", "content": "<p>Numbers attached</p>"},
+        }
+
+        def _respond(request):
+            # Graph query strings arrive percent-encoded: "$" is "%24".
+            if "expand" in str(request.url):
+                return httpx.Response(200, json={**SAMPLE_ITEM_ATTACHMENT, "item": inner})
+            return httpx.Response(200, json=SAMPLE_ITEM_ATTACHMENT)
+
+        respx.get(url__startswith=ATT_ITEM_URL).mock(side_effect=_respond)
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"]},
+            )
+
+        assert _structured(result) == {
+            "id": SAMPLE_ITEM_ATTACHMENT["id"],
+            "name": "FW: Budget",
+            "content_type": "",
+            "size": 32_768,
+            "is_inline": False,
+            "content_id": None,
+            "kind": "item",
+            "source_url": None,
+            "item_subject": "Budget draft",
+            "item_from": None,
+            "item_received": None,
+            "text": "Numbers attached",
+            "truncated": True,
+        }
 
     @respx.mock
     async def test_onedrive_mode_uploads_and_returns_the_link(self, mcp_server):
@@ -1407,7 +1373,7 @@ class TestMCPGetEmailAttachment:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -1415,11 +1381,51 @@ class TestMCPGetEmailAttachment:
                 },
             )
 
-        assert upload.called
         assert upload.calls[0].request.content == b"%PDF-1.7"
-        text = _get_text(result)
-        assert f"**Saved to OneDrive:** {SAMPLE_UPLOADED_FILE['webUrl']}" in text
-        assert f"**Item ID:** `{SAMPLE_UPLOADED_FILE['id']}`" in text
+        assert _structured(result) == {
+            "id": SAMPLE_FILE_ATTACHMENT["id"],
+            "name": "report.pdf",
+            "content_type": "application/pdf",
+            "size": 8,
+            "is_inline": False,
+            "content_id": None,
+            "kind": "file",
+            "source_url": None,
+            "item_id": SAMPLE_UPLOADED_FILE["id"],
+            "web_url": SAMPLE_UPLOADED_FILE["webUrl"],
+        }
+        assert [method for method, _ in _graph_trail()] == ["GET", "GET", "PUT"]
+
+    @respx.mock
+    async def test_onedrive_mode_saves_an_attached_message_as_eml(self, mcp_server):
+        respx.get(f"{ATT_ITEM_URL}/$value").mock(
+            return_value=httpx.Response(200, content=b"From: dana@example.com")
+        )
+        respx.get(ATT_ITEM_URL).mock(
+            return_value=httpx.Response(
+                200, json={**SAMPLE_ITEM_ATTACHMENT, "name": "Budget", "size": 22}
+            )
+        )
+        upload = respx.put(f"{GRAPH_BASE_URL}/me/drive/root:/Attachments/Budget.eml:/content").mock(
+            return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"],
+                    "mode": "onedrive",
+                },
+            )
+
+        assert upload.called
+        data = _structured(result)
+        assert data["name"] == "Budget.eml"
+        assert data["content_type"] == "message/rfc822"
+        assert data["item_id"] == SAMPLE_UPLOADED_FILE["id"]
+        assert data["web_url"] == SAMPLE_UPLOADED_FILE["webUrl"]
 
     @respx.mock
     async def test_onedrive_mode_honors_folder_path_option(self, mcp_server):
@@ -1435,7 +1441,7 @@ class TestMCPGetEmailAttachment:
         with _mock_token():
             await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -1447,117 +1453,14 @@ class TestMCPGetEmailAttachment:
         assert upload.called
 
     @respx.mock
-    async def test_item_attachment_renders_the_inner_message(self, mcp_server):
-        inner = {
-            "subject": "Budget draft",
-            "from": {"emailAddress": {"name": "Dana Lee", "address": "dana@example.com"}},
-            "receivedDateTime": "2025-12-01T09:00:00Z",
-            "bodyPreview": "Numbers attached",
-            "body": {"contentType": "text", "content": "Numbers attached, see inside."},
-        }
-
-        def _respond(request):
-            # Graph query strings arrive percent-encoded: "$" is "%24".
-            if "expand" in str(request.url):
-                return httpx.Response(200, json={**SAMPLE_ITEM_ATTACHMENT, "item": inner})
-            return httpx.Response(200, json=SAMPLE_ITEM_ATTACHMENT)
-
-        respx.get(url__startswith=ATT_ITEM_URL).mock(side_effect=_respond)
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"]},
-            )
-
-        text = _get_text(result)
-        assert "**Attached message**" in text
-        assert "**Subject:** Budget draft" in text
-        assert "**From:** Dana Lee <dana@example.com>" in text
-        assert "**Date:** 2025-12-01T09:00:00Z" in text
-        assert "Numbers attached, see inside." in text
-
-    @respx.mock
-    async def test_item_attachment_html_body_falls_back_to_the_preview(self, mcp_server):
-        inner = {
-            "subject": "Budget draft",
-            "bodyPreview": "Numbers attached",
-            "body": {"contentType": "html", "content": "<p>Numbers attached</p>"},
-        }
-
-        def _respond(request):
-            # Graph query strings arrive percent-encoded: "$" is "%24".
-            if "expand" in str(request.url):
-                return httpx.Response(200, json={**SAMPLE_ITEM_ATTACHMENT, "item": inner})
-            return httpx.Response(200, json=SAMPLE_ITEM_ATTACHMENT)
-
-        respx.get(url__startswith=ATT_ITEM_URL).mock(side_effect=_respond)
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"]},
-            )
-
-        text = _get_text(result)
-        assert "Numbers attached" in text
-        assert "[HTML body, 23 chars — preview only]" in text
-
-    @respx.mock
-    async def test_item_attachment_downloads_as_eml_in_base64_mode(self, mcp_server):
-        respx.get(f"{ATT_ITEM_URL}/$value").mock(
-            return_value=httpx.Response(200, content=b"From: dana@example.com")
-        )
-        respx.get(ATT_ITEM_URL).mock(
-            return_value=httpx.Response(200, json={**SAMPLE_ITEM_ATTACHMENT, "size": 22})
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {
-                    "message_id": ATT_MSG_ID,
-                    "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"],
-                    "mode": "base64",
-                },
-            )
-
-        text = _get_text(result)
-        assert "**Base64 (22 bytes):**" in text
-        assert base64.b64encode(b"From: dana@example.com").decode("ascii") in text
-
-    @respx.mock
-    async def test_item_attachment_base64_refuses_oversize_without_downloading(self, mcp_server):
-        """The base64 ceiling applies to attached messages too — before any download."""
-        value_route = respx.get(f"{ATT_ITEM_URL}/$value").mock(
-            return_value=httpx.Response(200, content=b"x")
-        )
-        respx.get(ATT_ITEM_URL).mock(
-            return_value=httpx.Response(200, json={**SAMPLE_ITEM_ATTACHMENT, "size": 2_000_000})
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {
-                    "message_id": ATT_MSG_ID,
-                    "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"],
-                    "mode": "base64",
-                },
-            )
-
-        assert "Too large to return as base64" in _get_text(result)
-        assert not value_route.called
-
-    @respx.mock
-    async def test_reference_attachment_returns_its_link_in_every_mode(self, mcp_server):
+    async def test_a_link_attachment_has_no_bytes_to_save(self, mcp_server):
         respx.get(ATT_REF_URL).mock(
             return_value=httpx.Response(200, json=SAMPLE_REFERENCE_ATTACHMENT)
         )
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_REFERENCE_ATTACHMENT["id"],
@@ -1565,22 +1468,41 @@ class TestMCPGetEmailAttachment:
                 },
             )
 
-        text = _get_text(result)
-        assert f"**Link:** {SAMPLE_REFERENCE_ATTACHMENT['sourceUrl']}" in text
-        assert "This is a link attachment" in text
+        assert _structured(result) == {
+            "error": "reference",
+            "source_url": SAMPLE_REFERENCE_ATTACHMENT["sourceUrl"],
+        }
 
-    async def test_bad_mode_is_rejected_before_any_request(self, mcp_server):
+    @respx.mock
+    async def test_base64_is_not_a_mode_at_this_name(self, mcp_server):
+        """The synonym lives on the get_email_attachment alias, not here."""
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
-                {"message_id": ATT_MSG_ID, "attachment_id": "a", "mode": "pdf"},
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": "a", "mode": "base64"},
             )
 
-        assert _get_text(result) == "mode must be one of: text, base64, onedrive; got 'pdf'"
+        assert _structured(result) == {
+            "error": "invalid_mode",
+            "reason": "mode must be one of: metadata, text, bytes, onedrive; got 'base64'",
+        }
+        assert _graph_trail() == []
 
     @respx.mock
-    async def test_shared_mailbox_uses_the_users_path(self, mcp_server):
+    async def test_bad_options_json_is_refused_before_any_request(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": "a", "options": "not json"},
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_shared_mailbox_reads_the_users_path(self, mcp_server):
         base = (
             f"{GRAPH_BASE_URL}/users/support@example.com/messages/"
             f"{quote(ATT_MSG_ID, safe='')}/attachments/"
@@ -1591,7 +1513,7 @@ class TestMCPGetEmailAttachment:
                 200, content=b"hello", headers={"Content-Type": "text/plain"}
             )
         )
-        meta_route = respx.get(base).mock(
+        respx.get(base).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -1605,7 +1527,7 @@ class TestMCPGetEmailAttachment:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -1613,8 +1535,40 @@ class TestMCPGetEmailAttachment:
                 },
             )
 
-        assert meta_route.called
-        assert _get_text(result).endswith("---\nhello")
+        assert _structured(result)["text"] == "hello"
+        assert all(
+            path.startswith("/v1.0/users/support@example.com/messages/")
+            for _, path in _graph_trail()
+        )
+
+    @respx.mock
+    async def test_an_external_sender_hides_the_attachment(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        meta_route = respx.get(ATT_FILE_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
+        )
+        respx.get(SENDER_CHECK_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
+            )
+
+        assert _structured(result) == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+        assert not meta_route.called
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server,
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": "a"},
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 # ---------------------------------------------------------------------------
@@ -3397,7 +3351,29 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        assert _get_text(result) == "mode must be one of: text, base64, onedrive; got 'pdf'"
+        assert _structured(result) == {
+            "error": "invalid_mode",
+            "reason": (
+                "mode must be one of: metadata, text, bytes, onedrive, thumbnail; got 'pdf'"
+            ),
+        }
+
+    @respx.mock
+    async def test_bad_options_json_is_refused_before_any_request(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_teams_attachment",
+                {
+                    "message_id": "chat-msg-file-001",
+                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "chat_id": TEAMS_CHAT_ID,
+                    "options": "not json",
+                },
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
+        assert _graph_trail() == []
 
     async def test_missing_ids(self, mcp_server):
         with _mock_token():
@@ -3407,7 +3383,10 @@ class TestMCPGetTeamsAttachment:
                 {"message_id": "m1", "attachment_id": "a1"},
             )
 
-        assert _get_text(result) == "Provide either chat_id, or both team_id and channel_id."
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "Provide either chat_id, or both team_id and channel_id.",
+        }
 
     @respx.mock
     async def test_unknown_id_lists_what_the_message_has(self, mcp_server):
@@ -3425,23 +3404,97 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        text = _get_text(result)
-        assert "No attachment with id `nope`" in text
-        assert f"Available: file: {TEAMS_FILE_ATTACHMENT_ID}" in text
+        assert _structured(result) == {
+            "error": "not_found",
+            "available": [{"kind": "file", "id": TEAMS_FILE_ATTACHMENT_ID, "name": "roadmap.pptx"}],
+        }
+
+    @respx.mock
+    async def test_metadata_mode_returns_the_entry(self, mcp_server):
+        respx.get(TEAMS_FILE_MSG_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
+        )
+        share = respx.get(url__startswith=f"{GRAPH_BASE_URL}/shares/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_TEAMS_DRIVE_ITEM)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_teams_attachment",
+                {
+                    "message_id": "chat-msg-file-001",
+                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "chat_id": TEAMS_CHAT_ID,
+                    "mode": "metadata",
+                },
+            )
+
+        assert _structured(result) == {
+            "id": TEAMS_FILE_ATTACHMENT_ID,
+            "kind": "file",
+            "name": "roadmap.pptx",
+            "content_type": "reference",
+            "content_url": TEAMS_FILE_URL,
+            "thumbnail_url": None,
+            "card_text": None,
+        }
+        assert not share.called
+
+    @respx.mock
+    async def test_metadata_mode_describes_a_quoted_reference(self, mcp_server):
+        """The kinds with no bytes are only reachable through metadata mode."""
+        respx.get(TEAMS_JUNK_MSG_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_teams_attachment",
+                {
+                    "message_id": "chat-msg-junk-001",
+                    "attachment_id": "ref-001",
+                    "chat_id": TEAMS_CHAT_ID,
+                    "mode": "metadata",
+                },
+            )
+
+        assert _structured(result)["kind"] == "message_reference"
+
+    @respx.mock
+    async def test_a_quoted_reference_has_nothing_to_read(self, mcp_server):
+        respx.get(TEAMS_JUNK_MSG_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_teams_attachment",
+                {
+                    "message_id": "chat-msg-junk-001",
+                    "attachment_id": "ref-001",
+                    "chat_id": TEAMS_CHAT_ID,
+                },
+            )
+
+        data = _structured(result)
+        assert data["error"] == "not_found"
+        assert {"kind": "file", "id": TEAMS_FILE_ATTACHMENT_ID, "name": "roadmap.pptx"} in (
+            data["available"]
+        )
 
     @respx.mock
     async def test_file_text_mode_extracts_the_document(self, mcp_server):
+        docx = _docx_bytes()
         docx_item = {
             **SAMPLE_TEAMS_DRIVE_ITEM,
             "name": "notes.docx",
             "file": {"mimeType": DOCX_MIME},
+            "size": len(docx),
         }
         respx.get(TEAMS_FILE_MSG_URL).mock(
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
         )
-        respx.get(TEAMS_SHARE_CONTENT_URL).mock(
-            return_value=httpx.Response(200, content=_docx_bytes())
-        )
+        respx.get(TEAMS_SHARE_CONTENT_URL).mock(return_value=httpx.Response(200, content=docx))
         respx.get(TEAMS_SHARE_BASE).mock(return_value=httpx.Response(200, json=docx_item))
         with _mock_token():
             result = await _call(
@@ -3454,12 +3507,52 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        text = _get_text(result)
-        assert "Quarterly Title" in text
-        assert "**Name:** roadmap.pptx" in text
+        data = _structured(result)
+        assert "Quarterly Title" in data.pop("text")
+        assert data == {
+            "kind": "file",
+            "name": "roadmap.pptx",
+            "content_type": DOCX_MIME,
+            "size": len(docx),
+            "truncated": False,
+        }
 
     @respx.mock
-    async def test_file_base64_mode(self, mcp_server):
+    async def test_text_mode_refuses_an_oversized_file_before_downloading(self, mcp_server):
+        respx.get(TEAMS_FILE_MSG_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
+        )
+        content = respx.get(TEAMS_SHARE_CONTENT_URL).mock(
+            return_value=httpx.Response(200, content=b"never")
+        )
+        respx.get(TEAMS_SHARE_BASE).mock(
+            return_value=httpx.Response(200, json={**SAMPLE_TEAMS_DRIVE_ITEM, "size": 60_000_000})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_teams_attachment",
+                {
+                    "message_id": "chat-msg-file-001",
+                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "chat_id": TEAMS_CHAT_ID,
+                },
+            )
+
+        assert _structured(result) == {
+            "kind": "file",
+            "name": "roadmap.pptx",
+            "content_type": TEAMS_PPTX_MIME,
+            "size": 60_000_000,
+            "text": None,
+            "truncated": False,
+            "reason": "too_large",
+        }
+        assert not content.called
+
+    @respx.mock
+    async def test_base64_still_means_bytes(self, mcp_server):
+        """The str ancestor's word for raw bytes survives as a silent synonym."""
         respx.get(TEAMS_FILE_MSG_URL).mock(
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
         )
@@ -3481,9 +3574,13 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        text = _get_text(result)
-        assert "**Base64 (" in text
-        assert base64.b64encode(b"PPTXBYTES").decode() in text
+        assert _structured(result) == {
+            "kind": "file",
+            "name": "roadmap.pptx",
+            "content_type": TEAMS_PPTX_MIME,
+            "size": len(b"PPTXBYTES"),
+            "content_base64": base64.b64encode(b"PPTXBYTES").decode("ascii"),
+        }
 
     @respx.mock
     async def test_file_onedrive_mode_saves_a_copy(self, mcp_server):
@@ -3512,58 +3609,14 @@ class TestMCPGetTeamsAttachment:
             )
 
         assert upload.called
-        assert "**Saved to OneDrive:**" in _get_text(result)
-
-    @respx.mock
-    async def test_text_mode_refuses_an_oversized_file_before_downloading(self, mcp_server):
-        respx.get(TEAMS_FILE_MSG_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
-        )
-        content = respx.get(TEAMS_SHARE_CONTENT_URL).mock(
-            return_value=httpx.Response(200, content=b"never")
-        )
-        respx.get(TEAMS_SHARE_BASE).mock(
-            return_value=httpx.Response(200, json={**SAMPLE_TEAMS_DRIVE_ITEM, "size": 60_000_000})
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_teams_attachment",
-                {
-                    "message_id": "chat-msg-file-001",
-                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
-                    "chat_id": TEAMS_CHAT_ID,
-                },
-            )
-
-        assert "too large for text extraction (limit: 50 MB)" in _get_text(result)
-        assert not content.called
-
-    @respx.mock
-    async def test_base64_mode_refuses_an_oversized_file_before_downloading(self, mcp_server):
-        respx.get(TEAMS_FILE_MSG_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
-        )
-        content = respx.get(TEAMS_SHARE_CONTENT_URL).mock(
-            return_value=httpx.Response(200, content=b"never")
-        )
-        respx.get(TEAMS_SHARE_BASE).mock(
-            return_value=httpx.Response(200, json={**SAMPLE_TEAMS_DRIVE_ITEM, "size": 2_000_000})
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_teams_attachment",
-                {
-                    "message_id": "chat-msg-file-001",
-                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
-                    "chat_id": TEAMS_CHAT_ID,
-                    "mode": "base64",
-                },
-            )
-
-        assert "Too large to return as base64" in _get_text(result)
-        assert not content.called
+        assert _structured(result) == {
+            "kind": "file",
+            "name": "roadmap.pptx",
+            "content_type": TEAMS_PPTX_MIME,
+            "size": len(b"PPTXBYTES"),
+            "item_id": SAMPLE_UPLOADED_FILE["id"],
+            "web_url": SAMPLE_UPLOADED_FILE["webUrl"],
+        }
 
     @respx.mock
     async def test_403_on_the_sharing_link_is_access_denied(self, mcp_server):
@@ -3582,26 +3635,28 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        assert "**Access denied:**" in _get_text(result)
+        assert _structured(result) == {"error": "access_denied"}
 
     @respx.mock
-    async def test_404_on_the_sharing_link_is_item_not_found(self, mcp_server):
+    async def test_404_on_the_sharing_link_propagates_as_a_tool_error(self, mcp_server):
+        """Only the 403 is permanent; everything else stays retryable."""
+        from fastmcp.exceptions import ToolError
+
         respx.get(TEAMS_FILE_MSG_URL).mock(
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
         )
         respx.get(TEAMS_SHARE_BASE).mock(return_value=httpx.Response(404, json=GRAPH_ERROR_404))
         with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_teams_attachment",
-                {
-                    "message_id": "chat-msg-file-001",
-                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
-                    "chat_id": TEAMS_CHAT_ID,
-                },
-            )
-
-        assert "**Item not found**" in _get_text(result)
+            with pytest.raises(ToolError, match="404"):
+                await _call(
+                    mcp_server,
+                    "get_teams_attachment",
+                    {
+                        "message_id": "chat-msg-file-001",
+                        "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                        "chat_id": TEAMS_CHAT_ID,
+                    },
+                )
 
     @respx.mock
     async def test_a_shared_folder_is_refused(self, mcp_server):
@@ -3622,34 +3677,31 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        assert "is a folder, not a file" in _get_text(result)
+        assert _structured(result) == {"error": "is_folder"}
 
     @respx.mock
-    async def test_inline_image_base64_names_itself_from_the_id(self, mcp_server):
-        respx.get(TEAMS_IMAGE_MSG_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_IMAGE)
-        )
-        respx.get(TEAMS_HOSTED_VALUE_URL).mock(
-            return_value=httpx.Response(
-                200, content=PNG_BYTES, headers={"Content-Type": "image/png"}
-            )
+    async def test_file_without_a_content_url_is_not_found(self, mcp_server):
+        msg = {
+            **SAMPLE_CHAT_MESSAGE_WITH_FILE,
+            "attachments": [{"id": TEAMS_FILE_ATTACHMENT_ID, "contentType": "reference"}],
+        }
+        respx.get(TEAMS_FILE_MSG_URL).mock(return_value=httpx.Response(200, json=msg))
+        share = respx.get(url__startswith=f"{GRAPH_BASE_URL}/shares/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_TEAMS_DRIVE_ITEM)
         )
         with _mock_token():
             result = await _call(
                 mcp_server,
                 "get_teams_attachment",
                 {
-                    "message_id": "chat-msg-image-001",
-                    "attachment_id": TEAMS_HOSTED_ID,
+                    "message_id": "chat-msg-file-001",
+                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
                     "chat_id": TEAMS_CHAT_ID,
-                    "mode": "base64",
                 },
             )
 
-        text = _get_text(result)
-        assert "**Name:** image-aWQ9eF8wLWN1.png" in text
-        assert "image/png" in text
-        assert base64.b64encode(PNG_BYTES).decode() in text
+        assert _structured(result) == {"error": "not_found"}
+        assert not share.called
 
     @respx.mock
     async def test_inline_image_text_mode_reports_a_binary(self, mcp_server):
@@ -3672,10 +3724,18 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        assert "binary file" in _get_text(result)
+        assert _structured(result) == {
+            "kind": "image",
+            "name": "image-aWQ9eF8wLWN1.png",
+            "content_type": "image/png",
+            "size": len(PNG_BYTES),
+            "text": None,
+            "truncated": False,
+            "reason": "binary",
+        }
 
     @respx.mock
-    async def test_card_renders_its_text_without_downloading(self, mcp_server):
+    async def test_card_text_mode_returns_the_card_text(self, mcp_server):
         respx.get(TEAMS_CARD_MSG_URL).mock(
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_CARD)
         )
@@ -3690,69 +3750,34 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        assert "Deploy finished" in _get_text(result)
-
-    @respx.mock
-    async def test_quoted_message_reference_has_nothing_to_download(self, mcp_server):
-        respx.get(TEAMS_JUNK_MSG_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_teams_attachment",
-                {
-                    "message_id": "chat-msg-junk-001",
-                    "attachment_id": "ref-001",
-                    "chat_id": TEAMS_CHAT_ID,
-                },
-            )
-
-        assert "quoted message reference" in _get_text(result)
-
-    @respx.mock
-    async def test_unknown_kind_cannot_be_fetched(self, mcp_server):
-        respx.get(TEAMS_JUNK_MSG_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_JUNK_ATTACHMENTS)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_teams_attachment",
-                {
-                    "message_id": "chat-msg-junk-001",
-                    "attachment_id": "img-att",
-                    "chat_id": TEAMS_CHAT_ID,
-                },
-            )
-
-        text = _get_text(result)
-        assert "Attachment of type image/png cannot be fetched" in text
-        assert "URL: https://x/y.png" in text
-
-    @respx.mock
-    async def test_file_without_a_content_url_is_explained(self, mcp_server):
-        msg = {
-            **SAMPLE_CHAT_MESSAGE_WITH_FILE,
-            "attachments": [{"id": TEAMS_FILE_ATTACHMENT_ID, "contentType": "reference"}],
+        assert _structured(result) == {
+            "kind": "card",
+            "content_type": "application/vnd.microsoft.card.adaptive",
+            "text": "Deploy finished",
+            "truncated": False,
         }
-        respx.get(TEAMS_FILE_MSG_URL).mock(return_value=httpx.Response(200, json=msg))
-        share = respx.get(url__startswith=f"{GRAPH_BASE_URL}/shares/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_TEAMS_DRIVE_ITEM)
+
+    @respx.mock
+    async def test_a_card_has_no_bytes(self, mcp_server):
+        respx.get(TEAMS_CARD_MSG_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_CARD)
         )
         with _mock_token():
             result = await _call(
                 mcp_server,
                 "get_teams_attachment",
                 {
-                    "message_id": "chat-msg-file-001",
-                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "message_id": "chat-msg-card-001",
+                    "attachment_id": "card-att-001",
                     "chat_id": TEAMS_CHAT_ID,
+                    "mode": "bytes",
                 },
             )
 
-        assert "no content URL" in _get_text(result)
-        assert not share.called
+        assert _structured(result) == {
+            "error": "not_found",
+            "available": [{"kind": "card", "id": "card-att-001", "name": None}],
+        }
 
     @respx.mock
     async def test_403_on_the_message_reports_teams_unavailable(self, mcp_server):
@@ -3768,7 +3793,21 @@ class TestMCPGetTeamsAttachment:
                 },
             )
 
-        assert _get_text(result) == "Microsoft Teams is not available for this account."
+        assert _structured(result) == {"error": "teams_unavailable"}
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server,
+                "get_teams_attachment",
+                {
+                    "message_id": "chat-msg-file-001",
+                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "chat_id": TEAMS_CHAT_ID,
+                },
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_channel_form_reads_the_channel_message(self, mcp_server):
@@ -3788,7 +3827,8 @@ class TestMCPGetTeamsAttachment:
             )
 
         assert route.called
-        assert "Deploy finished" in _get_text(result)
+        assert _graph_trail() == [("GET", "/v1.0/teams/t1/channels/c1/messages/chat-msg-card-001")]
+        assert _structured(result)["text"] == "Deploy finished"
 
     @respx.mock
     async def test_chat_id_wins_over_a_team_and_channel(self, mcp_server):
@@ -5563,8 +5603,8 @@ class TestMCPGetMailDetail:
         assert _structured(result)["error"] == "not_connected"
 
 
-class TestMCPGetMailAttachmentJson:
-    """get_mail_attachment_json — the desktop attachment reader."""
+class TestMCPGetMailAttachmentJsonContract:
+    """get_mail_attachment — the dict contract get_mail_attachment_json froze."""
 
     @respx.mock
     async def test_metadata_mode_returns_the_summary_only(self, mcp_server):
@@ -5575,7 +5615,7 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -5612,7 +5652,7 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"],
@@ -5647,7 +5687,7 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -5680,7 +5720,7 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -5713,7 +5753,7 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -5734,7 +5774,7 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_REFERENCE_ATTACHMENT["id"],
@@ -5766,7 +5806,7 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"],
@@ -5799,8 +5839,12 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
+                "get_mail_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                    "mode": "bytes",
+                },
             )
 
         data = _structured(result)
@@ -5819,8 +5863,12 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
+                "get_mail_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                    "mode": "bytes",
+                },
             )
 
         assert _structured(result) == {
@@ -5838,8 +5886,12 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_REFERENCE_ATTACHMENT["id"]},
+                "get_mail_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_REFERENCE_ATTACHMENT["id"],
+                    "mode": "bytes",
+                },
             )
 
         assert _structured(result) == {
@@ -5859,8 +5911,12 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"]},
+                "get_mail_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_ITEM_ATTACHMENT["id"],
+                    "mode": "bytes",
+                },
             )
 
         data = _structured(result)
@@ -5871,18 +5927,21 @@ class TestMCPGetMailAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
-                {"message_id": ATT_MSG_ID, "attachment_id": "a", "mode": "onedrive"},
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": "a", "mode": "pdf"},
             )
 
-        assert _structured(result) == {"error": "invalid_mode"}
+        assert _structured(result) == {
+            "error": "invalid_mode",
+            "reason": "mode must be one of: metadata, text, bytes, onedrive; got 'pdf'",
+        }
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
-                {"message_id": ATT_MSG_ID, "attachment_id": "a"},
+                "get_mail_attachment",
+                {"message_id": ATT_MSG_ID, "attachment_id": "a", "mode": "bytes"},
             )
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
@@ -5896,8 +5955,12 @@ class TestMCPGetMailAttachmentJson:
             with pytest.raises(ToolError, match="404"):
                 await _call(
                     mcp_server,
-                    "get_mail_attachment_json",
-                    {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
+                    "get_mail_attachment",
+                    {
+                        "message_id": ATT_MSG_ID,
+                        "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                        "mode": "bytes",
+                    },
                 )
 
 
@@ -7183,8 +7246,8 @@ class TestMCPChatMessagePageAttachments:
         assert junk_msg["attachments"][-1]["name"] == "roadmap.pptx"
 
 
-class TestMCPGetChatAttachmentJson:
-    """get_chat_attachment_json: bytes, thumbnails, and the permanent errors."""
+class TestMCPGetTeamsAttachmentJsonContract:
+    """get_teams_attachment: the bytes and thumbnail contract its json ancestor froze."""
 
     @respx.mock
     async def test_file_bytes(self, mcp_server):
@@ -7200,11 +7263,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7229,11 +7293,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-image-001",
                     "attachment_id": TEAMS_HOSTED_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7261,12 +7326,13 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
-                    "thumbnail": "medium",
+                    "mode": "thumbnail",
+                    "options": json.dumps({"thumbnail": "medium"}),
                 },
             )
 
@@ -7290,12 +7356,13 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
-                    "thumbnail": "medium",
+                    "mode": "thumbnail",
+                    "options": json.dumps({"thumbnail": "medium"}),
                 },
             )
 
@@ -7309,16 +7376,20 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
-                    "thumbnail": "enormous",
+                    "mode": "thumbnail",
+                    "options": json.dumps({"thumbnail": "enormous"}),
                 },
             )
 
-        assert _structured(result) == {"error": "invalid_thumbnail"}
+        assert _structured(result) == {
+            "error": "invalid_thumbnail",
+            "reason": "thumbnail must be one of: small, medium, large; got 'enormous'",
+        }
         assert not route.called
 
     @respx.mock
@@ -7329,15 +7400,19 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": "nope",
+                    "mode": "bytes",
                 },
             )
 
-        assert _structured(result) == {"error": "not_found"}
+        assert _structured(result) == {
+            "error": "not_found",
+            "available": [{"kind": "file", "id": TEAMS_FILE_ATTACHMENT_ID, "name": "roadmap.pptx"}],
+        }
 
     @respx.mock
     async def test_a_card_is_not_found_because_it_has_no_bytes(self, mcp_server):
@@ -7347,15 +7422,19 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-card-001",
                     "attachment_id": "card-att-001",
+                    "mode": "bytes",
                 },
             )
 
-        assert _structured(result) == {"error": "not_found"}
+        assert _structured(result) == {
+            "error": "not_found",
+            "available": [{"kind": "card", "id": "card-att-001", "name": None}],
+        }
 
     @respx.mock
     async def test_a_file_without_a_content_url_is_not_found(self, mcp_server):
@@ -7370,11 +7449,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7390,11 +7470,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7414,11 +7495,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7440,11 +7522,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7456,11 +7539,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7470,11 +7554,12 @@ class TestMCPGetChatAttachmentJson:
         with _mock_missing_connection():
             result = await _call(
                 mcp_server,
-                "get_chat_attachment_json",
+                "get_teams_attachment",
                 {
                     "chat_id": TEAMS_CHAT_ID,
                     "message_id": "chat-msg-file-001",
                     "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "mode": "bytes",
                 },
             )
 
@@ -7489,11 +7574,12 @@ class TestMCPGetChatAttachmentJson:
             with pytest.raises(ToolError, match="404"):
                 await _call(
                     mcp_server,
-                    "get_chat_attachment_json",
+                    "get_teams_attachment",
                     {
                         "chat_id": TEAMS_CHAT_ID,
                         "message_id": "chat-msg-file-001",
                         "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                        "mode": "bytes",
                     },
                 )
 
@@ -8315,12 +8401,11 @@ GATED_MAIL_TOOLS = frozenset(
     {
         "list_emails",
         "read_email",
-        "get_email_attachment",
+        "get_mail_attachment",
         "send_email",
         "manage_inbox_rules",
         "sync_mail",
         "get_mail_detail",
-        "get_mail_attachment_json",
         "create_reply_draft_json",
     }
 )
@@ -8526,38 +8611,10 @@ class TestMailSenderPolicy:
         assert "Here is the weekly report" in text
         _assert_no_canary(text)
 
-    # -- get_email_attachment ----------------------------------------------
+    # -- get_mail_attachment ------------------------------------------------
 
     @respx.mock
-    async def test_get_email_attachment_refuses_before_touching_the_attachment(
-        self, mcp_server, monkeypatch
-    ):
-        _policy_on(monkeypatch)
-        value_route = respx.get(f"{ATT_FILE_URL}/$value").mock(
-            return_value=httpx.Response(200, content=b"x")
-        )
-        meta_route = respx.get(ATT_FILE_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
-        )
-        respx.get(SENDER_CHECK_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
-            )
-
-        text = _get_text(result)
-        assert text == mail_policy.EXTERNAL_SENDER_TEXT
-        assert not meta_route.called
-        assert not value_route.called
-        assert _graph_trail() == [("GET", SENDER_CHECK_PATH)]
-        _assert_no_canary(text)
-
-    @respx.mock
-    async def test_get_email_attachment_checks_the_mailbox_it_will_read(
+    async def test_get_mail_attachment_checks_the_mailbox_it_will_read(
         self, mcp_server, monkeypatch
     ):
         """A /me check before a /users/{mailbox} read would be the wrong check."""
@@ -8568,7 +8625,7 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -8576,50 +8633,15 @@ class TestMailSenderPolicy:
                 },
             )
 
-        assert _get_text(result) == mail_policy.EXTERNAL_SENDER_TEXT
+        data = _structured(result)
+        assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
         assert route.calls[0].request.url.path.startswith(
             "/v1.0/users/support@example.com/messages/"
         )
-        _assert_no_canary(_get_text(result))
+        _assert_no_canary(data)
 
     @respx.mock
-    @pytest.mark.parametrize("mode", ["text", "base64", "onedrive"])
-    async def test_get_email_attachment_refuses_an_external_attached_message(
-        self, mcp_server, monkeypatch, mode
-    ):
-        """An attached message is judged by the same rule as a message."""
-        _policy_on(monkeypatch)
-        value_route = respx.get(f"{ATT_EXT_ITEM_URL}/$value").mock(
-            return_value=httpx.Response(200, content=b"raw-eml")
-        )
-
-        def _respond(request):
-            if "expand" in str(request.url):
-                return httpx.Response(200, json=SAMPLE_EXTERNAL_ITEM_ATTACHMENT)
-            return httpx.Response(200, json=SAMPLE_EXTERNAL_ITEM_ATTACHMENT_META)
-
-        respx.get(url__startswith=ATT_EXT_ITEM_URL).mock(side_effect=_respond)
-        respx.get(SENDER_CHECK_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_INTERNAL)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {
-                    "message_id": ATT_MSG_ID,
-                    "attachment_id": SAMPLE_EXTERNAL_ITEM_ATTACHMENT["id"],
-                    "mode": mode,
-                },
-            )
-
-        text = _get_text(result)
-        assert text == mail_policy.EXTERNAL_SENDER_TEXT
-        assert not value_route.called
-        _assert_no_canary(text)
-
-    @respx.mock
-    async def test_get_email_attachment_internal_costs_one_extra_request(
+    async def test_get_mail_attachment_internal_costs_one_extra_request(
         self, mcp_server, monkeypatch
     ):
         _policy_on(monkeypatch)
@@ -8645,16 +8667,16 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
             )
 
-        text = _get_text(result)
-        assert "hello there" in text
+        data = _structured(result)
+        assert data["text"] == "hello there"
         trail = _graph_trail()
         assert trail[0] == ("GET", SENDER_CHECK_PATH)
         assert len(trail) == 3
-        _assert_no_canary(text)
+        _assert_no_canary(data)
 
     @respx.mock
     async def test_policy_off_issues_no_extra_requests(self, mcp_server):
@@ -8678,13 +8700,14 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_email_attachment",
+                "get_mail_attachment",
                 {"message_id": ATT_MSG_ID, "attachment_id": SAMPLE_FILE_ATTACHMENT["id"]},
             )
 
-        assert "hello there" in _get_text(result)
+        data = _structured(result)
+        assert data["text"] == "hello there"
         assert len(_graph_trail()) == 2
-        _assert_no_canary(_get_text(result))
+        _assert_no_canary(data)
 
     # -- forwarding an attachment out of an external message ----------------
 
@@ -8831,8 +8854,8 @@ class TestMailSenderPolicy:
         _assert_no_canary(data)
 
     @respx.mock
-    @pytest.mark.parametrize("mode", ["metadata", "text", "bytes"])
-    async def test_get_mail_attachment_json_refuses_an_external_parent(
+    @pytest.mark.parametrize("mode", ["metadata", "text", "bytes", "onedrive"])
+    async def test_get_mail_attachment_refuses_an_external_parent(
         self, mcp_server, monkeypatch, mode
     ):
         _policy_on(monkeypatch)
@@ -8845,7 +8868,7 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
@@ -8856,11 +8879,12 @@ class TestMailSenderPolicy:
         data = _structured(result)
         assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
         assert not attachments_route.called
+        assert _graph_trail() == [("GET", SENDER_CHECK_PATH)]
         _assert_no_canary(data)
 
     @respx.mock
-    @pytest.mark.parametrize("mode", ["metadata", "text", "bytes"])
-    async def test_get_mail_attachment_json_refuses_an_external_attached_message(
+    @pytest.mark.parametrize("mode", ["metadata", "text", "bytes", "onedrive"])
+    async def test_get_mail_attachment_refuses_an_external_attached_message(
         self, mcp_server, monkeypatch, mode
     ):
         _policy_on(monkeypatch)
@@ -8880,7 +8904,7 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": ATT_MSG_ID,
                     "attachment_id": SAMPLE_EXTERNAL_ITEM_ATTACHMENT["id"],
@@ -9154,6 +9178,13 @@ RENAMED_TOOLS = [
     ("list_powerbi_workspaces", "list_powerbi", {}),
     ("list_powerbi_content", "list_powerbi", {"workspace_id": "ws-1"}),
     ("upload_file", "manage_file", {"filename": "x.txt", "content": "hi"}),
+    ("get_email_attachment", "get_mail_attachment", {"message_id": "m", "attachment_id": "a"}),
+    ("get_mail_attachment_json", "get_mail_attachment", {"message_id": "m", "attachment_id": "a"}),
+    (
+        "get_chat_attachment_json",
+        "get_teams_attachment",
+        {"chat_id": "c", "message_id": "m", "attachment_id": "a"},
+    ),
 ]
 
 # The aliases whose target needs the Power BI connection rather than the Graph
@@ -9235,6 +9266,23 @@ class TestDeprecatedAliases:
                     "reason": "filename is required for the 'upload' action.",
                 },
             ),
+            (
+                # The alias maps "base64" only; anything else it passes through.
+                "get_email_attachment",
+                {"message_id": "m", "attachment_id": "a", "mode": "weird"},
+                {
+                    "error": "invalid_mode",
+                    "reason": "mode must be one of: metadata, text, bytes, onedrive; got 'weird'",
+                },
+            ),
+            (
+                "get_chat_attachment_json",
+                {"chat_id": "c", "message_id": "m", "attachment_id": "a", "thumbnail": "huge"},
+                {
+                    "error": "invalid_thumbnail",
+                    "reason": "thumbnail must be one of: small, medium, large; got 'huge'",
+                },
+            ),
         ],
     )
     @respx.mock
@@ -9291,6 +9339,70 @@ class TestDeprecatedAliases:
             "name": "notes.md",
             "size": SAMPLE_UPLOADED_FILE["size"],
             "web_url": SAMPLE_UPLOADED_FILE["webUrl"],
+        }
+
+    @respx.mock
+    async def test_the_email_attachment_alias_still_reads_base64_as_bytes(self, mcp_server):
+        """ "base64" was that name's word for raw bytes; the new name refuses it."""
+        payload = b"\x89PNG\r\n\x1a\n"
+        respx.get(f"{ATT_FILE_URL}/$value").mock(
+            return_value=httpx.Response(200, content=payload, headers={"Content-Type": "image/png"})
+        )
+        respx.get(ATT_FILE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    **SAMPLE_FILE_ATTACHMENT,
+                    "name": "logo.png",
+                    "contentType": "image/png",
+                    "size": len(payload),
+                },
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_email_attachment",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
+                    "mode": "base64",
+                },
+            )
+
+        data = _structured(result)
+        assert base64.b64decode(data["content_base64"]) == payload
+
+    @respx.mock
+    async def test_the_chat_attachment_alias_carries_the_thumbnail_size(self, mcp_server):
+        """thumbnail was a flat parameter; it now rides the options JSON."""
+        respx.get(TEAMS_FILE_MSG_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
+        )
+        thumb = respx.get(TEAMS_SHARE_THUMB_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"THUMB", headers={"Content-Type": "image/jpeg"}
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_chat_attachment_json",
+                {
+                    "chat_id": TEAMS_CHAT_ID,
+                    "message_id": "chat-msg-file-001",
+                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
+                    "thumbnail": "medium",
+                },
+            )
+
+        assert thumb.called
+        assert _structured(result) == {
+            "kind": "file",
+            "name": "roadmap.pptx",
+            "content_type": "image/jpeg",
+            "size": 5,
+            "content_base64": base64.b64encode(b"THUMB").decode("ascii"),
         }
 
     @respx.mock
@@ -9393,7 +9505,7 @@ class TestDraftsUnderPolicy:
             )
             result = await _call(
                 mcp_server,
-                "get_mail_attachment_json",
+                "get_mail_attachment",
                 {
                     "message_id": draft_id,
                     "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],

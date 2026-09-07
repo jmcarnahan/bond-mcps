@@ -13,22 +13,22 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (45 tools):
-  Email     : get_profile, list_emails, sync_mail, read_email*, get_email_attachment*,
+Tool summary (43 tools):
+  Email     : get_profile, list_emails, sync_mail, read_email*, get_mail_attachment,
               send_email, mark_mail_read, manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
   Teams     : list_teams, list_chats*, read_teams_messages*, search_teams_messages,
-              get_teams_attachment*, send_teams_message*, get_teams_activity,
+              get_teams_attachment, send_teams_message*, get_teams_activity,
               get_chat_members, ensure_chat, mark_chat_read
   Files     : list_sharepoint_sites, list_files, inspect_file, edit_document, manage_file
   Power BI  : list_powerbi, query_dataset, refresh_dataset, export_report
   Directory : search_people
-  Desktop JSON : get_mail_detail, get_mail_attachment_json, create_reply_draft_json,
+  Desktop JSON : get_mail_detail, create_reply_draft_json,
                  create_draft_json, update_draft_body, add_draft_attachment_json, send_draft,
-                 list_chats_page, list_chat_messages_page, get_chat_attachment_json,
+                 list_chats_page, list_chat_messages_page,
                  send_chat_message_json, connection_status
 
-The 6 tools marked ``*`` return a prose/CSV string an LLM reads directly; the
+The 4 tools marked ``*`` return a prose/CSV string an LLM reads directly; the
 other 39 return a ``dict`` and declare ``output_schema=None``, which opts them into the
 FormatNegotiation middleware: a caller sending ``X-Bond-Client: desktop`` (the
 desktop mail app) gets the dict as structuredContent, while every other caller
@@ -293,7 +293,7 @@ async def list_emails(
         Each row carries date, from_name, from_address, to, subject, is_read,
         body_preview, has_attachments, id. The has_attachments column flags
         messages that carry attachments; read_email lists them and
-        get_email_attachment reads one.
+        get_mail_attachment reads one.
 
         You see this as pipe-CSV — one header line of those column names, one
         line per message — followed by `count:`, `folder:`, `query:`,
@@ -427,7 +427,7 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
     Read a single email message by its ID.
 
     When the message has attachments they are listed under the body with their
-    names, types, sizes, and IDs. Pass an ID to get_email_attachment to read,
+    names, types, sizes, and IDs. Pass an ID to get_mail_attachment to read,
     download, or save one.
 
     Args:
@@ -509,77 +509,10 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
     return result
 
 
-_ATTACHMENT_TOO_LARGE_TEXT = (
-    'This attachment is too large for text extraction (limit: 50 MB). Use mode "onedrive".'
-)
-
-
-def _attachment_header(summary: dict) -> str:
-    """The identity block every get_email_attachment answer opens with."""
-    header = (
-        f"**Name:** {summary['name'] or '(unnamed)'}\n"
-        f"**Type:** {summary['content_type'] or 'unknown'} ({_format_size(summary['size'])})\n"
-        f"**ID:** `{summary['id']}`"
-    )
-    if summary["is_inline"]:
-        header += f"\n**Inline:** yes (content id {summary['content_id'] or 'none'})"
-    return header
-
-
-def _format_attached_message(item: dict) -> str:
-    """Render an item attachment's inner message as readable markdown."""
-    sender = (item.get("from") or {}).get("emailAddress") or {}
-    body = item.get("body") or {}
-    if body.get("contentType") == "text":
-        rendered = body.get("content", "")
-    else:
-        content = body.get("content", "")
-        rendered = item.get("bodyPreview", "")
-        rendered += f"\n[HTML body, {len(content)} chars — preview only]"
-    return (
-        "\n\n---\n**Attached message**\n"
-        f"**Subject:** {item.get('subject', '(no subject)')}\n"
-        f"**From:** {sender.get('name', '?')} <{sender.get('address', '?')}>\n"
-        f"**Date:** {item.get('receivedDateTime', '?')}\n\n"
-        f"{rendered}"
-    )
-
-
-def _render_attachment_result(header: str, result: dict, mode: str) -> str:
-    """Turn one sink result into the markdown the tool returns."""
-    if mode == "text":
-        if result.get("text") is not None:
-            body = f"{header}\n\n---\n{result['text']}"
-            if result.get("truncated"):
-                body += "\n\n*(content truncated)*"
-            return body
-        reason = result.get("reason")
-        if reason == "binary":
-            return (
-                f"{header}\n\nThis is a binary file and cannot be displayed as text. "
-                'Use mode "onedrive" to save it, or "base64" if it is under 1 MB.'
-            )
-        if reason == "too_large":
-            return f"{header}\n\n{_ATTACHMENT_TOO_LARGE_TEXT}"
-        return f"{header}\n\nCould not extract text from this document."
-    if mode == "base64":
-        if result.get("error") == "too_large":
-            limit = _format_size(attachment_ops.MAX_BASE64_RETURN_BYTES)
-            return (
-                f"{header}\n\nToo large to return as base64 (limit {limit}). "
-                'Use mode "onedrive" or "text".'
-            )
-        return f"{header}\n\n**Base64 ({result['size']} bytes):**\n{result['base64']}"
-    return (
-        f"{header}\n\n**Saved to OneDrive:** {result['web_url']}\n"
-        f"**Item ID:** `{result['item_id']}`"
-    )
-
-
-@mcp.tool()
-async def get_email_attachment(
+@mcp.tool(output_schema=None)
+async def get_mail_attachment(
     message_id: str, attachment_id: str, mode: str = "text", mailbox: str = "", options: str = ""
-) -> str:
+) -> dict:
     """
     Read, download, or save one attachment from an email message.
 
@@ -588,12 +521,12 @@ async def get_email_attachment(
     Args:
         message_id: The Graph API message ID (from list_emails output).
         attachment_id: The attachment ID (from read_email's attachment list).
-        mode: How to return the attachment.
-            "text" (default) — extract the text: Word, PowerPoint, Excel, and PDF
-                documents are parsed, plain-text files are decoded, and binaries
-                (images, archives) say so instead.
-            "base64" — the raw bytes, base64-encoded. Only for attachments under
-                1 MB; anything larger is refused, so use "onedrive" for those.
+        mode: What to return.
+            "text" (default) — the extracted text: Word, PowerPoint, Excel, and
+                PDF documents are parsed, plain-text files are decoded, and
+                binaries say why there is no text instead.
+            "metadata" — the summary only; no content is fetched.
+            "bytes" — the raw bytes, base64-encoded, up to 10 MB.
             "onedrive" — save a copy to your OneDrive and return the link.
         mailbox: Shared mailbox email address (e.g. "support@company.com"). Leave empty
             to access your own mailbox. Requires Mail.Read.Shared permission and Exchange
@@ -603,108 +536,145 @@ async def get_email_attachment(
                 (default "Attachments"; created if missing).
             {"site_id": ""}  — save to this SharePoint site's drive instead of OneDrive.
 
-    Notes:
-        An attached email (item attachment) renders its subject, sender, date, and
-        body in "text" mode, and downloads as a .eml file in the other modes. A link
-        attachment (a file shared by reference) has no bytes to return: every mode
-        gives back its URL, which inspect_file can then read.
+    Returns:
+        Every mode returns the attachment summary — id, name, content_type,
+        size (bytes), is_inline, content_id, kind (file | item | reference |
+        unknown), and source_url for a link attachment — plus what the mode
+        adds. An attached message (kind "item") also carries item_subject,
+        item_from, and item_received in metadata and text modes, and downloads
+        as .eml bytes in the others.
 
-        While the mail sender policy is on, an attachment is refused when the
-        message carrying it, or an attached message inside it, came from a
-        sender outside the allowed domains.
+        "text" adds text, truncated, and — when there is no text — reason
+        ("binary" | "unsupported" | "too_large" | "reference"). "bytes" adds
+        content_base64. "onedrive" adds item_id and web_url, and its name,
+        content_type, and size describe the file as saved.
+
+        Permanent errors, which must not be retried: external_sender (the mail
+        sender policy hides the carrying message, or the message attached to
+        it), invalid_mode, invalid_options, reference (with source_url — a link
+        attachment has no bytes; open the URL with inspect_file), too_large
+        (with size and limit; bytes mode only, decided from the metadata so
+        nothing is downloaded), not_connected (with connect_url when one
+        exists). Everything else — a Graph 404 for an unknown message or
+        attachment, throttling, 5xx — propagates as a tool error, which is the
+        caller's "transient, retry later" signal.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     mode = mode.strip().lower() or "text"
-    if mode not in ("text", "base64", "onedrive"):
-        return f"mode must be one of: text, base64, onedrive; got {mode!r}"
+    if mode not in ("metadata", "text", "bytes", "onedrive"):
+        return {
+            "error": "invalid_mode",
+            "reason": f"mode must be one of: metadata, text, bytes, onedrive; got {mode!r}",
+        }
 
     mb = mailbox or None
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        # Judge the parent message before any of its attachment metadata or
-        # bytes are read, against the same mailbox the reads will use.
-        if not await mail_policy.acheck_message(client, message_id, mb):
-            return mail_policy.EXTERNAL_SENDER_TEXT
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            # Judge the parent message before any of its attachment metadata or
+            # bytes are read, against the same mailbox the reads will use.
+            # Inside the try so a malformed policy allowlist propagates as a
+            # tool error rather than being mistaken for a missing connection.
+            if not await mail_policy.acheck_message(client, message_id, mb):
+                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
 
-        meta = await attachment_ops.aget_attachment_metadata(
-            client, message_id, attachment_id, mailbox=mb
-        )
-        summary = attachment_ops.attachment_summary(meta)
-        header = _attachment_header(summary)
-
-        if summary["kind"] == "reference":
-            return (
-                f"{header}\n**Link:** {summary['source_url'] or '(no URL)'}\n\n"
-                "This is a link attachment; open the URL (or use inspect_file with it) "
-                "to read the file."
-            )
-
-        # An attached message is judged by the same rule as a message. The
-        # expanded item is fetched at most once per call and reused below; an
-        # attached event or contact has no sender and is therefore hidden.
-        expanded: dict | None = None
-        if summary["kind"] == "item" and mail_policy.enabled():
-            expanded = await attachment_ops.aget_item_attachment(
+            meta = await attachment_ops.aget_attachment_metadata(
                 client, message_id, attachment_id, mailbox=mb
             )
-            if not mail_policy.message_allowed(expanded.get("item") or {}):
-                return mail_policy.EXTERNAL_SENDER_TEXT
+            summary = attachment_ops.attachment_summary(meta)
 
-        # Decide from the metadata size, so an oversized attachment is refused
-        # before its bytes cross the wire. Attached messages are downloaded as
-        # .eml in base64 mode, so the same ceiling applies to them.
-        if mode == "base64" and summary["size"] > attachment_ops.MAX_BASE64_RETURN_BYTES:
-            limit = _format_size(attachment_ops.MAX_BASE64_RETURN_BYTES)
-            return (
-                f"{header}\n\nToo large to return as base64 (limit {limit}). "
-                'Use mode "onedrive" or "text".'
-            )
+            # An attached message is judged by the same rule as a message;
+            # fetched once here and handed to whichever mode needs it. An
+            # attached event or contact has no sender and is therefore hidden.
+            expanded: dict | None = None
+            if summary["kind"] == "item" and mail_policy.enabled():
+                expanded = await attachment_ops.aget_item_attachment(
+                    client, message_id, attachment_id, mailbox=mb
+                )
+                if not mail_policy.message_allowed(expanded.get("item") or {}):
+                    return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
 
-        if summary["kind"] == "item":
-            if mode == "text":
+            if mode == "metadata":
+                if summary["kind"] != "item":
+                    return summary
                 if expanded is None:
                     expanded = await attachment_ops.aget_item_attachment(
                         client, message_id, attachment_id, mailbox=mb
                     )
-                return header + _format_attached_message(expanded.get("item") or {})
+                return {**summary, **_attachment_item_fields(expanded.get("item") or {})}
+
+            if mode == "text":
+                return await _attachment_json_text(
+                    client, message_id, attachment_id, summary, expanded, mailbox=mb
+                )
+
+            if summary["kind"] == "reference":
+                return {"error": "reference", "source_url": summary["source_url"]}
+
+            if mode == "onedrive":
+                # No size ceiling here: aupload_any switches to an upload
+                # session for anything the simple PUT cannot carry.
+                data, header_type = await attachment_ops.aget_attachment_bytes(
+                    client, message_id, attachment_id, mailbox=mb
+                )
+                name = summary["name"] or attachment_id
+                if summary["kind"] == "item":
+                    # An attached message's bytes are a MIME message, so it is
+                    # saved as the .eml a mail client can open.
+                    att = attachment_ops.ResolvedAttachment(
+                        name=name if name.lower().endswith(".eml") else f"{name}.eml",
+                        data=data,
+                        content_type="message/rfc822",
+                    )
+                else:
+                    att = attachment_ops.ResolvedAttachment(
+                        name=name,
+                        data=data,
+                        content_type=(
+                            summary["content_type"]
+                            or header_type
+                            or attachment_ops.guess_content_type(name)
+                        ),
+                    )
+                result = await attachment_ops.adeliver_attachment(
+                    client,
+                    att,
+                    "onedrive",
+                    folder_path=opt_str(opts.get("folder_path")) or "Attachments",
+                    site_id=opt_str(opts.get("site_id")) or "",
+                )
+                # The delivered name, type, and size win over the record's: an
+                # attached message is saved under a name the record never had.
+                return {
+                    **summary,
+                    "name": result["name"],
+                    "content_type": result["content_type"],
+                    "size": result["size"],
+                    "item_id": result["item_id"],
+                    "web_url": result["web_url"],
+                }
+
+            # Decided from the metadata size, so an oversized attachment is
+            # refused before its bytes cross the wire.
+            if summary["size"] > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+                return {
+                    "error": "too_large",
+                    "size": summary["size"],
+                    "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+                }
             data, header_type = await attachment_ops.aget_attachment_bytes(
                 client, message_id, attachment_id, mailbox=mb
             )
-            name = summary["name"] or attachment_id
-            att = attachment_ops.ResolvedAttachment(
-                name=name if name.lower().endswith(".eml") else f"{name}.eml",
-                data=data,
-                content_type="message/rfc822",
-            )
-        else:
-            if mode == "text" and summary["size"] > files_ops.MAX_DOCUMENT_DOWNLOAD_BYTES:
-                return f"{header}\n\n{_ATTACHMENT_TOO_LARGE_TEXT}"
-            data, header_type = await attachment_ops.aget_attachment_bytes(
-                client, message_id, attachment_id, mailbox=mb
-            )
-            name = summary["name"] or attachment_id
-            att = attachment_ops.ResolvedAttachment(
-                name=name,
-                data=data,
-                content_type=(
-                    summary["content_type"]
-                    or header_type
-                    or attachment_ops.guess_content_type(name)
-                ),
-            )
+    except PermissionError as e:
+        return _not_connected(e)
 
-        result = await attachment_ops.adeliver_attachment(
-            client,
-            att,
-            mode,
-            folder_path=opt_str(opts.get("folder_path")) or "Attachments",
-            site_id=opt_str(opts.get("site_id")) or "",
-        )
-
-    return _render_attachment_result(header, result, mode)
+    if not summary["content_type"]:
+        fallback = "message/rfc822" if summary["kind"] == "item" else ""
+        summary["content_type"] = header_type or fallback
+    return {**summary, "content_base64": base64.b64encode(data).decode("ascii")}
 
 
 @mcp.tool(output_schema=None)
@@ -1557,24 +1527,6 @@ def _mime_from_header(header: str, fallback: str) -> str:
     return mime or fallback
 
 
-def _teams_entry_summary(
-    entry: dict, name: str | None, content_type: str | None, size: int
-) -> dict:
-    """The summary shape _attachment_header renders, built from a Teams entry.
-
-    Teams has no inline/content-id concept for shared files, so those two keys
-    are constant here; they exist because mail attachments carry them.
-    """
-    return {
-        "id": entry["id"],
-        "name": name,
-        "content_type": content_type,
-        "size": size,
-        "is_inline": False,
-        "content_id": None,
-    }
-
-
 async def _find_teams_attachment(
     client,
     message_id: str,
@@ -1596,6 +1548,16 @@ async def _find_teams_attachment(
         if entry["id"] == attachment_id:
             return entry, entries
     return None, entries
+
+
+def _teams_attachment_not_found(entries: list[dict]) -> dict:
+    """No such id — say which ids the message does carry, so a retry can land."""
+    return {
+        "error": "not_found",
+        "available": [
+            {"kind": e["kind"], "id": e["id"], "name": e.get("name")} for e in entries if e["id"]
+        ],
+    }
 
 
 @mcp.tool()
@@ -1854,7 +1816,7 @@ async def search_teams_messages(
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_teams_attachment(
     message_id: str,
     attachment_id: str,
@@ -1863,13 +1825,13 @@ async def get_teams_attachment(
     channel_id: str = "",
     mode: str = "text",
     options: str = "",
-) -> str:
+) -> dict:
     """
-    Read, download, or save one file or inline image from a Teams message.
+    Read, download, or save one attachment from a Teams message.
 
     The ids come from read_teams_messages' attachments column: a shared file
-    shows as `name [file:<id>]` and an inline image as `[image:<id>]`. Pass the
-    id inside the brackets.
+    shows as `name [file:<id>]`, an inline image as `[image:<id>]`, and a card
+    as `[card]`. Pass the id inside the brackets.
 
     Provide either:
     - chat_id to read from a 1:1, group, or meeting chat (from list_chats)
@@ -1881,41 +1843,86 @@ async def get_teams_attachment(
         chat_id: Chat ID (from list_chats). Takes priority over team/channel.
         team_id: Team ID (from list_teams with no team_id).
         channel_id: Channel ID (from list_teams with team_id).
-        mode: How to return the attachment.
-            "text" (default) — extract the text: Word, PowerPoint, Excel, and PDF
-                documents are parsed, plain-text files are decoded, and binaries
-                (images, archives) report their type and size instead.
-            "base64" — the raw bytes, base64-encoded. Only for attachments under
-                1 MB; anything larger is refused, so use "onedrive" for those.
+        mode: What to return.
+            "text" (default) — the extracted text: Word, PowerPoint, Excel, and
+                PDF documents are parsed, plain-text files are decoded, cards
+                give up their own text, and binaries say why there is no text.
+            "metadata" — the attachment record only; nothing is fetched. This
+                is the mode that describes a card or a quoted message
+                reference, which the other modes have no bytes for.
+            "bytes" — the raw bytes, base64-encoded, up to 10 MB.
             "onedrive" — save a copy to your OneDrive and return the link.
+            "thumbnail" — a shared file's driveItem thumbnail, base64-encoded.
         options: JSON string with optional fields:
             {"folder_path": "Attachments"}  — OneDrive folder for mode "onedrive"
                 (default "Attachments"; created if missing).
             {"site_id": ""}  — save to this SharePoint site's drive instead of OneDrive.
+            {"thumbnail": "medium"}  — thumbnail size for mode "thumbnail":
+                "small", "medium" (default), or "large".
 
-    Notes:
-        A card attachment renders its text here rather than downloading. A quoted
-        message reference has nothing to download. A file shared in Teams that
-        your account cannot open reports access denied — the owner has to
-        re-share it with you.
+    Returns:
+        "metadata" returns the record read_teams_messages parsed: id, kind
+        (file | image | card | message_reference | other), name, content_type,
+        content_url, thumbnail_url, and card_text.
+
+        Every other mode returns kind, name, content_type, and size, plus what
+        the mode adds: text and truncated for "text" (with reason — "binary" |
+        "unsupported" | "too_large" — when there is no text), content_base64
+        for "bytes" and "thumbnail", item_id and web_url for "onedrive". A card
+        in "text" mode returns kind, content_type, text, and truncated only,
+        because there is no file behind it.
+
+        Permanent errors, which must not be retried: invalid_options,
+        invalid_mode, invalid_thumbnail, invalid_arguments (neither a chat nor
+        a team/channel pair), not_found (the id is not on the message — the
+        available list names the ids that are — or it is a kind with no bytes,
+        or a file entry with no URL), access_denied (Graph 403 resolving the
+        file's sharing link; the owner has to re-share it), is_folder,
+        no_thumbnail, too_large (with size and limit, or with reason for the
+        download guard), teams_unavailable (the account has no Teams licence),
+        and not_connected (with connect_url when one exists). A Graph 404 for
+        an unknown chat, channel, or message, throttling, and 5xx propagate as
+        tool errors instead — the caller's "transient, retry later" signal.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     mode = mode.strip().lower() or "text"
-    if mode not in ("text", "base64", "onedrive"):
-        return f"mode must be one of: text, base64, onedrive; got {mode!r}"
+    # This name's str ancestor called raw bytes "base64"; the synonym keeps
+    # callers who memorized that contract working.
+    if mode == "base64":
+        mode = "bytes"
+    if mode not in ("metadata", "text", "bytes", "onedrive", "thumbnail"):
+        return {
+            "error": "invalid_mode",
+            "reason": (
+                f"mode must be one of: metadata, text, bytes, onedrive, thumbnail; got {mode!r}"
+            ),
+        }
+
+    thumb = opt_str(opts.get("thumbnail")) or "medium"
+    # Judged before the token so the get_chat_attachment_json alias, which
+    # forwards its thumbnail parameter through options, still refuses a bad
+    # size with no request — the way its own ancestor did.
+    if mode == "thumbnail" and thumb not in _THUMBNAIL_WORDS:
+        return {
+            "error": "invalid_thumbnail",
+            "reason": f"thumbnail must be one of: small, medium, large; got {thumb!r}",
+        }
 
     if not chat_id and not (team_id and channel_id):
-        return "Provide either chat_id, or both team_id and channel_id."
+        return {
+            "error": "invalid_arguments",
+            "reason": "Provide either chat_id, or both team_id and channel_id.",
+        }
     if chat_id:
         # A chat wins over a team/channel pair, matching read_teams_messages —
         # the ops layer refuses both at once, and that is not the caller's bug.
         team_id = channel_id = ""
 
-    token = get_graph_token()
     try:
+        token = get_graph_token()
         async with AsyncGraphClient(token) as client:
             entry, entries = await _find_teams_attachment(
                 client,
@@ -1926,87 +1933,24 @@ async def get_teams_attachment(
                 channel_id=channel_id,
             )
             if entry is None:
-                available = (
-                    "; ".join(f"{e['kind']}: {e['id']}" for e in entries if e["id"]) or "(none)"
-                )
-                return (
-                    f"No attachment with id `{attachment_id}` on message `{message_id}`.\n"
-                    f"Available: {available}"
-                )
+                return _teams_attachment_not_found(entries)
 
             kind = entry["kind"]
-            if kind == "card":
-                card_text = entry["card_text"] or "(no readable text)"
-                return f"**Card:** {entry['content_type']}\n\n{card_text}"
-            if kind == "message_reference":
-                return (
-                    "This attachment is a quoted message reference, not a file; "
-                    "there is nothing to download."
-                )
-            if kind == "other":
-                answer = (
-                    f"Attachment of type {entry['content_type'] or 'unknown'} "
-                    "cannot be fetched by this tool."
-                )
-                if entry["content_url"]:
-                    answer += f"\nURL: {entry['content_url']}"
-                return answer
+            if mode == "metadata":
+                return dict(entry)
+            if kind == "card" and mode == "text":
+                return {
+                    "kind": "card",
+                    "content_type": entry["content_type"],
+                    "text": entry["card_text"] or None,
+                    "truncated": False,
+                }
+            if kind not in ("file", "image"):
+                return _teams_attachment_not_found(entries)
 
-            if kind == "file":
-                url = entry["content_url"]
-                if not url:
-                    return "This file attachment has no content URL to resolve."
-                try:
-                    item = await files_ops.aresolve_sharing_link(client, url)
-                except GraphError as e:
-                    if e.status_code == 403:
-                        return (
-                            "**Access denied:** the file was shared in Teams but your "
-                            "account cannot open it. The owner may need to re-share it "
-                            "with you."
-                        )
-                    if e.status_code == 404:
-                        return (
-                            "**Item not found** for this file's link. The link may have "
-                            "expired, been revoked, or the file was deleted."
-                        )
-                    if e.status_code == 400:
-                        return "**Invalid sharing link.** Could not resolve this file's URL."
-                    raise
-
-                if "folder" in item:
-                    return "This attachment is a folder, not a file. Use list_files to browse it."
-
-                name = entry["name"] or item.get("name") or attachment_id
-                content_type = (item.get("file") or {}).get(
-                    "mimeType"
-                ) or attachment_ops.guess_content_type(name)
-                raw_size = item.get("size")
-                size = raw_size if isinstance(raw_size, int) else 0
-                summary = _teams_entry_summary(entry, name, content_type, size)
-                header = _attachment_header(summary)
-
-                # Decided from the driveItem metadata, so an oversized file is
-                # refused before its bytes ever cross the wire.
-                if mode == "text" and size > files_ops.MAX_DOCUMENT_DOWNLOAD_BYTES:
-                    return f"{header}\n\n{_ATTACHMENT_TOO_LARGE_TEXT}"
-                if mode == "base64" and size > attachment_ops.MAX_BASE64_RETURN_BYTES:
-                    limit = _format_size(attachment_ops.MAX_BASE64_RETURN_BYTES)
-                    return (
-                        f"{header}\n\nToo large to return as base64 (limit {limit}). "
-                        'Use mode "onedrive" or "text".'
-                    )
-
-                try:
-                    _, data = await files_ops.aresolve_sharing_link_bytes(client, url, item=item)
-                except ValueError as e:
-                    return f"{header}\n\n{e}"
-                att = attachment_ops.ResolvedAttachment(
-                    name=name, data=data, content_type=content_type
-                )
-            else:
+            if kind == "image":
                 # hostedContents advertises no size before $value, so there is
-                # nothing to pre-check; the sink refuses oversize base64 itself.
+                # nothing to pre-check; the cap below judges what arrived.
                 data, header_type = await teams_ops.aget_hosted_content(
                     client,
                     message_id,
@@ -2017,23 +1961,117 @@ async def get_teams_attachment(
                 )
                 content_type = _mime_from_header(header_type, "application/octet-stream")
                 name = _hosted_image_name(entry["id"], content_type)
-                summary = _teams_entry_summary(entry, name, content_type, len(data))
-                header = _attachment_header(summary)
-                att = attachment_ops.ResolvedAttachment(
-                    name=name, data=data, content_type=content_type
+            else:
+                url = entry["content_url"]
+                if not url:
+                    return {"error": "not_found"}
+                try:
+                    if mode == "thumbnail":
+                        found = await files_ops.aget_sharing_link_thumbnail(client, url, size=thumb)
+                        if found is None:
+                            return {"error": "no_thumbnail"}
+                        data, header_type = found
+                        content_type = _mime_from_header(header_type, "image/jpeg")
+                        name = entry["name"]
+                    else:
+                        item = await files_ops.aresolve_sharing_link(client, url)
+                        if "folder" in item:
+                            return {"error": "is_folder"}
+                        name = entry["name"] or item.get("name") or attachment_id
+                        content_type = (item.get("file") or {}).get(
+                            "mimeType"
+                        ) or attachment_ops.guess_content_type(name)
+                        raw_size = item.get("size")
+                        size = raw_size if isinstance(raw_size, int) else 0
+
+                        # Decided from the driveItem metadata, so an oversized
+                        # file is refused before its bytes cross the wire.
+                        if mode == "bytes" and size > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+                            return {
+                                "error": "too_large",
+                                "size": size,
+                                "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+                            }
+                        if mode == "text" and size > files_ops.MAX_DOCUMENT_DOWNLOAD_BYTES:
+                            return {
+                                "kind": kind,
+                                "name": name,
+                                "content_type": content_type,
+                                "size": size,
+                                "text": None,
+                                "truncated": False,
+                                "reason": "too_large",
+                            }
+                        try:
+                            _, data = await files_ops.aresolve_sharing_link_bytes(
+                                client, url, item=item
+                            )
+                        except ValueError as e:
+                            # Only onedrive mode reaches here, having no size
+                            # ceiling of its own; the ops download guard still
+                            # refuses anything over its own limit.
+                            return {"error": "too_large", "reason": str(e)}
+                except GraphError as e:
+                    if e.status_code == 403:
+                        return {"error": "access_denied"}
+                    raise
+
+            if mode in ("bytes", "thumbnail"):
+                # Images and thumbnails announce no size up front, so the cap is
+                # enforced again here on what actually arrived. An inline image
+                # ignores the thumbnail size: it is already small, and Graph
+                # serves no thumbnail for hosted content.
+                if len(data) > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
+                    return {
+                        "error": "too_large",
+                        "size": len(data),
+                        "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
+                    }
+                return {
+                    "kind": kind,
+                    "name": name,
+                    "content_type": content_type,
+                    "size": len(data),
+                    "content_base64": base64.b64encode(data).decode("ascii"),
+                }
+
+            att = attachment_ops.ResolvedAttachment(name=name, data=data, content_type=content_type)
+            if mode == "onedrive":
+                result = await attachment_ops.adeliver_attachment(
+                    client,
+                    att,
+                    "onedrive",
+                    folder_path=opt_str(opts.get("folder_path")) or "Attachments",
+                    site_id=opt_str(opts.get("site_id")) or "",
                 )
+                return {
+                    "kind": kind,
+                    "name": result["name"],
+                    "content_type": result["content_type"],
+                    "size": result["size"],
+                    "item_id": result["item_id"],
+                    "web_url": result["web_url"],
+                }
 
-            result = await attachment_ops.adeliver_attachment(
-                client,
-                att,
-                mode,
-                folder_path=opt_str(opts.get("folder_path")) or "Attachments",
-                site_id=opt_str(opts.get("site_id")) or "",
-            )
+            result = await attachment_ops.adeliver_attachment(client, att, "text")
+    except PermissionError as e:
+        return _not_connected(e)
     except TeamsNotAvailableError:
-        return "Microsoft Teams is not available for this account."
+        # The json ancestor froze this spelling; the Teams read tools say
+        # "teams_not_available" instead, and both are permanent.
+        return {"error": "teams_unavailable"}
 
-    return _render_attachment_result(header, result, mode)
+    out = {
+        "kind": kind,
+        "name": result["name"],
+        "content_type": result["content_type"],
+        "size": result["size"],
+        "text": result["text"],
+        "truncated": result["truncated"],
+    }
+    if "reason" in result:
+        out["reason"] = result["reason"]
+    return out
 
 
 def _teams_send_summary(
@@ -3173,7 +3211,7 @@ async def export_report(
 # ---------------------------------------------------------------------------
 # Dict-returning tools
 #
-# Unlike the 6 str-returning tools above, these return a canonical dict.
+# Unlike the 4 str-returning tools above, these return a canonical dict.
 # FormatNegotiation hands that dict to a programmatic caller (the desktop mail
 # app) as structuredContent and renders it compactly for everyone else.
 # Parameters remain str/int only.
@@ -3181,12 +3219,15 @@ async def export_report(
 # Error contract: a missing Microsoft connection returns the not_connected
 # payload (with a connect URL when one exists). The Teams write tools return
 # a structured "teams_unavailable" error for the no-license 403, which is
-# permanent and must not be retried. The mail attachment tools likewise return
-# structured permanent errors — invalid_mode, too_large, reference, empty_name,
-# invalid_base64 — which must not be retried either. The Teams attachment
-# reader returns not_found, access_denied, no_thumbnail, invalid_thumbnail,
-# is_folder, and too_large; inspect_file returns missing_target,
-# access_denied, not_found, and invalid_link — all permanent.
+# permanent and must not be retried. The mail attachment tools (
+# get_mail_attachment, add_draft_attachment_json) likewise return structured
+# permanent errors — invalid_mode, invalid_options, too_large, reference,
+# empty_name, invalid_base64 — which must not be retried either. The Teams
+# attachment reader (get_teams_attachment) returns not_found (with the
+# available ids), access_denied, no_thumbnail, invalid_thumbnail, is_folder,
+# too_large, invalid_mode, invalid_options, invalid_arguments, and
+# teams_unavailable; inspect_file returns missing_target, access_denied,
+# not_found, and invalid_link — all permanent.
 # send_chat_message_json returns invalid_attachments and files_scope_missing
 # (the account's connection lacks Files.ReadWrite) — both permanent. The mail
 # tools return external_sender when the mail sender policy hides a message —
@@ -3457,7 +3498,7 @@ async def get_mail_detail(message_id: str) -> dict:
     Also returns attachments: metadata only — id, name, content_type, size (in
     bytes), is_inline, content_id, kind (file | item | reference | unknown), and
     source_url for link attachments. No bytes are fetched here; pass an id to
-    get_mail_attachment_json for content. At most 50 attachments are listed,
+    get_mail_attachment for content. At most 50 attachments are listed,
     while attachment_count reports the true number.
 
     While the mail sender policy is on, a message from a sender outside the
@@ -3502,8 +3543,9 @@ async def _attachment_json_text(
     attachment_id: str,
     summary: dict,
     expanded: dict | None = None,
+    mailbox: str | None = None,
 ) -> dict:
-    """text mode for get_mail_attachment_json: extract, decode, or explain.
+    """text mode for get_mail_attachment: extract, decode, or explain.
 
     ``expanded`` is the already-fetched item attachment when the mail policy
     had to fetch it to judge the attached message, so it is never fetched twice.
@@ -3512,7 +3554,9 @@ async def _attachment_json_text(
         return {**summary, "text": None, "truncated": False, "reason": "reference"}
     if summary["kind"] == "item":
         if expanded is None:
-            expanded = await attachment_ops.aget_item_attachment(client, message_id, attachment_id)
+            expanded = await attachment_ops.aget_item_attachment(
+                client, message_id, attachment_id, mailbox=mailbox
+            )
         item = expanded.get("item") or {}
         body = item.get("body") or {}
         is_text = body.get("contentType") == "text"
@@ -3526,7 +3570,7 @@ async def _attachment_json_text(
         return {**summary, "text": None, "truncated": False, "reason": "too_large"}
 
     data, header_type = await attachment_ops.aget_attachment_bytes(
-        client, message_id, attachment_id
+        client, message_id, attachment_id, mailbox=mailbox
     )
     name = summary["name"] or attachment_id
     content_type = summary["content_type"] or header_type or attachment_ops.guess_content_type(name)
@@ -3547,102 +3591,6 @@ def _attachment_item_fields(item: dict) -> dict:
         "item_from": sender.get("address"),
         "item_received": item.get("receivedDateTime"),
     }
-
-
-@mcp.tool(output_schema=None)
-async def get_mail_attachment_json(
-    message_id: str, attachment_id: str, mode: str = "bytes"
-) -> dict:
-    """
-    Get one email attachment's metadata, extracted text, or raw bytes.
-
-    For programmatic clients. Get the IDs from get_mail_detail, which lists a
-    message's attachments.
-
-    Args:
-        message_id: The Graph message ID.
-        attachment_id: The attachment ID (from get_mail_detail).
-        mode: "bytes" (default) returns content_base64 alongside the metadata,
-            for attachments up to 10 MB. "metadata" returns the summary only and
-            fetches no content. "text" returns extracted text (Word, PowerPoint,
-            Excel, PDF) or decoded text, with truncated and, when there is no
-            text, reason ("binary" | "unsupported" | "too_large" | "reference").
-
-    Returns:
-        The attachment summary (id, name, content_type, size, is_inline,
-        content_id, kind, source_url) plus whatever the mode adds. An attached
-        message (kind "item") also carries item_subject, item_from, and
-        item_received in metadata and text modes, and downloads as .eml bytes.
-
-        Permanent errors, which must not be retried: external_sender (the mail
-        sender policy hides this message or the message attached to it),
-        invalid_mode (mode was not
-        one of the three), too_large (with size and limit; bytes mode only,
-        decided from the metadata so nothing is downloaded), reference (with
-        source_url; a link attachment has no bytes), not_connected (with
-        connect_url when one exists). Everything else — a Graph 404 for an
-        unknown message or attachment, throttling, 5xx — propagates as a tool
-        error, which is the client's "transient, retry later" signal.
-    """
-    mode = mode.strip().lower() or "bytes"
-    if mode not in ("metadata", "text", "bytes"):
-        return {"error": "invalid_mode"}
-
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            # Judge the parent message before any attachment metadata or bytes
-            # are read. Inside the try so a malformed policy allowlist
-            # propagates as a tool error rather than being mistaken for a
-            # missing connection.
-            if not await mail_policy.acheck_message(client, message_id, None):
-                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
-
-            meta = await attachment_ops.aget_attachment_metadata(client, message_id, attachment_id)
-            summary = attachment_ops.attachment_summary(meta)
-
-            # An attached message is judged by the same rule; fetched once here
-            # and handed to whichever mode needs it.
-            expanded: dict | None = None
-            if summary["kind"] == "item" and mail_policy.enabled():
-                expanded = await attachment_ops.aget_item_attachment(
-                    client, message_id, attachment_id
-                )
-                if not mail_policy.message_allowed(expanded.get("item") or {}):
-                    return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
-
-            if mode == "metadata":
-                if summary["kind"] != "item":
-                    return summary
-                if expanded is None:
-                    expanded = await attachment_ops.aget_item_attachment(
-                        client, message_id, attachment_id
-                    )
-                return {**summary, **_attachment_item_fields(expanded.get("item") or {})}
-
-            if mode == "text":
-                return await _attachment_json_text(
-                    client, message_id, attachment_id, summary, expanded
-                )
-
-            if summary["kind"] == "reference":
-                return {"error": "reference", "source_url": summary["source_url"]}
-            if summary["size"] > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
-                return {
-                    "error": "too_large",
-                    "size": summary["size"],
-                    "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
-                }
-            data, header_type = await attachment_ops.aget_attachment_bytes(
-                client, message_id, attachment_id
-            )
-    except PermissionError as e:
-        return _not_connected(e)
-
-    if not summary["content_type"]:
-        fallback = "message/rfc822" if summary["kind"] == "item" else ""
-        summary["content_type"] = header_type or fallback
-    return {**summary, "content_base64": base64.b64encode(data).decode("ascii")}
 
 
 @mcp.tool(output_schema=None)
@@ -4040,7 +3988,7 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
     the message as {id, kind, name, content_type, content_url, thumbnail_url,
     card_text}; kind is one of file, image, card, message_reference, other;
     empty when none. Fetch a file's or image's bytes with
-    get_chat_attachment_json. body_content is still the raw Graph body (the
+    get_teams_attachment. body_content is still the raw Graph body (the
     client owns stripping), so a file-only message has an empty or tag-only
     body — render the attachments list.
 
@@ -4064,119 +4012,6 @@ async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "
     return {
         "messages": [_chat_message_json(m) for m in data.get("value", [])],
         "next_cursor": data.get("@odata.nextLink", ""),
-    }
-
-
-@mcp.tool(output_schema=None)
-async def get_chat_attachment_json(
-    chat_id: str, message_id: str, attachment_id: str, thumbnail: str = ""
-) -> dict:
-    """
-    Get one Teams chat attachment's bytes as base64. Returns structured JSON.
-
-    For programmatic clients. The ids come from list_chat_messages_page's
-    attachments list: pass the entry's id for a shared file or an inline image.
-
-    thumbnail: empty (default) returns the full bytes. "small", "medium", or
-    "large" returns the file's driveItem thumbnail instead — files only; inline
-    images are already small and ignore it.
-
-    Returns kind, name, content_type, size, and content_base64, where size is
-    the byte count of what was returned.
-
-    Permanent errors, which must not be retried: invalid_thumbnail (not one of
-    the three size words; checked before any request), not_found (the id is not
-    on the message, or it is a card, a quoted reference, an unknown kind, or a
-    file entry with no URL), access_denied (Graph 403 resolving the file's
-    sharing link), no_thumbnail (the file has no thumbnail at that size),
-    is_folder (the shared item is a folder), too_large (with size and limit —
-    decided from the driveItem size before downloading a file, or from the byte
-    count after fetching an image or a thumbnail), teams_unavailable (403 on
-    the message itself), and not_connected. A Graph 404 for an unknown chat or
-    message, throttling, and 5xx propagate as tool errors instead.
-
-    Args:
-        chat_id: The chat ID (from list_chats_page).
-        message_id: The message ID (from list_chat_messages_page).
-        attachment_id: The attachment entry's id from that message.
-        thumbnail: "", "small", "medium", or "large".
-    """
-    thumb = thumbnail.strip().lower()
-    if thumb and thumb not in _THUMBNAIL_WORDS:
-        return {"error": "invalid_thumbnail"}
-
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            entry, _ = await _find_teams_attachment(
-                client, message_id, attachment_id, chat_id=chat_id
-            )
-            if entry is None or entry["kind"] not in ("file", "image"):
-                return {"error": "not_found"}
-
-            if entry["kind"] == "image":
-                data, header_type = await teams_ops.aget_hosted_content(
-                    client, message_id, entry["id"], chat_id=chat_id
-                )
-                content_type = _mime_from_header(header_type, "application/octet-stream")
-                name = _hosted_image_name(entry["id"], content_type)
-            else:
-                url = entry["content_url"]
-                if not url:
-                    return {"error": "not_found"}
-                try:
-                    if thumb:
-                        found = await files_ops.aget_sharing_link_thumbnail(client, url, size=thumb)
-                        if found is None:
-                            return {"error": "no_thumbnail"}
-                        data, header_type = found
-                        content_type = _mime_from_header(header_type, "image/jpeg")
-                        name = entry["name"]
-                    else:
-                        item = await files_ops.aresolve_sharing_link(client, url)
-                        if "folder" in item:
-                            return {"error": "is_folder"}
-                        size = item.get("size", 0)
-                        if (
-                            isinstance(size, int)
-                            and size > attachment_ops.MAX_JSON_ATTACHMENT_BYTES
-                        ):
-                            return {
-                                "error": "too_large",
-                                "size": size,
-                                "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
-                            }
-                        _, data = await files_ops.aresolve_sharing_link_bytes(
-                            client, url, item=item
-                        )
-                        name = entry["name"] or item.get("name")
-                        content_type = (item.get("file") or {}).get(
-                            "mimeType"
-                        ) or attachment_ops.guess_content_type(name or "")
-                except GraphError as e:
-                    if e.status_code == 403:
-                        return {"error": "access_denied"}
-                    raise
-    except PermissionError as e:
-        return _not_connected(e)
-    except TeamsNotAvailableError:
-        return {"error": "teams_unavailable"}
-
-    # Images and thumbnails announce no size up front, so the cap is enforced
-    # again here on what actually arrived.
-    if len(data) > attachment_ops.MAX_JSON_ATTACHMENT_BYTES:
-        return {
-            "error": "too_large",
-            "size": len(data),
-            "limit": attachment_ops.MAX_JSON_ATTACHMENT_BYTES,
-        }
-
-    return {
-        "kind": entry["kind"],
-        "name": name,
-        "content_type": content_type,
-        "size": len(data),
-        "content_base64": base64.b64encode(data).decode("ascii"),
     }
 
 
@@ -4281,7 +4116,7 @@ async def send_chat_message_json(chat_id: str, text: str, attachments: str = "")
     the message as {id, kind, name, content_type, content_url, thumbnail_url,
     card_text}; kind is one of file, image, card, message_reference, other;
     empty when none. Fetch a file's or image's bytes with
-    get_chat_attachment_json. body_content is still the raw Graph body (the
+    get_teams_attachment. body_content is still the raw Graph body (the
     client owns stripping), so a file-only message has an empty or tag-only
     body — render the attachments list.
 
@@ -4616,6 +4451,40 @@ async def _alias_list_powerbi_workspaces() -> dict:
 async def _alias_list_powerbi_content(workspace_id: str, content_type: str = "all") -> dict:
     """Deprecated alias for list_powerbi."""
     return await list_powerbi(workspace_id=workspace_id, content_type=content_type)
+
+
+@mcp.tool(name="get_email_attachment", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_get_email_attachment(
+    message_id: str, attachment_id: str, mode: str = "text", mailbox: str = "", options: str = ""
+) -> dict:
+    """Deprecated alias for get_mail_attachment."""
+    # "base64" was this name's word for raw bytes; the synonym lives only here.
+    if mode.strip().lower() == "base64":
+        mode = "bytes"
+    return await get_mail_attachment(message_id, attachment_id, mode, mailbox, options)
+
+
+@mcp.tool(name="get_mail_attachment_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_get_mail_attachment_json(
+    message_id: str, attachment_id: str, mode: str = "bytes"
+) -> dict:
+    """Deprecated alias for get_mail_attachment."""
+    return await get_mail_attachment(message_id, attachment_id, mode)
+
+
+@mcp.tool(name="get_chat_attachment_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_get_chat_attachment_json(
+    chat_id: str, message_id: str, attachment_id: str, thumbnail: str = ""
+) -> dict:
+    """Deprecated alias for get_teams_attachment."""
+    # thumbnail was a flat parameter; it now rides the options JSON, and an
+    # empty one means the full bytes rather than a size word.
+    thumb = thumbnail.strip().lower()
+    mode = "thumbnail" if thumb else "bytes"
+    options = json.dumps({"thumbnail": thumb}) if thumb else ""
+    return await get_teams_attachment(
+        message_id, attachment_id, chat_id=chat_id, mode=mode, options=options
+    )
 
 
 if __name__ == "__main__":
