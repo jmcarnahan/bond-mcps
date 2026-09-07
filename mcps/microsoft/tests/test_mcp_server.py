@@ -4439,6 +4439,304 @@ class TestMCPInspectFile:
                 await _call(mcp_server, "inspect_file", {"item_id": "nope"})
 
 
+class TestMCPInspectFileModes:
+    """inspect_file bytes and thumbnail: a preview for a bare sharing link."""
+
+    # An item Graph reported no file facet and no size for — the shape the
+    # content_type fill and the arrived-bytes cap are there for.
+    FACETLESS_ITEM = {
+        "id": "file-id-pdf",
+        "name": "contract.pdf",
+        "lastModifiedDateTime": "2025-12-15T10:30:00Z",
+        "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-pdf",
+    }
+
+    @respx.mock
+    async def test_bytes_from_a_sharing_url(self, mcp_server):
+        respx.get(TEAMS_SHARE_BASE).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_TEXT_FILE)
+        )
+        respx.get(TEAMS_SHARE_CONTENT_URL).mock(
+            return_value=httpx.Response(200, content=b"# notes")
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"url": TEAMS_FILE_URL, "mode": "bytes"}
+            )
+
+        data = _structured(result)
+        assert base64.b64decode(data["content_base64"]) == b"# notes"
+        assert data["item_id"] == "shared-file-002"
+        assert data["content_type"] == "text/markdown"
+        assert set(data) == {
+            "item_id",
+            "name",
+            "size",
+            "content_type",
+            "web_url",
+            "modified",
+            "is_folder",
+            "content_base64",
+        }
+        share_path = httpx.URL(TEAMS_SHARE_BASE).path
+        assert _graph_trail() == [("GET", share_path), ("GET", f"{share_path}/content")]
+
+    @respx.mock
+    async def test_bytes_by_item_id(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/content").mock(
+            return_value=httpx.Response(200, content=b"col1,col2\n")
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": "file-id-001", "mode": "bytes"}
+            )
+
+        assert base64.b64decode(_structured(result)["content_base64"]) == b"col1,col2\n"
+        assert _graph_trail() == [
+            ("GET", "/v1.0/me/drive/items/file-id-001"),
+            ("GET", "/v1.0/me/drive/items/file-id-001/content"),
+        ]
+
+    @respx.mock
+    async def test_a_missing_content_type_is_guessed_from_the_name(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-pdf").mock(
+            return_value=httpx.Response(200, json=self.FACETLESS_ITEM)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-pdf/content").mock(
+            return_value=httpx.Response(200, content=b"%PDF-1.7")
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": "file-id-pdf", "mode": "bytes"}
+            )
+
+        assert _structured(result)["content_type"] == "application/pdf"
+
+    @respx.mock
+    async def test_thumbnail_from_a_sharing_url(self, mcp_server):
+        respx.get(TEAMS_SHARE_BASE).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SHARED_TEXT_FILE)
+        )
+        respx.get(TEAMS_SHARE_THUMB_URL).mock(
+            return_value=httpx.Response(
+                200, content=PNG_BYTES, headers={"Content-Type": "image/png"}
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"url": TEAMS_FILE_URL, "mode": "thumbnail"}
+            )
+
+        data = _structured(result)
+        assert base64.b64decode(data["content_base64"]) == PNG_BYTES
+        assert data["thumbnail_content_type"] == "image/png"
+        # The file's own type still describes the file, not its picture.
+        assert data["content_type"] == "text/markdown"
+
+    @respx.mock
+    async def test_thumbnail_by_item_id_takes_its_size_from_options(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        route = respx.get(
+            f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/thumbnails/0/large/content"
+        ).mock(return_value=httpx.Response(200, content=PNG_BYTES, headers={"Content-Type": ""}))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {
+                    "item_id": "file-id-001",
+                    "mode": "thumbnail",
+                    "options": json.dumps({"thumbnail": "large"}),
+                },
+            )
+
+        assert route.called
+        data = _structured(result)
+        assert base64.b64decode(data["content_base64"]) == PNG_BYTES
+        # Graph named no type for the picture, so the JPEG default stands in.
+        assert data["thumbnail_content_type"] == "image/jpeg"
+
+    @respx.mock
+    async def test_a_file_graph_renders_no_thumbnail_for(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/thumbnails/0/medium/content").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": "file-id-001", "mode": "thumbnail"}
+            )
+
+        assert _structured(result) == {"error": "no_thumbnail"}
+
+    @respx.mock
+    async def test_a_folder_has_no_bytes(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/folder-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FOLDER)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": "folder-id-001", "mode": "bytes"}
+            )
+
+        assert _structured(result) == {"error": "is_folder"}
+
+    @respx.mock
+    async def test_too_large_is_decided_from_the_metadata(self, mcp_server):
+        respx.get(TEAMS_SHARE_BASE).mock(
+            return_value=httpx.Response(200, json={**SAMPLE_SHARED_TEXT_FILE, "size": 20_000_000})
+        )
+        content = respx.get(TEAMS_SHARE_CONTENT_URL).mock(
+            return_value=httpx.Response(200, content=b"never")
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"url": TEAMS_FILE_URL, "mode": "bytes"}
+            )
+
+        assert _structured(result) == {
+            "error": "too_large",
+            "size": 20_000_000,
+            "limit": 10_000_000,
+        }
+        assert not content.called
+
+    @respx.mock
+    async def test_bytes_over_the_cap_are_refused_on_arrival(self, mcp_server, monkeypatch):
+        """An item that announced no size can still overshoot the cap."""
+        from ms_graph import attachments as attachment_ops
+
+        monkeypatch.setattr(attachment_ops, "MAX_JSON_ATTACHMENT_BYTES", 4)
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-pdf").mock(
+            return_value=httpx.Response(200, json=self.FACETLESS_ITEM)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-pdf/content").mock(
+            return_value=httpx.Response(200, content=b"hello world")
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": "file-id-pdf", "mode": "bytes"}
+            )
+
+        assert _structured(result) == {"error": "too_large", "size": 11, "limit": 4}
+
+    @respx.mock
+    async def test_an_unknown_mode_is_refused_before_any_request(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": "file-id-001", "mode": "preview"}
+            )
+
+        data = _structured(result)
+        assert data["error"] == "invalid_mode"
+        assert "preview" in data["reason"]
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_a_bad_thumbnail_size_is_refused_before_any_request(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {
+                    "item_id": "file-id-001",
+                    "mode": "thumbnail",
+                    "options": json.dumps({"thumbnail": "huge"}),
+                },
+            )
+
+        data = _structured(result)
+        assert data["error"] == "invalid_thumbnail"
+        assert "huge" in data["reason"]
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_unparseable_options_are_refused_before_any_request(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {"item_id": "file-id-001", "mode": "bytes", "options": "not json"},
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_an_explicit_mode_wins_over_read_content(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/content").mock(
+            return_value=httpx.Response(200, content=b"col1,col2\n")
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {"item_id": "file-id-001", "read_content": "true", "mode": "bytes"},
+            )
+
+        data = _structured(result)
+        assert "text" not in data
+        assert base64.b64decode(data["content_base64"]) == b"col1,col2\n"
+
+    @respx.mock
+    async def test_mode_metadata_downloads_nothing_even_with_read_content(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {"item_id": "file-id-001", "read_content": "true", "mode": "metadata"},
+            )
+
+        assert "text" not in _structured(result)
+        assert _graph_trail() == [("GET", "/v1.0/me/drive/items/file-id-001")]
+
+    @respx.mock
+    async def test_an_empty_mode_still_follows_read_content(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {"item_id": "file-id-001", "read_content": "false", "mode": ""},
+            )
+
+        assert "text" not in _structured(result)
+        assert _graph_trail() == [("GET", "/v1.0/me/drive/items/file-id-001")]
+
+    @respx.mock
+    async def test_the_json_alias_still_answers_the_legacy_shape(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "inspect_file_json", {"item_id": "file-id-001"})
+
+        assert _structured(result) == {
+            "item_id": "file-id-001",
+            "name": "report.csv",
+            "size": 1024,
+            "content_type": "text/csv",
+            "web_url": SAMPLE_DRIVE_ITEM_FILE["webUrl"],
+            "modified": "2025-12-15T10:30:00Z",
+            "is_folder": False,
+        }
+
+
 class TestMCPUploadTool:
     """manage_file(action="upload") — the create-or-overwrite branch."""
 

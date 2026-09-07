@@ -1735,6 +1735,97 @@ class TestSharingLinkThumbnail:
                 files.get_sharing_link_thumbnail(client, SAMPLE_SHARING_URL, size="tiny")
 
 
+class TestDriveItemBytes:
+    """The same download, for an item named by id instead of by sharing link."""
+
+    @respx.mock
+    async def test_returns_the_raw_bytes(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/content").mock(
+            return_value=httpx.Response(200, content=b"PPTXBYTES")
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await files.aget_drive_item_bytes(client, "file-id-001")
+
+        assert data == b"PPTXBYTES"
+        assert route.called
+
+    @respx.mock
+    async def test_site_id_reads_the_site_drive(self):
+        route = respx.get(f"{GRAPH_BASE_URL}/sites/site-001/drive/items/file-id-001/content").mock(
+            return_value=httpx.Response(200, content=b"CSV")
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await files.aget_drive_item_bytes(client, "file-id-001", site_id="site-001")
+
+        assert data == b"CSV"
+        assert route.called
+
+
+class TestDriveItemThumbnail:
+    """Thumbnails by item id answer with bytes plus a type, or nothing at all."""
+
+    @respx.mock
+    async def test_returns_bytes_and_type(self):
+        route = respx.get(
+            f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/thumbnails/0/medium/content"
+        ).mock(
+            return_value=httpx.Response(
+                200, content=b"THUMB", headers={"Content-Type": "image/jpeg"}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await files.aget_drive_item_thumbnail(client, "file-id-001")
+
+        assert result == (b"THUMB", "image/jpeg")
+        assert route.called
+
+    @respx.mock
+    async def test_site_id_reads_the_site_drive(self):
+        route = respx.get(
+            f"{GRAPH_BASE_URL}/sites/site-001/drive/items/file-id-001/thumbnails/0/large/content"
+        ).mock(
+            return_value=httpx.Response(
+                200, content=b"THUMB", headers={"Content-Type": "image/png"}
+            )
+        )
+        async with AsyncGraphClient("tok") as client:
+            result = await files.aget_drive_item_thumbnail(
+                client, "file-id-001", size="large", site_id="site-001"
+            )
+
+        assert result == (b"THUMB", "image/png")
+        assert route.called
+
+    @respx.mock
+    async def test_404_means_no_thumbnail(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/thumbnails/0/small/content").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert (
+                await files.aget_drive_item_thumbnail(client, "file-id-001", size="small") is None
+            )
+
+    @respx.mock
+    async def test_other_errors_propagate(self):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001/thumbnails/0/medium/content").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await files.aget_drive_item_thumbnail(client, "file-id-001")
+
+        assert exc.value.status_code == 403
+
+    @respx.mock
+    async def test_bad_size_is_refused_before_any_request(self):
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(ValueError, match="small"):
+                await files.aget_drive_item_thumbnail(client, "file-id-001", size="huge")
+
+        assert not respx.calls
+
+
 class TestUploadPathEncoding:
     """Names from callers may carry '#', '?' or spaces; the path form must survive them."""
 

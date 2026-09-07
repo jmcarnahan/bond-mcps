@@ -1298,3 +1298,30 @@ async def aget_sharing_link_thumbnail(
         if e.status_code == 404:
             return None
         raise
+
+
+async def aget_drive_item_bytes(client: AsyncGraphClient, item_id: str, site_id: str = "") -> bytes:
+    """Download a drive item's raw bytes by id (async).
+
+    The counterpart to resolve_sharing_link_bytes for items named by id: no
+    folder or size guard runs here, so the caller decides from the driveItem's
+    metadata whether the download is worth making.
+    """
+    base = _drive_base(site_id or None)
+    return await client.get_bytes(f"{base}/items/{item_id}/content")
+
+
+async def aget_drive_item_thumbnail(
+    client: AsyncGraphClient, item_id: str, size: str = "medium", site_id: str = ""
+) -> tuple[bytes, str] | None:
+    """Fetch a thumbnail for a drive item by id (async). None when there is none."""
+    _check_thumbnail_size(size)
+    base = _drive_base(site_id or None)
+    try:
+        return await client.get_bytes_with_type(
+            f"{base}/items/{item_id}/thumbnails/0/{size}/content"
+        )
+    except GraphError as e:
+        if e.status_code == 404:
+            return None
+        raise
