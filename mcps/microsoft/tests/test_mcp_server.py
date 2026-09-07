@@ -33,6 +33,7 @@ from .conftest import (
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
     SAMPLE_CHAT_CREATED,
+    SAMPLE_CHAT_GROUP,
     SAMPLE_CHAT_MEMBERS_RESPONSE,
     SAMPLE_CHAT_MESSAGE_FULL,
     SAMPLE_CHAT_MESSAGE_SENT,
@@ -43,6 +44,7 @@ from .conftest import (
     SAMPLE_CHAT_MESSAGES_PAGE,
     SAMPLE_CHAT_MESSAGES_PAGE_WITH_ATTACHMENTS,
     SAMPLE_CHAT_MESSAGES_RESPONSE,
+    SAMPLE_CHAT_ONEONONE,
     SAMPLE_CHATS_PAGE,
     SAMPLE_CHATS_PAGE_NEXT_LINK,
     SAMPLE_CHATS_RESPONSE,
@@ -2071,206 +2073,6 @@ class TestMCPTeamsTools:
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
-    async def test_list_chats(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHATS_RESPONSE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_chats", {})
-
-        text = _get_text(result)
-        assert "3 chat(s)" in text
-        assert "Alice Smith" in text
-        assert "unread|type|name" in text
-        assert "False|oneOnOne" in text
-        assert "True|group" in text
-        assert "True|meeting" in text
-
-    @respx.mock
-    async def test_list_chats_unread_edge_cases(self, mcp_server):
-        """Verifies unread column: no messages = not unread, null read timestamp = unread."""
-        chat_no_messages = {
-            "id": "chat-empty-001",
-            "chatType": "oneOnOne",
-            "topic": None,
-            "members": [{"displayName": "Alice"}],
-            "lastMessagePreview": None,
-            "viewpoint": None,
-        }
-        chat_null_read = {
-            "id": "chat-null-read-001",
-            "chatType": "group",
-            "topic": "Test",
-            "members": [{"displayName": "Bob"}],
-            "lastMessagePreview": {
-                "createdDateTime": "2025-12-15T10:00:00Z",
-                "body": {"content": "hello"},
-                "from": {"user": {"displayName": "Bob"}},
-            },
-            "viewpoint": {"lastMessageReadDateTime": None},
-        }
-        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
-            return_value=httpx.Response(200, json={"value": [chat_no_messages, chat_null_read]})
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_chats", {})
-
-        text = _get_text(result)
-        assert "False|oneOnOne" in text
-        assert "True|group" in text
-
-    @respx.mock
-    async def test_list_chats_empty(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
-            return_value=httpx.Response(200, json={"value": []})
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_chats", {})
-
-        assert "No chats found" in _get_text(result)
-
-    async def test_list_chats_invalid_type(self, mcp_server):
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_chats", {"chat_type": "invalid"})
-
-        assert "Invalid chat_type" in _get_text(result)
-
-    @respx.mock
-    async def test_read_teams_messages_channel(self, mcp_server):
-        """team_id + channel_id → reads channel messages."""
-        team_id = "team-id-001"
-        channel_id = "channel-id-001"
-        respx.get(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHANNEL_MESSAGES_RESPONSE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_teams_messages",
-                    {"team_id": team_id, "channel_id": channel_id, "since": "2025-01-01"},
-                )
-
-        text = _get_text(result)
-        assert "2 message(s)" in text
-        assert channel_id in text
-
-    @respx.mock
-    async def test_read_teams_messages_chat(self, mcp_server):
-        """chat_id → reads chat messages."""
-        chat_id = "chat-1on1-001"
-        respx.get(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_RESPONSE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_teams_messages",
-                    {"chat_id": chat_id, "since": "2025-01-01"},
-                )
-
-        text = _get_text(result)
-        assert "1 message(s)" in text
-        assert chat_id in text
-
-    @respx.mock
-    async def test_read_teams_messages_chat_takes_priority(self, mcp_server):
-        """When both chat_id and team_id+channel_id are set, chat_id takes priority."""
-        chat_id = "chat-1on1-001"
-        respx.get(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_RESPONSE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_teams_messages",
-                    {
-                        "chat_id": chat_id,
-                        "team_id": "team-id-001",
-                        "channel_id": "channel-id-001",
-                        "since": "2025-01-01",
-                    },
-                )
-
-        text = _get_text(result)
-        assert chat_id in text
-
-    async def test_read_teams_messages_no_ids(self, mcp_server):
-        """No IDs provided → returns helpful error."""
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("read_teams_messages", {})
-
-        assert "Provide either chat_id" in _get_text(result)
-
-    async def test_read_teams_messages_only_team_id(self, mcp_server):
-        """Only team_id (no channel_id) → returns helpful error."""
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("read_teams_messages", {"team_id": "t1"})
-
-        assert "Provide either chat_id" in _get_text(result)
-
-    @respx.mock
-    async def test_read_teams_messages_max_content_length(self, mcp_server):
-        """max_content_length option truncates message bodies."""
-        chat_id = "chat-1on1-001"
-        long_msg = {
-            "id": "msg-long-001",
-            "messageType": "message",
-            "createdDateTime": "2025-12-15T12:00:00Z",
-            "from": {"user": {"displayName": "Tim"}, "application": None},
-            "body": {"contentType": "text", "content": "SELECT " + "x" * 2000},
-            "attachments": [],
-        }
-        respx.get(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
-            return_value=httpx.Response(200, json={"value": [long_msg]})
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result_full = await client.call_tool(
-                    "read_teams_messages",
-                    {"chat_id": chat_id, "since": "2025-01-01"},
-                )
-                result_truncated = await client.call_tool(
-                    "read_teams_messages",
-                    {
-                        "chat_id": chat_id,
-                        "since": "2025-01-01",
-                        "options": '{"max_content_length": 50}',
-                    },
-                )
-
-        full_text = _get_text(result_full)
-        truncated_text = _get_text(result_truncated)
-        assert "x" * 100 in full_text
-        assert "..." in truncated_text
-        assert "x" * 100 not in truncated_text
-
-    @respx.mock
     async def test_search_teams_messages_chat_hit(self, mcp_server):
         """A chat hit fills the seven columns with a chat: conversation label."""
         respx.post(TEAMS_SEARCH_URL).mock(
@@ -2658,191 +2460,6 @@ class TestMCPTeamsTools:
         assert "z" * 200 not in truncated_text
 
     @respx.mock
-    async def test_send_teams_message_to_channel(self, mcp_server):
-        """team_id + channel_id → sends to channel."""
-        team_id = "team-id-001"
-        channel_id = "channel-id-001"
-        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_teams_message",
-                    {"message": "Hello!", "team_id": team_id, "channel_id": channel_id},
-                )
-
-        text = _get_text(result)
-        assert "channel" in text.lower()
-        assert route.called
-
-    @respx.mock
-    async def test_send_teams_message_to_chat(self, mcp_server):
-        """chat_id → sends to chat."""
-        chat_id = "chat-1on1-001"
-        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_teams_message",
-                    {"message": "Hello!", "chat_id": chat_id},
-                )
-
-        text = _get_text(result)
-        assert "chat" in text.lower()
-        assert route.called
-
-    async def test_send_teams_message_no_ids(self, mcp_server):
-        """No IDs → helpful error, no API call made."""
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("send_teams_message", {"message": "Hello!"})
-
-        assert "Provide either chat_id" in _get_text(result)
-
-    @respx.mock
-    async def test_send_teams_message_newlines_converted(self, mcp_server):
-        """Auto content_type converts newlines to <br> in plain text."""
-        chat_id = "chat-1on1-001"
-        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_teams_message",
-                    {"message": "Hello\nWorld", "chat_id": chat_id},
-                )
-
-        text = _get_text(result)
-        assert "chat" in text.lower()
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["body"]["contentType"] == "html"
-        assert payload["body"]["content"] == "Hello<br>World"
-
-    @respx.mock
-    async def test_send_teams_message_html_hyperlink(self, mcp_server):
-        """HTML hyperlinks pass through in auto mode."""
-        chat_id = "chat-1on1-001"
-        html_msg = '<a href="https://example.com">Click here</a>'
-        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_teams_message",
-                    {"message": html_msg, "chat_id": chat_id},
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["body"]["contentType"] == "html"
-        assert payload["body"]["content"] == html_msg
-
-    @respx.mock
-    async def test_send_teams_message_with_user_mention(self, mcp_server):
-        """Mentions option builds Graph API mentions payload."""
-        team_id = "team-id-001"
-        channel_id = "channel-id-001"
-        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_teams_message",
-                    {
-                        "message": "Hey check this out",
-                        "team_id": team_id,
-                        "channel_id": channel_id,
-                        "options": '{"mentions": [{"user_id": "aad-123", "name": "Alice"}]}',
-                    },
-                )
-
-        text = _get_text(result)
-        assert "channel" in text.lower()
-        payload = json.loads(route.calls[0].request.content)
-        assert "mentions" in payload
-        assert len(payload["mentions"]) == 1
-        assert payload["mentions"][0]["mentionText"] == "Alice"
-        assert payload["mentions"][0]["mentioned"]["user"]["id"] == "aad-123"
-        body_content = payload["body"]["content"]
-        assert '<at id="0">Alice</at>' in body_content
-        assert "Hey check this out" in body_content
-
-    @respx.mock
-    async def test_send_teams_message_mention_everyone(self, mcp_server):
-        """mention_everyone builds channel-wide mention."""
-        team_id = "team-id-001"
-        channel_id = "channel-id-001"
-        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_teams_message",
-                    {
-                        "message": "Important update",
-                        "team_id": team_id,
-                        "channel_id": channel_id,
-                        "options": '{"mention_everyone": true}',
-                    },
-                )
-
-        text = _get_text(result)
-        assert "channel" in text.lower()
-        payload = json.loads(route.calls[0].request.content)
-        assert "mentions" in payload
-        assert payload["mentions"][0]["mentionText"] == "Everyone"
-        assert (
-            payload["mentions"][0]["mentioned"]["conversation"]["conversationIdentityType"]
-            == "channel"
-        )
-        body_content = payload["body"]["content"]
-        assert '<at id="0">Everyone</at>' in body_content
-        assert "Important update" in body_content
-
-    @respx.mock
-    async def test_send_teams_message_content_type_in_options(self, mcp_server):
-        """content_type in options works like the old positional param."""
-        chat_id = "chat-1on1-001"
-        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_SENT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "send_teams_message",
-                    {
-                        "message": "plain text only",
-                        "chat_id": chat_id,
-                        "options": '{"content_type": "text"}',
-                    },
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["body"]["contentType"] == "text"
-
-    @respx.mock
     async def test_get_teams_activity_quiet_window(self, mcp_server):
         # Wire up all the calls the activity scanner makes
         respx.get(f"{GRAPH_BASE_URL}/me/joinedTeams").mock(
@@ -2920,113 +2537,608 @@ class TestMCPTeamsTools:
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
+
+# The row list_chats builds from each chats fixture.
+ONEONONE_ROW = {
+    "unread": False,
+    "chat_type": "oneOnOne",
+    "topic": None,
+    "members": "Alice Smith, Bob Jones",
+    "last_sender": "Alice Smith",
+    "last_preview": "Sounds good!",
+    "last_preview_at": "2025-12-15T14:00:00Z",
+    "last_read_at": "2025-12-15T14:00:00Z",
+    "id": "chat-1on1-001",
+}
+GROUP_ROW = {
+    "unread": True,
+    "chat_type": "group",
+    "topic": "Project Standup",
+    "members": "Alice Smith, Bob Jones, Charlie Brown",
+    "last_sender": "Bob Jones",
+    "last_preview": "Meeting at 3pm",
+    "last_preview_at": "2025-12-15T13:00:00Z",
+    "last_read_at": "2025-12-15T12:00:00Z",
+    "id": "chat-group-001",
+}
+MEETING_ROW = {
+    "unread": True,
+    "chat_type": "meeting",
+    "topic": "Sprint Review",
+    "members": "Alice Smith, Bob Jones",
+    "last_sender": "Alice Smith",
+    "last_preview": "Notes attached",
+    "last_preview_at": "2025-12-15T10:00:00Z",
+    "last_read_at": None,
+    "id": "chat-meeting-001",
+}
+
+
+class TestMCPListChats:
+    """list_chats: the merged listing, its paging, and mark_as_read."""
+
     @respx.mock
-    async def test_list_chats_with_mark_as_read(self, mcp_server):
-        """mark_as_read option triggers POST markChatReadForUser for each ID."""
-        import base64
+    async def test_rows_carry_every_column(self, mcp_server):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_RESPONSE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_chats", {})
 
-        payload_data = {"oid": "user-obj-id", "tid": "tenant-id-123"}
-        header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode()
-        payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
-        sig = base64.urlsafe_b64encode(b"s").rstrip(b"=").decode()
-        fake_token = f"{header}.{payload}.{sig}"
+        assert _structured(result) == {
+            "chats": [ONEONONE_ROW, GROUP_ROW, MEETING_ROW],
+            "count": 3,
+            "next_cursor": "",
+        }
 
-        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
+    @respx.mock
+    async def test_unread_edge_cases(self, mcp_server):
+        """No messages is not unread; a null read timestamp is."""
+        chat_no_messages = {
+            "id": "chat-empty-001",
+            "chatType": "oneOnOne",
+            "topic": None,
+            "members": [{"displayName": "Alice"}],
+            "lastMessagePreview": None,
+            "viewpoint": None,
+        }
+        chat_null_read = {
+            "id": "chat-null-read-001",
+            "chatType": "group",
+            "topic": "Test",
+            "members": [{"displayName": "Bob"}],
+            "lastMessagePreview": {
+                "createdDateTime": "2025-12-15T10:00:00Z",
+                "body": {"content": "hello"},
+                "from": {"user": {"displayName": "Bob"}},
+            },
+            "viewpoint": {"lastMessageReadDateTime": None},
+        }
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json={"value": [chat_no_messages, chat_null_read]})
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_chats", {})
+
+        empty_chat, unread_chat = _structured(result)["chats"]
+        assert empty_chat["unread"] is False
+        assert empty_chat["last_preview"] is None
+        assert empty_chat["last_preview_at"] is None
+        assert unread_chat["unread"] is True
+
+    @respx.mock
+    async def test_empty_listing(self, mcp_server):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_chats", {})
+
+        assert _structured(result) == {"chats": [], "count": 0, "next_cursor": ""}
+
+    @respx.mock
+    async def test_invalid_chat_type_makes_no_request(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "list_chats", {"chat_type": "invalid"})
+
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": (
+                "Invalid chat_type: invalid. "
+                "Must be one of: oneOnOne, group, meeting (or empty for all)."
+            ),
+        }
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_a_bigger_top_pages_internally(self, mcp_server):
+        """Graph caps /me/chats at 50 a page, so top=60 follows the nextLink."""
+        first = {"@odata.nextLink": SAMPLE_CHATS_PAGE_NEXT_LINK, "value": [SAMPLE_CHAT_ONEONONE]}
+        # The exact cursor route is registered first so the prefix route below
+        # cannot shadow it — the cursor is itself a /me/chats URL.
+        respx.get(SAMPLE_CHATS_PAGE_NEXT_LINK).mock(
+            return_value=httpx.Response(200, json={"value": [SAMPLE_CHAT_GROUP]})
+        )
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats?").mock(
+            return_value=httpx.Response(200, json=first)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_chats", {"top": 60})
+
+        assert len(_graph_trail()) == 2
+        assert _structured(result) == {
+            "chats": [ONEONONE_ROW, GROUP_ROW],
+            "count": 2,
+            "next_cursor": "",
+        }
+
+    @respx.mock
+    async def test_a_cursor_is_fetched_verbatim_and_only_once(self, mcp_server):
+        route = respx.get(SAMPLE_CHATS_PAGE_NEXT_LINK).mock(
+            return_value=httpx.Response(
+                200,
+                json={"@odata.nextLink": SAMPLE_CHATS_PAGE_NEXT_LINK, "value": [SAMPLE_CHAT_GROUP]},
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "list_chats", {"cursor": SAMPLE_CHATS_PAGE_NEXT_LINK, "top": 60}
+            )
+
+        assert route.call_count == 1
+        assert str(route.calls[0].request.url) == SAMPLE_CHATS_PAGE_NEXT_LINK
+        assert _structured(result) == {
+            "chats": [GROUP_ROW],
+            "count": 1,
+            "next_cursor": SAMPLE_CHATS_PAGE_NEXT_LINK,
+        }
+
+    @respx.mock
+    async def test_mark_as_read_acknowledges_each_id(self, mcp_server):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
             return_value=httpx.Response(200, json=SAMPLE_CHATS_RESPONSE)
         )
         mark_route = respx.post(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/markChatReadForUser").mock(
             return_value=httpx.Response(204)
         )
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(
+                mcp_server, "list_chats", {"options": '{"mark_as_read": ["chat-1on1-001"]}'}
+            )
 
-        with _mock_token(fake_token):
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "list_chats",
-                    {"options": '{"mark_as_read": ["chat-1on1-001"]}'},
-                )
-
-        text = _get_text(result)
-        assert "3 chat(s)" in text
-        assert mark_route.called
-        sent_payload = json.loads(mark_route.calls[0].request.content)
-        assert sent_payload == {"user": {"id": "user-obj-id", "tenantId": "tenant-id-123"}}
-        assert "1 chat(s) marked as read" in text
+        assert json.loads(mark_route.calls[0].request.content) == {
+            "user": {"id": "user-obj-id", "tenantId": "tenant-id-123"}
+        }
+        data = _structured(result)
+        assert data["count"] == 3
+        assert data["marked_as_read"] == 1
 
     @respx.mock
-    async def test_list_chats_mark_as_read_rejects_non_array(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me/chats").mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHATS_RESPONSE)
+    async def test_mark_as_read_rejects_a_non_array(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "list_chats", {"options": '{"mark_as_read": true}'})
+
+        assert _structured(result) == {
+            "error": "invalid_options",
+            "reason": "Option 'mark_as_read' must be a JSON array of chat IDs.",
+        }
+        assert _graph_trail() == []
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "list_chats", {})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPReadTeamsMessages:
+    """read_teams_messages: both modes, and every refusal."""
+
+    @respx.mock
+    async def test_channel_messages(self, mcp_server):
+        team_id = "team-id-001"
+        channel_id = "channel-id-001"
+        respx.get(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHANNEL_MESSAGES_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {"team_id": team_id, "channel_id": channel_id, "since": "2025-01-01"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "list_chats",
-                    {"options": '{"mark_as_read": true}'},
-                )
-
-        assert "must be a JSON array" in _get_text(result)
+        data = _structured(result)
+        assert data["count"] == 2
+        assert data["next_cursor"] == ""
+        assert data["messages"][0]["id"] == "msg-user-001"
+        assert data["messages"][0]["from_user_display"] == "Alice Smith"
 
     @respx.mock
-    async def test_read_teams_messages_with_mark_as_read(self, mcp_server):
-        """mark_as_read: true marks the chat as read after reading messages."""
-        import base64
-
-        payload_data = {"oid": "user-obj-id", "tid": "tenant-id-123"}
-        header = base64.urlsafe_b64encode(b'{"alg":"RS256"}').rstrip(b"=").decode()
-        payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
-        sig = base64.urlsafe_b64encode(b"s").rstrip(b"=").decode()
-        fake_token = f"{header}.{payload}.{sig}"
-
+    async def test_chat_messages(self, mcp_server):
         chat_id = "chat-1on1-001"
-        respx.get(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_RESPONSE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "read_teams_messages", {"chat_id": chat_id, "since": "2025-01-01"}
+            )
+
+        assert _structured(result)["count"] == 1
+        assert _graph_trail() == [("GET", f"/v1.0/chats/{chat_id}/messages")]
+
+    @respx.mock
+    async def test_chat_beats_channel_when_both_are_given(self, mcp_server):
+        chat_id = "chat-1on1-001"
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_RESPONSE)
+        )
+        with _mock_token():
+            await _call(
+                mcp_server,
+                "read_teams_messages",
+                {
+                    "chat_id": chat_id,
+                    "team_id": "team-id-001",
+                    "channel_id": "channel-id-001",
+                    "since": "2025-01-01",
+                },
+            )
+
+        assert _graph_trail() == [("GET", f"/v1.0/chats/{chat_id}/messages")]
+
+    @respx.mock
+    @pytest.mark.parametrize("args", [{}, {"team_id": "t1"}])
+    async def test_no_usable_scope(self, mcp_server, args):
+        with _mock_token():
+            result = await _call(mcp_server, "read_teams_messages", args)
+
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "Provide either chat_id, or both team_id and channel_id.",
+        }
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_invalid_since(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server, "read_teams_messages", {"chat_id": "c", "since": "last tuesday"}
+            )
+
+        assert _structured(result) == {
+            "error": "invalid_date",
+            "reason": "Invalid since format: 'last tuesday'. Use YYYY-MM-DD or ISO datetime.",
+        }
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_max_content_length_leaves_the_body_raw(self, mcp_server):
+        """It is a rendering hint: the canonical body is never truncated."""
+        chat_id = "chat-1on1-001"
+        long_msg = {
+            "id": "msg-long-001",
+            "messageType": "message",
+            "createdDateTime": "2025-12-15T12:00:00Z",
+            "from": {"user": {"displayName": "Tim"}, "application": None},
+            "body": {"contentType": "text", "content": "SELECT " + "x" * 2000},
+            "attachments": [],
+        }
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(200, json={"value": [long_msg]})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {
+                    "chat_id": chat_id,
+                    "since": "2025-01-01",
+                    "options": '{"max_content_length": 50}',
+                },
+            )
+
+        data = _structured(result)
+        assert data["messages"][0]["body_content"] == "SELECT " + "x" * 2000
+        assert data["max_content_length"] == 50
+
+    @respx.mock
+    async def test_page_mode_makes_one_request_filtered_on_last_modified(self, mcp_server):
+        chat_id = "chat-1on1-001"
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "@odata.nextLink": SAMPLE_CHATS_PAGE_NEXT_LINK,
+                    "value": SAMPLE_CHAT_MESSAGES_PAGE["value"],
+                },
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {
+                    "chat_id": chat_id,
+                    "since": "2026-01-05T00:00:00Z",
+                    "options": '{"page": true}',
+                },
+            )
+
+        assert route.call_count == 1
+        query = parse_qs(urlparse(str(route.calls[0].request.url)).query)
+        assert query["$filter"][0].split(" ")[0] == "lastModifiedDateTime"
+        assert query["$orderby"][0].split(" ")[0] == "lastModifiedDateTime"
+        assert _structured(result)["next_cursor"] == SAMPLE_CHATS_PAGE_NEXT_LINK
+
+    @respx.mock
+    async def test_paging_a_channel_is_refused(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {
+                    "team_id": "team-id-001",
+                    "channel_id": "channel-id-001",
+                    "options": '{"page": true}',
+                },
+            )
+
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "Cursor paging is only supported for chats.",
+        }
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_mark_as_read_marks_the_chat(self, mcp_server):
+        chat_id = "chat-1on1-001"
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_RESPONSE)
         )
         mark_route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/markChatReadForUser").mock(
             return_value=httpx.Response(204)
         )
+        with _mock_token(IDENTITY_TOKEN):
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {
+                    "chat_id": chat_id,
+                    "since": "2025-01-01",
+                    "options": '{"mark_as_read": true}',
+                },
+            )
 
-        with _mock_token(fake_token):
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_teams_messages",
-                    {
-                        "chat_id": chat_id,
-                        "since": "2025-01-01",
-                        "options": '{"mark_as_read": true}',
-                    },
-                )
-
-        text = _get_text(result)
-        assert "1 message(s)" in text
-        assert mark_route.called
-        sent_payload = json.loads(mark_route.calls[0].request.content)
-        assert sent_payload == {"user": {"id": "user-obj-id", "tenantId": "tenant-id-123"}}
-        assert "marked as read" in text.lower()
+        assert _graph_trail() == [
+            ("GET", f"/v1.0/chats/{chat_id}/messages"),
+            ("POST", f"/v1.0/chats/{chat_id}/markChatReadForUser"),
+        ]
+        assert json.loads(mark_route.calls[0].request.content) == {
+            "user": {"id": "user-obj-id", "tenantId": "tenant-id-123"}
+        }
+        assert _structured(result)["marked_as_read"] is True
 
     @respx.mock
-    async def test_read_teams_messages_mark_as_read_channel_rejected(self, mcp_server):
-        """mark_as_read with team_id+channel_id returns error."""
+    async def test_mark_as_read_on_a_channel_is_refused(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {
+                    "team_id": "team-id-001",
+                    "channel_id": "channel-id-001",
+                    "since": "2025-01-01",
+                    "options": '{"mark_as_read": true}',
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_teams_messages",
-                    {
-                        "team_id": "team-id-001",
-                        "channel_id": "channel-id-001",
-                        "since": "2025-01-01",
-                        "options": '{"mark_as_read": true}',
-                    },
-                )
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "Option 'mark_as_read' is only supported for chats, not channels.",
+        }
+        assert _graph_trail() == []
 
-        assert "only supported for chats" in _get_text(result)
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "read_teams_messages", {"chat_id": "c"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPSendTeamsMessage:
+    """send_teams_message: the request shapes, and the dict that comes back."""
+
+    @respx.mock
+    async def test_sends_to_a_channel(self, mcp_server):
+        team_id = "team-id-001"
+        channel_id = "channel-id-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {"message": "Hello!", "team_id": team_id, "channel_id": channel_id},
+            )
+
+        assert json.loads(route.calls[0].request.content) == {
+            "body": {"contentType": "text", "content": "Hello!"}
+        }
+        data = _structured(result)
+        assert data["sent_to"] == "channel"
+        assert data["message"]["id"] == "chat-msg-sent-002"
+
+    @respx.mock
+    async def test_sends_to_a_chat(self, mcp_server):
+        chat_id = "chat-1on1-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "send_teams_message", {"message": "Hello!", "chat_id": chat_id}
+            )
+
+        assert route.called
+        assert _structured(result)["sent_to"] == "chat"
+
+    @respx.mock
+    async def test_no_ids_makes_no_request(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "send_teams_message", {"message": "Hello!"})
+
+        assert _structured(result) == {
+            "message": None,
+            "error": "invalid_arguments",
+            "reason": "Provide either chat_id, or both team_id and channel_id.",
+        }
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_an_empty_message_with_no_files_is_refused(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server, "send_teams_message", {"message": "   ", "chat_id": "chat-1on1-001"}
+            )
+
+        assert _structured(result) == {
+            "message": None,
+            "error": "invalid_arguments",
+            "reason": "message must not be empty",
+        }
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_plain_text_travels_verbatim(self, mcp_server):
+        """The default content_type is "text": newlines and "<" are not markup."""
+        chat_id = "chat-1on1-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            await _call(
+                mcp_server,
+                "send_teams_message",
+                {"message": "Hello\nWorld a < b", "chat_id": chat_id},
+            )
+
+        assert json.loads(route.calls[0].request.content) == {
+            "body": {"contentType": "text", "content": "Hello\nWorld a < b"}
+        }
+
+    @respx.mock
+    @pytest.mark.parametrize("content_type", ["html", "auto"])
+    async def test_markup_needs_an_explicit_content_type(self, mcp_server, content_type):
+        chat_id = "chat-1on1-001"
+        html_msg = '<a href="https://example.com">Click here</a>'
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": html_msg,
+                    "chat_id": chat_id,
+                    "options": json.dumps({"content_type": content_type}),
+                },
+            )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["body"]["contentType"] == "html"
+        assert payload["body"]["content"] == html_msg
+
+    @respx.mock
+    async def test_a_user_mention_builds_the_graph_payload(self, mcp_server):
+        team_id = "team-id-001"
+        channel_id = "channel-id-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "Hey check this out",
+                    "team_id": team_id,
+                    "channel_id": channel_id,
+                    "options": '{"mentions": [{"user_id": "aad-123", "name": "Alice"}]}',
+                },
+            )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert len(payload["mentions"]) == 1
+        assert payload["mentions"][0]["mentionText"] == "Alice"
+        assert payload["mentions"][0]["mentioned"]["user"]["id"] == "aad-123"
+        body_content = payload["body"]["content"]
+        assert '<at id="0">Alice</at>' in body_content
+        assert "Hey check this out" in body_content
+        assert _structured(result)["sent_to"] == "channel"
+
+    @respx.mock
+    async def test_mention_everyone_builds_a_channel_mention(self, mcp_server):
+        team_id = "team-id-001"
+        channel_id = "channel-id-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/teams/{team_id}/channels/{channel_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "Important update",
+                    "team_id": team_id,
+                    "channel_id": channel_id,
+                    "options": '{"mention_everyone": true}',
+                },
+            )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["mentions"][0]["mentionText"] == "Everyone"
+        assert (
+            payload["mentions"][0]["mentioned"]["conversation"]["conversationIdentityType"]
+            == "channel"
+        )
+        body_content = payload["body"]["content"]
+        assert '<at id="0">Everyone</at>' in body_content
+        assert "Important update" in body_content
+        assert "note" not in _structured(result)
+
+    @respx.mock
+    async def test_mention_everyone_in_a_chat_is_noted_not_sent(self, mcp_server):
+        chat_id = "chat-1on1-001"
+        route = respx.post(f"{GRAPH_BASE_URL}/chats/{chat_id}/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {
+                    "message": "Important update",
+                    "chat_id": chat_id,
+                    "options": '{"mention_everyone": true}',
+                },
+            )
+
+        assert "mentions" not in json.loads(route.calls[0].request.content)
+        assert _structured(result)["note"] == (
+            "mention_everyone only works in channels, ignored here."
+        )
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server, "send_teams_message", {"message": "hi", "chat_id": "c"}
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 class TestMCPSendTeamsMessageFiles:
@@ -3066,7 +3178,8 @@ class TestMCPSendTeamsMessageFiles:
             }
         ]
         assert f'<attachment id="{TEAMS_UPLOAD_GUID}"></attachment>' in payload["body"]["content"]
-        assert _get_text(result) == ("Message sent to Teams chat with 1 file(s): notes.txt (5 B).")
+        assert _structured(result)["sent_to"] == "chat"
+        assert _structured(result)["message"]["id"] == "chat-msg-sent-001"
 
     @respx.mock
     async def test_an_image_rides_inside_the_message_with_no_upload(self, mcp_server):
@@ -3091,7 +3204,7 @@ class TestMCPSendTeamsMessageFiles:
         assert payload["hostedContents"][0]["contentType"] == "image/png"
         assert base64.b64decode(payload["hostedContents"][0]["contentBytes"]) == PNG_BYTES
         assert '<img src="../hostedContents/1/$value">' in payload["body"]["content"]
-        assert _get_text(result) == "Message sent to Teams chat with 1 inline image(s)."
+        assert _structured(result)["sent_to"] == "chat"
 
     @respx.mock
     async def test_the_sender_from_the_token_is_not_invited(self, mcp_server):
@@ -3161,9 +3274,7 @@ class TestMCPSendTeamsMessageFiles:
                 },
             )
 
-        assert _get_text(result) == (
-            "Message sent to Teams chat with 1 file(s): notes.txt (5 B) and 1 inline image(s)."
-        )
+        assert _structured(result)["sent_to"] == "chat"
 
     @respx.mock
     async def test_a_non_image_in_images_is_refused_before_anything_is_sent(self, mcp_server):
@@ -3181,7 +3292,10 @@ class TestMCPSendTeamsMessageFiles:
                 },
             )
 
-        assert "not an image" in _get_text(result)
+        data = _structured(result)
+        assert data["message"] is None
+        assert data["error"] == "invalid_attachments"
+        assert "not an image" in data["reason"]
         assert not post.called
 
     @respx.mock
@@ -3197,9 +3311,10 @@ class TestMCPSendTeamsMessageFiles:
                 },
             )
 
-        text = _get_text(result)
-        assert text.startswith("images[0]:")
-        assert "attachments[" not in text
+        data = _structured(result)
+        assert data["error"] == "invalid_attachments"
+        assert data["reason"].startswith("images[0]:")
+        assert "attachments[" not in data["reason"]
 
     @respx.mock
     async def test_a_bad_attachment_spec_names_its_index(self, mcp_server):
@@ -3214,7 +3329,9 @@ class TestMCPSendTeamsMessageFiles:
                 },
             )
 
-        assert _get_text(result).startswith("attachments[1]:")
+        data = _structured(result)
+        assert data["error"] == "invalid_attachments"
+        assert data["reason"].startswith("attachments[1]:")
 
     @respx.mock
     async def test_a_403_on_the_upload_explains_the_missing_permission(self, mcp_server):
@@ -3235,9 +3352,10 @@ class TestMCPSendTeamsMessageFiles:
                 },
             )
 
-        text = _get_text(result)
-        assert "Files permission missing" in text
-        assert "Files.ReadWrite" in text
+        data = _structured(result)
+        assert data["message"] is None
+        assert data["error"] == "files_scope_missing"
+        assert "Files.ReadWrite" in data["reason"]
         assert not post.called
 
     @respx.mock
@@ -3279,7 +3397,7 @@ class TestMCPSendTeamsMessageFiles:
             ("POST", f"/v1.0/teams/{team_id}/channels/{channel_id}/messages"),
         ]
         assert json.loads(post.calls[0].request.content)["attachments"][0]["name"] == "notes.txt"
-        assert _get_text(result).startswith("Message sent to Teams channel with 1 file(s)")
+        assert _structured(result)["sent_to"] == "channel"
 
     @respx.mock
     async def test_an_empty_attachments_list_still_takes_the_file_path(self, mcp_server):
@@ -3299,16 +3417,16 @@ class TestMCPSendTeamsMessageFiles:
             )
 
         assert json.loads(post.calls[0].request.content) == {
-            "body": {"contentType": "html", "content": "plain"}
+            "body": {"contentType": "text", "content": "plain"}
         }
-        assert _get_text(result) == "Message sent to Teams chat."
+        assert _structured(result)["sent_to"] == "chat"
 
 
 class TestMCPReadTeamsMessagesAttachments:
-    """The attachments column, and the markers inside the content column."""
+    """The canonical attachments list a message row carries."""
 
     @respx.mock
-    async def test_attachments_column(self, mcp_server):
+    async def test_attachments_flatten_file_image_and_card(self, mcp_server):
         page = {
             "value": [
                 *SAMPLE_CHAT_MESSAGES_PAGE_WITH_ATTACHMENTS["value"][:3],
@@ -3323,16 +3441,19 @@ class TestMCPReadTeamsMessagesAttachments:
                 {"chat_id": TEAMS_CHAT_ID, "since": "2025-01-01"},
             )
 
-        lines = _get_text(result).splitlines()
-        assert lines[1] == "timestamp|sender|content|attachments|id"
-        rows = {line.split("|")[-1]: line.split("|") for line in lines[2:] if line}
+        rows = {row["id"]: row for row in _structured(result)["messages"]}
 
-        assert rows["chat-msg-file-001"][3] == f"roadmap.pptx [file:{TEAMS_FILE_ATTACHMENT_ID}]"
-        assert "[File: roadmap.pptx]" in rows["chat-msg-file-001"][2]
-        assert rows["chat-msg-image-001"][3] == f"[image:{TEAMS_HOSTED_ID}]"
-        assert rows["chat-msg-card-001"][3] == "[card]"
-        # A message with nothing attached leaves the column empty.
-        assert rows["chat-msg-001"][2:4] == ["Sounds good!", ""]
+        file_entry = rows["chat-msg-file-001"]["attachments"][0]
+        assert (file_entry["kind"], file_entry["id"], file_entry["name"]) == (
+            "file",
+            TEAMS_FILE_ATTACHMENT_ID,
+            "roadmap.pptx",
+        )
+        image_entry = rows["chat-msg-image-001"]["attachments"][0]
+        assert (image_entry["kind"], image_entry["id"]) == ("image", TEAMS_HOSTED_ID)
+        assert rows["chat-msg-card-001"]["attachments"][0]["kind"] == "card"
+        # A message with nothing attached carries an empty list, never null.
+        assert rows["chat-msg-001"]["attachments"] == []
 
 
 class TestMCPGetTeamsAttachment:
@@ -5234,7 +5355,7 @@ class TestMCPAuth:
         ):
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="Authorization required"):
-                    await client.call_tool("list_chats", {})
+                    await client.call_tool("read_email", {"message_id": "x"})
 
     async def test_all_tools_require_auth(self, mcp_server):
         """Verify every tool rejects unauthenticated requests."""
@@ -5246,9 +5367,6 @@ class TestMCPAuth:
         # own not-connected tests rather than listed here.
         graph_tools = [
             ("read_email", {"message_id": "fake-id"}),
-            ("list_chats", {}),
-            ("read_teams_messages", {"chat_id": "c1"}),
-            ("send_teams_message", {"message": "Hi", "chat_id": "c1"}),
         ]
         with patch(
             "ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")
@@ -6705,8 +6823,13 @@ class TestMCPMarkChatRead:
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPSendChatMessageJson:
-    """send_chat_message_json."""
+class TestMCPSendChatMessageJsonContract:
+    """The send contract send_chat_message_json froze, at the new name.
+
+    The merged tool takes the body as `message` and adds `sent_to`; the two
+    prose errors the json name answers with survive only on the alias, so the
+    two tests that pin them call the alias deliberately.
+    """
 
     @respx.mock
     async def test_sends_plain_text_and_returns_the_flat_message(self, mcp_server):
@@ -6716,8 +6839,8 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "send_chat_message_json",
-                {"chat_id": "chat-1on1-001", "text": "on my way"},
+                "send_teams_message",
+                {"chat_id": "chat-1on1-001", "message": "on my way"},
             )
 
         assert route.call_count == 1
@@ -6737,7 +6860,8 @@ class TestMCPSendChatMessageJson:
                 "created": "2026-01-06T09:00:00Z",
                 "last_modified": "2026-01-06T09:00:00Z",
                 "attachments": [],
-            }
+            },
+            "sent_to": "chat",
         }
 
     @respx.mock
@@ -6749,8 +6873,8 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             await _call(
                 mcp_server,
-                "send_chat_message_json",
-                {"chat_id": "chat-1on1-001", "text": "a < b"},
+                "send_teams_message",
+                {"chat_id": "chat-1on1-001", "message": "a < b"},
             )
 
         assert json.loads(route.calls[0].request.content) == {
@@ -6759,6 +6883,7 @@ class TestMCPSendChatMessageJson:
 
     @respx.mock
     async def test_empty_text_makes_no_graph_calls(self, mcp_server):
+        """Through the alias: the merged tool answers invalid_arguments here."""
         route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
             return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
         )
@@ -6774,6 +6899,7 @@ class TestMCPSendChatMessageJson:
 
     @respx.mock
     async def test_empty_chat_id_makes_no_graph_calls(self, mcp_server):
+        """Through the alias, for the same reason."""
         route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
             return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
         )
@@ -6794,10 +6920,10 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "send_chat_message_json",
+                "send_teams_message",
                 {
                     "chat_id": TEAMS_CHAT_ID,
-                    "text": "on my way",
+                    "message": "on my way",
                     "attachments": json.dumps(
                         [
                             {
@@ -6831,10 +6957,10 @@ class TestMCPSendChatMessageJson:
         with _mock_token(_token_with_oid("user-id-001")):
             await _call(
                 mcp_server,
-                "send_chat_message_json",
+                "send_teams_message",
                 {
                     "chat_id": TEAMS_CHAT_ID,
-                    "text": "notes attached",
+                    "message": "notes attached",
                     "attachments": json.dumps(
                         [
                             {
@@ -6857,10 +6983,10 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             await _call(
                 mcp_server,
-                "send_chat_message_json",
+                "send_teams_message",
                 {
                     "chat_id": TEAMS_CHAT_ID,
-                    "text": "on my way",
+                    "message": "on my way",
                     "attachments": json.dumps(
                         [
                             {
@@ -6883,10 +7009,10 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "send_chat_message_json",
+                "send_teams_message",
                 {
                     "chat_id": TEAMS_CHAT_ID,
-                    "text": "",
+                    "message": "",
                     "attachments": json.dumps(
                         [
                             {
@@ -6928,8 +7054,8 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "send_chat_message_json",
-                {"chat_id": TEAMS_CHAT_ID, "text": "hi", "attachments": attachments},
+                "send_teams_message",
+                {"chat_id": TEAMS_CHAT_ID, "message": "hi", "attachments": attachments},
             )
 
         assert _structured(result) == {
@@ -6950,10 +7076,10 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "send_chat_message_json",
+                "send_teams_message",
                 {
                     "chat_id": TEAMS_CHAT_ID,
-                    "text": "on my way",
+                    "message": "on my way",
                     "attachments": json.dumps(
                         [
                             {
@@ -6965,7 +7091,11 @@ class TestMCPSendChatMessageJson:
                 },
             )
 
-        assert _structured(result) == {"message": None, "error": "files_scope_missing"}
+        data = _structured(result)
+        assert data["message"] is None
+        assert data["error"] == "files_scope_missing"
+        # The code is frozen; the reason is additive.
+        assert data["reason"]
         assert not post.called
 
     @respx.mock
@@ -6976,8 +7106,8 @@ class TestMCPSendChatMessageJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "send_chat_message_json",
-                {"chat_id": TEAMS_CHAT_ID, "text": "on my way", "attachments": ""},
+                "send_teams_message",
+                {"chat_id": TEAMS_CHAT_ID, "message": "on my way", "attachments": ""},
             )
 
         assert json.loads(route.calls[0].request.content) == {
@@ -6989,15 +7119,19 @@ class TestMCPSendChatMessageJson:
         with _mock_missing_connection():
             result = await _call(
                 mcp_server,
-                "send_chat_message_json",
-                {"chat_id": "chat-1on1-001", "text": "hello"},
+                "send_teams_message",
+                {"chat_id": "chat-1on1-001", "message": "hello"},
             )
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPChatsPage:
-    """list_chats_page and get_chat_members."""
+class TestMCPListChatsPageContract:
+    """The four row keys and two top-level keys list_chats_page froze.
+
+    list_chats rows carry five more keys now, so each test pins the frozen
+    subset per row rather than asserting the whole row.
+    """
 
     @respx.mock
     async def test_maps_chats_and_tolerates_null_preview(self, mcp_server):
@@ -7005,12 +7139,18 @@ class TestMCPChatsPage:
         respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
             return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
         )
+        # top matches the page so the merged tool stops where the json ancestor
+        # did — after one page, with the nextLink still on offer.
         with _mock_token():
-            result = await _call(mcp_server, "list_chats_page", {})
+            result = await _call(mcp_server, "list_chats", {"top": 3})
 
         data = _structured(result)
         assert data["next_cursor"] == SAMPLE_CHATS_PAGE_NEXT_LINK
-        assert data["chats"] == [
+        frozen = [
+            {key: row[key] for key in ("id", "topic", "last_preview_at", "last_read_at")}
+            for row in data["chats"]
+        ]
+        assert frozen == [
             {
                 "id": "chat-1on1-001",
                 "topic": None,
@@ -7037,12 +7177,22 @@ class TestMCPChatsPage:
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_token():
-            result = await _call(
-                mcp_server, "list_chats_page", {"cursor": SAMPLE_CHATS_PAGE_NEXT_LINK}
-            )
+            result = await _call(mcp_server, "list_chats", {"cursor": SAMPLE_CHATS_PAGE_NEXT_LINK})
 
         assert str(route.calls[0].request.url) == SAMPLE_CHATS_PAGE_NEXT_LINK
-        assert _structured(result) == {"chats": [], "next_cursor": ""}
+        data = _structured(result)
+        assert data["chats"] == []
+        assert data["next_cursor"] == ""
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "list_chats", {})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPChatMembers:
+    """get_chat_members."""
 
     @respx.mock
     async def test_chat_members_maps_user_id_and_display_name(self, mcp_server):
@@ -7061,13 +7211,20 @@ class TestMCPChatsPage:
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "list_chats_page", {})
+            result = await _call(mcp_server, "get_chat_members", {"chat_id": "c"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPChatMessagesPage:
-    """list_chat_messages_page."""
+PAGE_MODE = '{"page": true}'
+
+
+class TestMCPChatMessagesPageContract:
+    """The page-mode contract list_chat_messages_page froze, at the new name.
+
+    The row shape is unchanged, so these whole-row asserts survive verbatim;
+    {"page": true} is what pins the single-page, last-modified-filtered path.
+    """
 
     @respx.mock
     async def test_flat_mapping_survives_null_sender_and_body(self, mcp_server):
@@ -7076,7 +7233,9 @@ class TestMCPChatMessagesPage:
         )
         with _mock_token():
             result = await _call(
-                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+                mcp_server,
+                "read_teams_messages",
+                {"chat_id": "chat-1on1-001", "options": PAGE_MODE},
             )
 
         data = _structured(result)
@@ -7126,7 +7285,9 @@ class TestMCPChatMessagesPage:
         )
         with _mock_token():
             result = await _call(
-                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+                mcp_server,
+                "read_teams_messages",
+                {"chat_id": "chat-1on1-001", "options": PAGE_MODE},
             )
 
         assert _structured(result)["messages"][0]["mentioned_user_ids"] == [
@@ -7157,7 +7318,9 @@ class TestMCPChatMessagesPage:
         )
         with _mock_token():
             result = await _call(
-                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+                mcp_server,
+                "read_teams_messages",
+                {"chat_id": "chat-1on1-001", "options": PAGE_MODE},
             )
 
         assert _structured(result)["messages"][0]["mentioned_user_ids"] == ["user-id-001"]
@@ -7184,7 +7347,9 @@ class TestMCPChatMessagesPage:
         )
         with _mock_token():
             result = await _call(
-                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+                mcp_server,
+                "read_teams_messages",
+                {"chat_id": "chat-1on1-001", "options": PAGE_MODE},
             )
 
         assert _structured(result)["messages"][0]["mentioned_user_ids"] == ["user-id-001"]
@@ -7197,15 +7362,19 @@ class TestMCPChatMessagesPage:
         with _mock_token():
             await _call(
                 mcp_server,
-                "list_chat_messages_page",
-                {"chat_id": "chat-1on1-001", "since": "2026-01-05T00:00:00Z"},
+                "read_teams_messages",
+                {
+                    "chat_id": "chat-1on1-001",
+                    "since": "2026-01-05T00:00:00Z",
+                    "options": PAGE_MODE,
+                },
             )
 
         query = parse_qs(urlparse(str(route.calls[0].request.url)).query)
         assert query["$filter"][0].split(" ")[0] == query["$orderby"][0].split(" ")[0]
 
 
-class TestMCPChatMessagePageAttachments:
+class TestMCPChatMessagePageAttachmentsContract:
     """_chat_message_json's attachments list, straight off the page."""
 
     @respx.mock
@@ -7214,7 +7383,11 @@ class TestMCPChatMessagePageAttachments:
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE_WITH_ATTACHMENTS)
         )
         with _mock_token():
-            result = await _call(mcp_server, "list_chat_messages_page", {"chat_id": TEAMS_CHAT_ID})
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {"chat_id": TEAMS_CHAT_ID, "options": PAGE_MODE},
+            )
 
         file_msg, image_msg, card_msg, junk_msg = _structured(result)["messages"]
 
@@ -8803,10 +8976,13 @@ class TestMailSenderPolicy:
                 },
             )
 
-        text = _get_text(result)
-        assert text == f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}"
+        assert _structured(result) == {
+            "message": None,
+            "error": "invalid_attachments",
+            "reason": f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}",
+        }
         assert not post_route.called
-        _assert_no_canary(text)
+        _assert_no_canary(json.dumps(_structured(result)))
 
     # -- Desktop JSON surfaces ---------------------------------------------
 
@@ -9185,6 +9361,9 @@ RENAMED_TOOLS = [
         "get_teams_attachment",
         {"chat_id": "c", "message_id": "m", "attachment_id": "a"},
     ),
+    ("list_chats_page", "list_chats", {}),
+    ("list_chat_messages_page", "read_teams_messages", {"chat_id": "c"}),
+    ("send_chat_message_json", "send_teams_message", {"chat_id": "c", "text": "hi"}),
 ]
 
 # The aliases whose target needs the Power BI connection rather than the Graph
@@ -9195,6 +9374,7 @@ PBI_ALIASES = {"list_powerbi_workspaces", "list_powerbi_content"}
 # reach the same place the old name reaches with its ancestor's arguments.
 NEW_NAME_ARGS = {
     "upload_file": {"action": "upload", "filename": "x.txt", "content": "hi"},
+    "send_chat_message_json": {"chat_id": "c", "message": "hi"},
 }
 
 
@@ -9281,6 +9461,23 @@ class TestDeprecatedAliases:
                 {
                     "error": "invalid_thumbnail",
                     "reason": "thumbnail must be one of: small, medium, large; got 'huge'",
+                },
+            ),
+            (
+                "list_chat_messages_page",
+                {"chat_id": "c", "since": "garbage"},
+                {
+                    "error": "invalid_date",
+                    "reason": "Invalid since format: 'garbage'. Use YYYY-MM-DD or ISO datetime.",
+                },
+            ),
+            (
+                "send_chat_message_json",
+                {"chat_id": "c", "text": "hi", "attachments": "not json"},
+                {
+                    "message": None,
+                    "error": "invalid_attachments",
+                    "reason": "attachments must be a JSON array",
                 },
             ),
         ],
@@ -9406,6 +9603,64 @@ class TestDeprecatedAliases:
         }
 
     @respx.mock
+    async def test_the_chats_page_alias_returns_rows_and_a_cursor(self, mcp_server):
+        """list_chats_page has only paging arguments, so it is pinned on the
+        one shape the /me/chats listing produces."""
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_chats_page", {"top": 3})
+
+        data = _structured(result)
+        assert data["next_cursor"] == SAMPLE_CHATS_PAGE_NEXT_LINK
+        assert [row["id"] for row in data["chats"]] == [
+            "chat-1on1-001",
+            "chat-group-001",
+            "chat-empty-001",
+        ]
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (
+                {"chat_id": "   ", "text": "hi"},
+                {"message": None, "error": "chat_id must not be empty"},
+            ),
+            (
+                {"chat_id": "c", "text": ""},
+                {"message": None, "error": "text must not be empty"},
+            ),
+        ],
+    )
+    async def test_the_send_alias_keeps_its_own_two_prose_errors(self, mcp_server, args, expected):
+        """These two strings live only on the alias — the merged tool answers
+        invalid_arguments instead, so a miswired forwarder would show here."""
+        with _mock_token():
+            result = await _call(mcp_server, "send_chat_message_json", args)
+
+        assert _structured(result) == expected
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_the_messages_page_alias_lands_in_page_mode(self, mcp_server):
+        """One request, ordered on lastModifiedDateTime — not the paginate-all
+        path, which orders on createdDateTime."""
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
+            )
+
+        assert route.call_count == 1
+        query = parse_qs(urlparse(str(route.calls[0].request.url)).query)
+        assert query["$orderby"][0].split(" ")[0] == "lastModifiedDateTime"
+        assert len(_structured(result)["messages"]) == 3
+
+    @respx.mock
     async def test_the_merged_profile_alias_returns_the_merged_dict(self, mcp_server):
         respx.get(f"{GRAPH_BASE_URL}/me").mock(
             return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
@@ -9436,8 +9691,8 @@ class TestCursorGuard:
         ("tool", "args"),
         [
             ("sync_mail", {"cursor": EVIL}),
-            ("list_chats_page", {"cursor": EVIL}),
-            ("list_chat_messages_page", {"chat_id": "19:chat", "cursor": EVIL}),
+            ("list_chats", {"cursor": EVIL}),
+            ("read_teams_messages", {"chat_id": "19:chat", "cursor": EVIL}),
         ],
     )
     async def test_non_graph_cursor_is_refused(self, mcp_server, tool, args):

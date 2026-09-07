@@ -1113,7 +1113,7 @@ class TestChatsPageSync:
         assert data == SAMPLE_CHATS_PAGE
         url = str(route.calls[0].request.url)
         assert "$orderby=lastMessagePreview/createdDateTime%20desc" in url
-        assert "$expand=lastMessagePreview" in url
+        assert "$expand=lastMessagePreview,members" in url
         assert "$top=50" in url
         assert "lastUpdatedDateTime" not in url
         assert "+" not in url
@@ -1177,6 +1177,18 @@ class TestChatsPageAsync:
             await teams.achats_page(client, cursor=SAMPLE_CHATS_PAGE_NEXT_LINK)
 
         assert str(route.calls[0].request.url) == SAMPLE_CHATS_PAGE_NEXT_LINK
+
+    @respx.mock
+    async def test_chat_type_becomes_a_filter(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await teams.achats_page(client, chat_type="group")
+
+        url = str(route.calls[0].request.url)
+        assert "$filter=chatType%20eq%20%27group%27" in url
+        assert "+" not in url
 
 
 class TestChatMembers:

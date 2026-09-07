@@ -13,22 +13,21 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (43 tools):
+Tool summary (40 tools):
   Email     : get_profile, list_emails, sync_mail, read_email*, get_mail_attachment,
               send_email, mark_mail_read, manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
-  Teams     : list_teams, list_chats*, read_teams_messages*, search_teams_messages,
-              get_teams_attachment, send_teams_message*, get_teams_activity,
+  Teams     : list_teams, list_chats, read_teams_messages, search_teams_messages,
+              get_teams_attachment, send_teams_message, get_teams_activity,
               get_chat_members, ensure_chat, mark_chat_read
   Files     : list_sharepoint_sites, list_files, inspect_file, edit_document, manage_file
   Power BI  : list_powerbi, query_dataset, refresh_dataset, export_report
   Directory : search_people
   Desktop JSON : get_mail_detail, create_reply_draft_json,
                  create_draft_json, update_draft_body, add_draft_attachment_json, send_draft,
-                 list_chats_page, list_chat_messages_page,
-                 send_chat_message_json, connection_status
+                 connection_status
 
-The 4 tools marked ``*`` return a prose/CSV string an LLM reads directly; the
+The 1 tool marked ``*`` returns a prose string an LLM reads directly; the
 other 39 return a ``dict`` and declare ``output_schema=None``, which opts them into the
 FormatNegotiation middleware: a caller sending ``X-Bond-Client: desktop`` (the
 desktop mail app) gets the dict as structuredContent, while every other caller
@@ -52,7 +51,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from bond_common import DEPRECATED_ALIAS_TAG, FormatNegotiation, HideDeprecatedAliases
+from bond_common import (
+    DEPRECATED_ALIAS_TAG,
+    FormatNegotiation,
+    HideDeprecatedAliases,
+    render_compact,
+)
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from starlette.responses import JSONResponse
@@ -228,8 +232,8 @@ mcp = FastMCP(
     "Microsoft Graph MCP Server", lifespan=_lifespan, auth=build_remote_auth_provider("ms-graph")
 )
 
-# Per-tool compact renderers land in later phases; the default rules in
-# bond_common.render cover every tool today.
+# Per-tool compact renderers, registered beside the tools they serve. Passed
+# by reference into the middleware below, so a later registration still lands.
 RENDER_OVERRIDES: dict = {}
 
 # Dict-returning tools declare `output_schema=None` so FormatNegotiation may
@@ -1404,92 +1408,147 @@ def _is_chat_unread(chat: dict) -> bool:
         return True
 
 
-@mcp.tool()
-async def list_chats(chat_type: str = "", top: int = 50, options: str = "") -> str:
+def _chat_row(chat: dict) -> dict:
+    """One list_chats row. Key order here is the compact CSV's column order.
+
+    Tolerates a chat with no members: cursors the desktop stored before the
+    members expansion joined the query still page in without them.
     """
-    List Teams chats (1:1, group, meeting) with last message preview.
+    preview = chat.get("lastMessagePreview") or {}
+    names = [m.get("displayName") for m in chat.get("members") or [] if m.get("displayName")]
+    members = ", ".join(names[:5])
+    if len(names) > 5:
+        members += f" (+{len(names) - 5} more)"
+    return {
+        "unread": _is_chat_unread(chat),
+        "chat_type": chat.get("chatType"),
+        "topic": chat.get("topic"),
+        "members": members or None,
+        "last_sender": ((preview.get("from") or {}).get("user") or {}).get("displayName") or None,
+        "last_preview": ((preview.get("body") or {}).get("content") or "")[:100] or None,
+        "last_preview_at": preview.get("createdDateTime"),
+        "last_read_at": (chat.get("viewpoint") or {}).get("lastMessageReadDateTime"),
+        "id": chat.get("id"),
+    }
+
+
+@mcp.tool(output_schema=None)
+async def list_chats(
+    chat_type: str = "", top: int = 50, cursor: str = "", options: str = ""
+) -> dict:
+    """
+    List Teams chats (1:1, group, meeting), newest activity first.
 
     Args:
         chat_type: Filter by type: oneOnOne, group, or meeting. Empty for all.
+            Ignored when cursor is set.
         top: Maximum number of chats to return (default: 50, max: 2000).
+            Ignored when cursor is set. When you mean to continue with
+            next_cursor, prefer a multiple of 50: Graph pages by 50 and the
+            cursor resumes at the next page, so rows trimmed beyond top do
+            not reappear.
+        cursor: A next_cursor from a previous call, fetched verbatim — the URL
+            already encodes the chat_type and page size of the call that
+            produced it. Empty starts at page one.
         options: JSON string with optional fields:
-            {"mark_as_read": ["chat_id1", "chat_id2"]}  — mark specified chat IDs as read after listing.
-    """
-    import csv
-    import io
+            {"mark_as_read": ["chat_id1", "chat_id2"]}  — mark those chat IDs as
+                read after listing.
 
+    Returns:
+        chats (a row per chat: unread, chat_type, topic, members, last_sender,
+        last_preview, last_preview_at, last_read_at, id), count, next_cursor,
+        and marked_as_read (how many ids the mark_as_read option acknowledged,
+        present only when it was used).
+
+        topic is null for 1:1 chats — name them from members, or resolve the
+        full roster with get_chat_members. members holds the first five display
+        names joined by ", " with "(+N more)" appended beyond that, and is null
+        when Graph sent no member names. last_read_at is how far the signed-in
+        user has read the chat, null when Graph sends no viewpoint;
+        last_preview_at is null on a chat that never carried a message.
+        next_cursor is empty when the listing is complete.
+
+        You see this as pipe-CSV of those nine columns followed by `count:` and
+        `next_cursor:` lines (empty ones are dropped). No chats renders as
+        `chats: (none)`.
+
+        Permanent errors: invalid_options, invalid_arguments (an unknown
+        chat_type), invalid_cursor (a cursor that is not a Graph URL — refused
+        without any request), no_identity (the signed-in user cannot be read
+        off the token, so nothing can be marked read), teams_unavailable, and
+        not_connected.
+    """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
-    valid_types = {"", "oneOnOne", "group", "meeting"}
-    if chat_type not in valid_types:
-        return f"Invalid chat_type: {chat_type}. Must be one of: oneOnOne, group, meeting (or empty for all)."
-
-    top = min(top, 2000)
+    if chat_type not in ("", "oneOnOne", "group", "meeting"):
+        return {
+            "error": "invalid_arguments",
+            "reason": (
+                f"Invalid chat_type: {chat_type}. "
+                "Must be one of: oneOnOne, group, meeting (or empty for all)."
+            ),
+        }
 
     mark_ids = opts.get("mark_as_read", [])
     if mark_ids and not isinstance(mark_ids, list):
-        return "Option 'mark_as_read' must be a JSON array of chat IDs."
+        return {
+            "error": "invalid_options",
+            "reason": "Option 'mark_as_read' must be a JSON array of chat IDs.",
+        }
 
-    token = get_graph_token()
+    top = min(top, 2000)
+
     try:
+        token = get_graph_token()
         async with AsyncGraphClient(token) as client:
-            chats = await teams_ops.alist_chats(client, chat_type=chat_type, top=top)
+            raw: list[dict] = []
+            if cursor:
+                data = await teams_ops.achats_page(client, cursor=cursor)
+                raw = data.get("value", [])
+                next_cursor = data.get("@odata.nextLink", "")
+            else:
+                # Graph caps /me/chats at $top=50, so a bigger top pages
+                # internally; the json ancestor simply errored past 50.
+                page_cursor = ""
+                next_cursor = ""
+                while True:
+                    data = await teams_ops.achats_page(
+                        client, cursor=page_cursor, top=min(top, 50), chat_type=chat_type
+                    )
+                    raw.extend(data.get("value", []))
+                    next_cursor = data.get("@odata.nextLink", "")
+                    if len(raw) >= top or not next_cursor:
+                        break
+                    page_cursor = next_cursor
+                raw = raw[:top]
 
             if mark_ids:
                 claims = teams_ops.decode_token_claims(token)
                 if not claims["oid"] or not claims["tid"]:
-                    return "Could not determine user identity for marking chats as read."
+                    return {"error": "no_identity"}
                 for cid in mark_ids:
                     await teams_ops.amark_chat_read(client, cid, claims["oid"], claims["tid"])
+    except PermissionError as e:
+        return _not_connected(e)
+    except NonGraphUrlError:
+        logger.warning("list_chats: refused a non-Graph cursor")
+        return {"error": "invalid_cursor"}
     except TeamsNotAvailableError:
-        return "Microsoft Teams is not available for this account."
+        return {
+            "error": "teams_unavailable",
+            "reason": "Microsoft Teams is not available for this account.",
+        }
 
-    if not chats:
-        prefix = "No chats found."
-        if mark_ids and isinstance(mark_ids, list):
-            return f"{prefix}\n\n{len(mark_ids)} chat(s) marked as read."
-        return prefix
-
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(
-        ["unread", "type", "name", "members", "last_sender", "last_preview", "last_date", "id"]
-    )
-    for chat in chats:
-        ct = chat.get("chatType", "?")
-        topic = chat.get("topic")
-        members = chat.get("members") or []
-        member_names = [m.get("displayName", "?") for m in members if m.get("displayName")]
-        members_str = ", ".join(member_names[:5])
-        if len(member_names) > 5:
-            members_str += f" (+{len(member_names) - 5} more)"
-
-        preview = chat.get("lastMessagePreview") or {}
-        preview_text = (preview.get("body") or {}).get("content", "")
-        preview_sender = ((preview.get("from") or {}).get("user") or {}).get("displayName", "")
-        preview_date = preview.get("createdDateTime", "")
-
-        label = topic or members_str or "(unnamed)"
-        unread = _is_chat_unread(chat)
-        writer.writerow(
-            [
-                unread,
-                ct,
-                label,
-                members_str or "(unknown)",
-                preview_sender,
-                preview_text[:100],
-                preview_date,
-                chat.get("id", "?"),
-            ]
-        )
-
-    output = f"{len(chats)} chat(s)\n{buf.getvalue()}"
-    if mark_ids and isinstance(mark_ids, list):
-        output += f"\n{len(mark_ids)} chat(s) marked as read."
-    return output
+    out = {
+        "chats": [_chat_row(chat) for chat in raw],
+        "count": len(raw),
+        "next_cursor": next_cursor,
+    }
+    if mark_ids:
+        out["marked_as_read"] = len(mark_ids)
+    return out
 
 
 _THUMBNAIL_WORDS = ("small", "medium", "large")
@@ -1560,110 +1619,218 @@ def _teams_attachment_not_found(entries: list[dict]) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def read_teams_messages(
     team_id: str = "",
     channel_id: str = "",
     chat_id: str = "",
     since: str = "",
+    cursor: str = "",
     options: str = "",
-) -> str:
+) -> dict:
     """
-    Read messages from a Teams channel or chat back to a given date.
-
-    Paginates internally to fetch all messages since the cutoff date.
-    Default: messages from the last 7 days.
+    Read messages from a Teams channel or chat.
 
     Provide either:
     - chat_id to read from a 1:1, group, or meeting chat (from list_chats)
     - team_id + channel_id to read from a team channel (from list_teams)
+    chat_id wins when both are given.
+
+    Two modes:
+    - Default: every message back to `since` (last 7 days when `since` is
+      empty), paginated internally, filtered on CREATION time.
+    - Page mode, entered with options {"page": true} or any cursor: ONE page,
+      newest first, where `since` filters LAST-MODIFIED time so an edited
+      message resurfaces. This is the incremental-sync mode programmatic
+      callers use — compare the last_modified you stored, not created. Empty
+      `since` means the newest page of all time. Chats only.
 
     Args:
         team_id: Team ID (from list_teams with no team_id). Required for channel reading.
         channel_id: Channel ID (from list_teams with team_id). Required for channel reading.
         chat_id: Chat ID (from list_chats). Use this for 1:1 and group chats.
         since: ISO date or datetime cutoff (e.g. '2026-06-16' or '2026-06-16T00:00:00Z').
-               Messages older than this are excluded. Default: 7 days ago.
+        cursor: A next_cursor from a previous call; implies page mode. Empty
+            starts at page one.
         options: JSON string with optional fields:
-            {"mark_as_read": true/false}  — mark the chat as read after reading messages.
-                Only works with chat_id (channels don't support per-user read state).
-            {"max_content_length": -1}  — max characters per message body. Default -1
-                (no limit). Set a positive integer to truncate long messages.
+            {"page": true}  — one page instead of everything since the cutoff.
+            {"mark_as_read": true/false}  — mark the chat as read afterwards.
+                Only works with chat_id (channels have no per-user read state).
+            {"max_content_length": -1}  — max characters of message body you
+                see. Default -1 (no limit); it truncates the rendering only,
+                never the message stored under body_content.
 
-    Each row's attachments column lists shared files as `name [file:<id>]`, inline
-    images as `[image:<id>]`, and cards as `[card]`; pass a file or image id to
-    get_teams_attachment to read or download it. The content column also carries
-    `[File: name]` / `[Image]` markers.
+    Returns:
+        messages (a row per message: id, message_type, from_user_id,
+        from_user_display, from_application_id, body_content,
+        body_content_type, mentioned_user_ids, created, last_modified,
+        attachments), count, next_cursor (empty outside page mode and at the
+        end of a listing), and marked_as_read when the option was used.
+
+        System events have no sender, so the from_* fields are null.
+        mentioned_user_ids is the Graph user ids the message @mentions, in the
+        order they appear and empty when none. body_content is the raw Graph
+        body, so a file-only message has an empty or tag-only body.
+        attachments carries every file, inline image, card, or quoted-message
+        reference as {id, kind, name, content_type, content_url,
+        thumbnail_url, card_text}; kind is one of file, image, card,
+        message_reference, other.
+
+        You see this as pipe-CSV of timestamp|sender|content|attachments|id
+        followed by `count:` and `next_cursor:` lines. HTML bodies are stripped
+        to text; an app sender reads `(app)` and a system event `(system)`. The
+        attachments column lists shared files as `name [file:<id>]`, inline
+        images as `[image:<id>]`, and cards as `[card]`; pass a file or image
+        id to get_teams_attachment to read or download it. The content column
+        repeats them as `[File: name]` / `[Image]` markers.
+
+        Permanent errors: invalid_options, invalid_arguments (no ids, paging a
+        channel, or marking a channel read), invalid_date, invalid_cursor (a
+        cursor that is not a Graph URL — refused without any request),
+        no_identity, teams_unavailable, and not_connected.
     """
-    import csv
-    import io
-    import re
     from datetime import datetime, timedelta, timezone
 
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     if not chat_id and not (team_id and channel_id):
-        return "Provide either chat_id, or both team_id and channel_id."
+        return {
+            "error": "invalid_arguments",
+            "reason": "Provide either chat_id, or both team_id and channel_id.",
+        }
+
+    page = opt_bool(opts.get("page"), False) or bool(cursor)
+    if page and not chat_id:
+        return {
+            "error": "invalid_arguments",
+            "reason": "Cursor paging is only supported for chats.",
+        }
 
     if since:
-        if re.match(r"^\d{4}-\d{2}-\d{2}$", since):
-            since += "T00:00:00Z"
-        elif not re.match(r"^\d{4}-\d{2}-\d{2}T", since):
-            return f"Invalid since format: '{since}'. Use YYYY-MM-DD or ISO datetime."
-    else:
+        try:
+            since = teams_ops.normalize_since(since)
+        except ValueError as e:
+            return {"error": "invalid_date", "reason": str(e)}
+    elif not page:
         since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     max_content_length = opt_int(opts.get("max_content_length"), -1)
     mark = opts.get("mark_as_read")
     should_mark = mark is not None and opt_bool(mark, True)
     if mark is not None and not chat_id:
-        return "Option 'mark_as_read' is only supported for chats, not channels."
+        return {
+            "error": "invalid_arguments",
+            "reason": "Option 'mark_as_read' is only supported for chats, not channels.",
+        }
 
-    token = get_graph_token()
     try:
+        token = get_graph_token()
         async with AsyncGraphClient(token) as client:
-            if chat_id:
+            next_cursor = ""
+            if page:
+                data = await teams_ops.achat_messages_page(
+                    client, chat_id, since=since, cursor=cursor
+                )
+                messages = data.get("value", [])
+                next_cursor = data.get("@odata.nextLink", "")
+            elif chat_id:
                 messages = await teams_ops.alist_chat_messages(client, chat_id, since=since)
-                source = f"chat `{chat_id}`"
             else:
                 messages = await teams_ops.alist_channel_messages(
                     client, team_id, channel_id, since=since
                 )
-                source = f"channel `{channel_id}`"
 
             if should_mark:
                 claims = teams_ops.decode_token_claims(token)
                 if not claims["oid"] or not claims["tid"]:
-                    return "Could not determine user identity for marking chat as read."
+                    return {"error": "no_identity"}
                 await teams_ops.amark_chat_read(client, chat_id, claims["oid"], claims["tid"])
+    except PermissionError as e:
+        return _not_connected(e)
+    except NonGraphUrlError:
+        logger.warning("read_teams_messages: refused a non-Graph cursor")
+        return {"error": "invalid_cursor"}
     except TeamsNotAvailableError:
-        return "Microsoft Teams is not available for this account."
+        return {
+            "error": "teams_unavailable",
+            "reason": "Microsoft Teams is not available for this account.",
+        }
 
-    if not messages:
-        return f"No messages found in {source} since {since}."
-
-    buf = io.StringIO()
-    writer = csv.writer(buf, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(["timestamp", "sender", "content", "attachments", "id"])
-    for msg in messages:
-        sender = extract_message_sender(msg)
-        content = extract_message_text(msg, max_length=max_content_length)
-        writer.writerow(
-            [
-                msg.get("createdDateTime", ""),
-                sender,
-                content or "(empty)",
-                _teams_attachment_column(teams_ops.parse_message_attachments(msg)),
-                msg.get("id", ""),
-            ]
-        )
-
-    result = f"{len(messages)} message(s) in {source} since {since}\n{buf.getvalue()}"
+    out = {
+        "messages": [_chat_message_json(m) for m in messages],
+        "count": len(messages),
+        "next_cursor": next_cursor,
+    }
     if should_mark:
-        result += "\n---\n*Chat marked as read.*"
-    return result
+        out["marked_as_read"] = True
+    if max_content_length > 0:
+        # A rendering hint the compact renderer consumes and then drops. The
+        # desktop passes no options, so it never sees this key.
+        out["max_content_length"] = max_content_length
+    return out
+
+
+def _teams_message_text(row: dict, max_len: int) -> str:
+    """The content column of one rendered message row.
+
+    Mirrors teams_ops.extract_message_text, which reads a raw Graph message;
+    this reads the flattened row the tool has already built.
+    """
+    content = row["body_content"] or ""
+    if row["body_content_type"] == "html" and content:
+        content = re.sub(r"<[^>]+>", "", content)
+        content = html_mod.unescape(content).replace("\xa0", " ").strip()
+
+    if not content.strip():
+        for entry in row["attachments"]:
+            if entry["kind"] == "card" and entry["card_text"]:
+                content = f"[Card] {entry['card_text']}"
+                break
+
+    markers = []
+    for entry in row["attachments"]:
+        if entry["kind"] == "file":
+            markers.append(f"[File: {entry['name'] or '(unnamed)'}]")
+        elif entry["kind"] == "image":
+            markers.append("[Image]")
+
+    if not content.strip():
+        return " ".join(markers) or "(empty)"
+    # Markers are appended AFTER truncation: max_content_length caps the body a
+    # person wrote, not the evidence that a file came with it.
+    if max_len > 0 and len(content) > max_len:
+        content = content[:max_len] + "..."
+    return f"{content} {' '.join(markers)}" if markers else content
+
+
+def _render_read_teams_messages(payload: dict) -> str:
+    """Flatten the canonical message rows into the pipe-CSV a model reads."""
+    if "error" in payload:
+        # An override preempts every rule in render_compact, the error envelope
+        # included, so an error payload has to be handed back to the shared one.
+        return render_compact(payload)
+
+    max_len = payload.get("max_content_length", -1)
+    rows = [
+        {
+            "timestamp": row["created"],
+            # The canonical row carries the sending app's id, never its name,
+            # so an app is labelled by kind rather than misnamed by its id.
+            "sender": row["from_user_display"]
+            or ("(app)" if row["from_application_id"] else "(system)"),
+            "content": _teams_message_text(row, max_len),
+            "attachments": _teams_attachment_column(row["attachments"]),
+            "id": row["id"],
+        }
+        for row in payload["messages"]
+    ]
+    rest = {k: v for k, v in payload.items() if k not in ("messages", "max_content_length")}
+    return render_compact({"messages": rows, **rest})
+
+
+RENDER_OVERRIDES["read_teams_messages"] = _render_read_teams_messages
 
 
 @mcp.tool(output_schema=None)
@@ -2074,53 +2241,46 @@ async def get_teams_attachment(
     return out
 
 
-def _teams_send_summary(
-    to_chat: bool,
-    sent_files: list,
-    sent_images: list,
-) -> str:
-    """Confirm what actually went out, naming each file so a wrong one is obvious."""
-    summary = "Message sent to Teams chat" if to_chat else "Message sent to Teams channel"
-    if sent_files:
-        listed = ", ".join(f"{f.name} ({_format_size(len(f.data))})" for f in sent_files)
-        summary += f" with {len(sent_files)} file(s): {listed}"
-        if sent_images:
-            summary += f" and {len(sent_images)} inline image(s)"
-    elif sent_images:
-        summary += f" with {len(sent_images)} inline image(s)"
-    return summary + "."
-
-
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def send_teams_message(
     message: str,
     team_id: str = "",
     channel_id: str = "",
     chat_id: str = "",
+    attachments: str = "",
     options: str = "",
-) -> str:
+) -> dict:
     """
-    Send a message to a Teams channel or chat, with optional @mentions.
+    Send a message to a Teams channel or chat, with optional @mentions and files.
 
     Provide either:
     - chat_id to send to a 1:1, group, or meeting chat (from list_chats)
     - team_id + channel_id to send to a team channel (from list_teams)
+    chat_id wins when both are given.
+
+    The message is sent as typed: content_type defaults to "text", so a typed
+    "<" stays a "<" rather than becoming markup. Pass
+    {"content_type": "html"} to send markup, or {"content_type": "auto"} to
+    have HTML detected and newlines turned into <br>. @mentions force html.
 
     Args:
-        message: Message content to send. Supports plain text (newlines preserved)
-            or HTML (e.g. '<a href="https://example.com">Click here</a>').
+        message: Message content to send. May be empty when files carry it.
         team_id: Team ID (from list_teams with no team_id). Required for channel sending.
         channel_id: Channel ID (from list_teams with team_id). Required for channel sending.
         chat_id: Chat ID (from list_chats). Use this for 1:1 and group chats.
+        attachments: JSON array of files carrying their own bytes, e.g.
+            [{"name": "notes.txt", "content_base64": "...", "content_type": "text/plain"}].
+            content_type is optional and guessed from the name when absent.
+            Empty string sends no files.
         options: JSON string with optional fields:
-            {"content_type": "auto|html|text",
+            {"content_type": "text|html|auto",
              "mentions": [{"user_id": "aad-object-id", "name": "Display Name"}],
              "mention_everyone": true,
              "attachments": [{"name": "notes.txt", "text": "..."}],
              "images": [{"name": "chart.png", "base64": "..."}]}
             User IDs (AAD object IDs) can be found in list_teams or list_chats member lists.
 
-            attachments take the same source specs as send_email — {"name", "text"},
+            options attachments take the same source specs as send_email — {"name", "text"},
             {"name", "base64"}, {"drive_item_id"}, {"url"} (a sharing link), or
             {"message_id", "attachment_id"}. Teams cannot carry file bytes on a
             message, so each file is uploaded to OneDrive first (a chat: the
@@ -2130,14 +2290,51 @@ async def send_teams_message(
 
             images use the same specs but must be image/* under 4 MB; they render
             inline in the message body instead of appearing as files.
-    """
-    if not chat_id and not (team_id and channel_id):
-        return "Provide either chat_id, or both team_id and channel_id."
 
+    Returns:
+        message — the created message, flattened exactly as read_teams_messages
+        returns one (id, message_type, from_*, body_content, body_content_type,
+        mentioned_user_ids, created, last_modified, attachments) — plus
+        sent_to ("chat" or "channel"), and note when mention_everyone was
+        ignored because the target was a chat.
+
+        You see this as a confirmation line, the created message's `id:`, a
+        `files:` line naming what travelled with it, and the note when present.
+
+        On failure message is null and error says why. Permanent errors:
+        invalid_options, invalid_arguments (no ids, or nothing to send),
+        invalid_attachments (with a reason naming the offending entry),
+        files_scope_missing (the connection cannot write to OneDrive, so no
+        file can be sent), teams_unavailable, and not_connected — which is the
+        one failure that carries no message key.
+    """
     opts, err = parse_options(options)
     if err:
-        return err
-    content_type = opts.get("content_type", "auto")
+        return {"message": None, "error": "invalid_options", "reason": err}
+
+    if not chat_id and not (team_id and channel_id):
+        return {
+            "message": None,
+            "error": "invalid_arguments",
+            "reason": "Provide either chat_id, or both team_id and channel_id.",
+        }
+
+    desktop_files, reason = _desktop_attachments(attachments)
+    if reason:
+        return {"message": None, "error": "invalid_attachments", "reason": reason}
+
+    file_specs = opts.get("attachments")
+    image_specs = opts.get("images")
+    if not message.strip() and not desktop_files and file_specs is None and image_specs is None:
+        return {
+            "message": None,
+            "error": "invalid_arguments",
+            "reason": "message must not be empty",
+        }
+
+    # "text", not "auto": a typed "<" must reach the chat as a "<" rather than
+    # being read as markup — the same rule update_draft_body holds for mail.
+    content_type = opts.get("content_type", "text")
     raw_mentions = opts.get("mentions", [])
     mention_everyone = opts.get("mention_everyone", False)
 
@@ -2195,43 +2392,44 @@ async def send_teams_message(
     mentions_payload = graph_mentions if graph_mentions else None
 
     everyone_ignored = mention_everyone and chat_id and not (team_id and channel_id)
-    everyone_note = (
-        " (Note: mention_everyone only works in channels, ignored here.)"
-        if everyone_ignored
-        else ""
-    )
 
-    file_specs = opts.get("attachments")
-    image_specs = opts.get("images")
-
-    token = get_graph_token()
     try:
+        token = get_graph_token()
         async with AsyncGraphClient(token) as client:
-            if file_specs is not None or image_specs is not None:
+            sent_files: list = []
+            sent_images: list = []
+            if file_specs is not None:
                 try:
-                    sent_files = (
-                        await attachment_ops.aresolve_attachment_sources(client, file_specs)
-                        if file_specs is not None
-                        else []
+                    sent_files = await attachment_ops.aresolve_attachment_sources(
+                        client, file_specs
                     )
                 except ValueError as e:
-                    return str(e)
+                    return {
+                        "message": None,
+                        "error": "invalid_attachments",
+                        "reason": str(e),
+                    }
+            if image_specs is not None:
                 try:
-                    sent_images = (
-                        await attachment_ops.aresolve_attachment_sources(client, image_specs)
-                        if image_specs is not None
-                        else []
+                    sent_images = await attachment_ops.aresolve_attachment_sources(
+                        client, image_specs
                     )
                 except ValueError as e:
                     # The resolver names the key it was given; this list is "images".
-                    return re.sub(r"^attachments\b", "images", str(e))
+                    return {
+                        "message": None,
+                        "error": "invalid_attachments",
+                        "reason": re.sub(r"^attachments\b", "images", str(e)),
+                    }
+
+            if desktop_files or file_specs is not None or image_specs is not None:
                 try:
-                    await teams_ops.asend_message_with_files(
+                    created = await teams_ops.asend_message_with_files(
                         client,
                         content=message,
                         content_type=content_type,
                         mentions=mentions_payload,
-                        files=sent_files,
+                        files=[*desktop_files, *sent_files],
                         images=sent_images,
                         chat_id=chat_id,
                         team_id="" if chat_id else team_id,
@@ -2239,20 +2437,21 @@ async def send_teams_message(
                         exclude_user_id=teams_ops.decode_token_claims(token).get("oid", ""),
                     )
                 except ValueError as e:
-                    return str(e)
-                summary = _teams_send_summary(bool(chat_id), sent_files, sent_images)
-                return f"{summary}{everyone_note}"
-            if chat_id:
-                await teams_ops.asend_chat_message(
+                    return {
+                        "message": None,
+                        "error": "invalid_attachments",
+                        "reason": str(e),
+                    }
+            elif chat_id:
+                created = await teams_ops.asend_chat_message(
                     client,
                     chat_id,
                     message,
                     content_type=content_type,
                     mentions=mentions_payload,
                 )
-                return f"Message sent to Teams chat.{everyone_note}"
             else:
-                await teams_ops.asend_channel_message(
+                created = await teams_ops.asend_channel_message(
                     client,
                     team_id,
                     channel_id,
@@ -2260,16 +2459,56 @@ async def send_teams_message(
                     content_type=content_type,
                     mentions=mentions_payload,
                 )
-                return "Message sent to Teams channel."
+    except PermissionError as e:
+        # The json ancestor froze the bare not_connected payload here, without
+        # the "message" key every other failure carries.
+        return _not_connected(e)
     except TeamsNotAvailableError:
-        return "Microsoft Teams is not available for this account."
+        return {
+            "message": None,
+            "error": "teams_unavailable",
+            "reason": "Microsoft Teams is not available for this account.",
+        }
     except FilesScopeMissingError:
-        return (
-            "**Files permission missing:** sending files into Teams uploads them to "
-            "OneDrive first, which needs the Files.ReadWrite permission. This connection "
-            "can only read files (org tenants: ask the admin to consent to "
-            "Files.ReadWrite). Plain messages still work."
-        )
+        return {
+            "message": None,
+            "error": "files_scope_missing",
+            "reason": (
+                "Sending files into Teams uploads them to OneDrive first, which needs the "
+                "Files.ReadWrite permission this connection lacks (org tenants: ask the "
+                "admin to consent to it). Plain messages still work."
+            ),
+        }
+
+    out = {
+        "message": _chat_message_json(created),
+        "sent_to": "chat" if chat_id else "channel",
+    }
+    if everyone_ignored:
+        out["note"] = "mention_everyone only works in channels, ignored here."
+    return out
+
+
+def _render_send_teams_message(payload: dict) -> str:
+    """Confirm what went out, naming each file so a wrong one is obvious."""
+    if "error" in payload:
+        # Overrides preempt the error-envelope rule; hand errors back to it.
+        return render_compact(payload)
+
+    row = payload["message"] or {}
+    lines = [
+        f"Message sent to Teams {payload.get('sent_to', 'chat')}.",
+        f"id: {row.get('id')}",
+    ]
+    names = [a["name"] for a in row.get("attachments") or [] if a.get("name")]
+    if names:
+        lines.append(f"files: {', '.join(names)}")
+    if payload.get("note"):
+        lines.append(f"note: {payload['note']}")
+    return "\n".join(lines)
+
+
+RENDER_OVERRIDES["send_teams_message"] = _render_send_teams_message
 
 
 @mcp.tool(output_schema=None)
@@ -3211,7 +3450,7 @@ async def export_report(
 # ---------------------------------------------------------------------------
 # Dict-returning tools
 #
-# Unlike the 4 str-returning tools above, these return a canonical dict.
+# Unlike read_email, the one str-returning tool above, these return a canonical dict.
 # FormatNegotiation hands that dict to a programmatic caller (the desktop mail
 # app) as structuredContent and renders it compactly for everyone else.
 # Parameters remain str/int only.
@@ -3228,13 +3467,13 @@ async def export_report(
 # too_large, invalid_mode, invalid_options, invalid_arguments, and
 # teams_unavailable; inspect_file returns missing_target, access_denied,
 # not_found, and invalid_link — all permanent.
-# send_chat_message_json returns invalid_attachments and files_scope_missing
+# send_teams_message returns invalid_attachments and files_scope_missing
 # (the account's connection lacks Files.ReadWrite) — both permanent. The mail
 # tools return external_sender when the mail sender policy hides a message —
 # also permanent, and never accompanied by any detail of the hidden message;
 # connection_status reports mail_policy.enabled so a client can explain the
-# gap and resync when it flips. The three paging tools (sync_mail,
-# list_chats_page, list_chat_messages_page) return invalid_cursor when the
+# gap and resync when it flips. The three paging tools (sync_mail, list_chats,
+# read_teams_messages) return invalid_cursor when the
 # cursor is not a Graph URL — permanent; the Graph client refuses to send the
 # bearer token anywhere else. send_draft reads the draft's ids before sending
 # and returns them, so a client can store its own copy of the sent mail.
@@ -3242,9 +3481,12 @@ async def export_report(
 # User.ReadBasic.All; ensure_chat returns invalid_members (an id that is
 # not a Graph user id or UPN), no_identity (the caller cannot be read off the
 # token), and no_members (nobody left after dropping blanks and the caller),
-# plus teams_unavailable — all permanent. The Teams read tools return
-# teams_not_available when the account has no Microsoft 365 licence, and
-# search_teams_messages adds search_unsupported for the consumer accounts
+# plus teams_unavailable — all permanent. list_chats and read_teams_messages
+# return the same no_identity when a mark-as-read option cannot name the user,
+# invalid_date for a malformed since, and teams_unavailable (with a reason) for
+# the no-licence 403. list_teams, get_teams_activity, and search_teams_messages
+# spell that same 403 teams_not_available, and search_teams_messages adds
+# search_unsupported for the consumer accounts
 # Microsoft Search does not index — both permanent. list_files maps an
 # unusable sharing link to access_denied, not_found, or invalid_link;
 # manage_file returns not_found for a missing item and too_large (with the
@@ -3849,48 +4091,6 @@ async def mark_mail_read(message_ids: str, is_read: str = "true") -> dict:
 
 
 @mcp.tool(output_schema=None)
-async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
-    """
-    Fetch ONE page of the user's Teams chats as structured JSON.
-
-    For programmatic clients. Chats come back newest-activity-first. Each entry
-    has id, topic (null for 1:1 chats — resolve a name via
-    get_chat_members), last_preview_at, and last_read_at (how far the
-    signed-in user has read the chat; null when Graph sends no viewpoint).
-    Returns next_cursor for the next page, empty when the listing is complete.
-    A cursor that is not a Graph URL returns {"error": "invalid_cursor"} without
-    any request.
-
-    Args:
-        cursor: A next_cursor from a previous call. Empty starts at page one.
-        top: Page size (default: 50). Ignored when cursor is set.
-    """
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            data = await teams_ops.achats_page(client, cursor=cursor, top=top)
-    except PermissionError as e:
-        return _not_connected(e)
-    except NonGraphUrlError:
-        logger.warning("list_chats_page: refused a non-Graph cursor")
-        return {"error": "invalid_cursor"}
-
-    chats = []
-    for chat in data.get("value", []):
-        preview = chat.get("lastMessagePreview") or {}
-        viewpoint = chat.get("viewpoint") or {}
-        chats.append(
-            {
-                "id": chat.get("id"),
-                "topic": chat.get("topic"),
-                "last_preview_at": preview.get("createdDateTime"),
-                "last_read_at": viewpoint.get("lastMessageReadDateTime"),
-            }
-        )
-    return {"chats": chats, "next_cursor": data.get("@odata.nextLink", "")}
-
-
-@mcp.tool(output_schema=None)
 async def get_chat_members(chat_id: str) -> dict:
     """
     List a chat's members.
@@ -3900,7 +4100,7 @@ async def get_chat_members(chat_id: str) -> dict:
     chats, which have no topic.
 
     Args:
-        chat_id: The chat ID (from list_chats_page).
+        chat_id: The chat ID (from list_chats).
     """
     try:
         token = get_graph_token()
@@ -3971,51 +4171,6 @@ async def ensure_chat(user_ids: str, topic: str = "") -> dict:
 
 
 @mcp.tool(output_schema=None)
-async def list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "") -> dict:
-    """
-    Fetch ONE page of a chat's messages as structured JSON.
-
-    For programmatic clients. Messages come back newest-first and flattened:
-    id, message_type, from_user_id, from_user_display, from_application_id,
-    body_content, body_content_type, mentioned_user_ids, created,
-    last_modified, attachments. System events have no sender, so the from_*
-    fields are null. mentioned_user_ids is the Graph user ids the message
-    @mentions, in the order they appear and empty when none. Returns
-    next_cursor for the next page, empty when there are no more. A cursor that
-    is not a Graph URL returns {"error": "invalid_cursor"} without any request.
-
-    attachments: every file, inline image, card, or quoted-message reference on
-    the message as {id, kind, name, content_type, content_url, thumbnail_url,
-    card_text}; kind is one of file, image, card, message_reference, other;
-    empty when none. Fetch a file's or image's bytes with
-    get_teams_attachment. body_content is still the raw Graph body (the
-    client owns stripping), so a file-only message has an empty or tag-only
-    body — render the attachments list.
-
-    Args:
-        chat_id: The chat ID (from list_chats_page).
-        since: ISO 8601 timestamp; returns only messages modified after it.
-            Compare against the last_modified you stored, not created — an
-            edited message resurfaces. Ignored when cursor is set.
-        cursor: A next_cursor from a previous call. Empty starts at page one.
-    """
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            data = await teams_ops.achat_messages_page(client, chat_id, since=since, cursor=cursor)
-    except PermissionError as e:
-        return _not_connected(e)
-    except NonGraphUrlError:
-        logger.warning("list_chat_messages_page: refused a non-Graph cursor")
-        return {"error": "invalid_cursor"}
-
-    return {
-        "messages": [_chat_message_json(m) for m in data.get("value", [])],
-        "next_cursor": data.get("@odata.nextLink", ""),
-    }
-
-
-@mcp.tool(output_schema=None)
 async def mark_chat_read(chat_id: str) -> dict:
     """
     Mark a Teams chat read for the signed-in user.
@@ -4030,7 +4185,7 @@ async def mark_chat_read(chat_id: str) -> dict:
     "teams_unavailable" when the account has no Teams license.
 
     Args:
-        chat_id: The chat ID (from list_chats_page).
+        chat_id: The chat ID (from list_chats).
     """
     if not chat_id.strip():
         return {"ok": False, "error": "chat_id must not be empty"}
@@ -4098,87 +4253,6 @@ def _desktop_attachments(raw: str) -> tuple[list, str]:
             )
         )
     return resolved, ""
-
-
-@mcp.tool(output_schema=None)
-async def send_chat_message_json(chat_id: str, text: str, attachments: str = "") -> dict:
-    """
-    Send a plain-text message, optionally with files, to a Teams chat. Returns JSON.
-
-    The content type is explicitly "text", not "auto": the desktop composer is
-    a plain-text field, and auto-detection would read a typed "<" as markup —
-    the same rule update_draft_body holds for mail. Returns the created message
-    flattened exactly as list_chat_messages_page returns one, so the client can
-    store its own reply without waiting for the next pull. Requires
-    Chat.ReadWrite.
-
-    attachments: every file, inline image, card, or quoted-message reference on
-    the message as {id, kind, name, content_type, content_url, thumbnail_url,
-    card_text}; kind is one of file, image, card, message_reference, other;
-    empty when none. Fetch a file's or image's bytes with
-    get_teams_attachment. body_content is still the raw Graph body (the
-    client owns stripping), so a file-only message has an empty or tag-only
-    body — render the attachments list.
-
-    Teams cannot carry file bytes on a message, so each attachment is uploaded
-    to the sender's OneDrive "Microsoft Teams Chat Files" folder, shared
-    read-only with the chat's members, and the message posts a card pointing at
-    it. That upload needs the Files.ReadWrite permission. The created message
-    comes back with the file in its attachments list, kind "file". Inline
-    images are not supported here yet; every entry is sent as a file.
-
-    On failure message is null and error says why.
-
-    Args:
-        chat_id: The chat ID (from list_chats_page).
-        text: The message body, sent as typed. May be empty when attachments
-            carry the message.
-        attachments: JSON array of files, e.g.
-            [{"name": "notes.txt", "content_base64": "...", "content_type": "text/plain"}].
-            content_type is optional and guessed from the name when absent.
-            Empty string sends no files.
-
-    Returns:
-        message — the created message, flattened as above.
-
-        Permanent errors, which must not be retried: invalid_attachments (with
-        reason, e.g. "attachments[1]: invalid base64"), files_scope_missing (the
-        connection cannot write to OneDrive, so no file can be sent),
-        teams_unavailable (the account has no Teams license), not_connected
-        (with connect_url when one exists).
-    """
-    if not chat_id.strip():
-        return {"message": None, "error": "chat_id must not be empty"}
-    sent_files, reason = _desktop_attachments(attachments)
-    if reason:
-        return {"message": None, "error": "invalid_attachments", "reason": reason}
-    if not text.strip() and not sent_files:
-        return {"message": None, "error": "text must not be empty"}
-
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            if sent_files:
-                created = await teams_ops.asend_message_with_files(
-                    client,
-                    content=text,
-                    content_type="text",
-                    files=sent_files,
-                    chat_id=chat_id,
-                    exclude_user_id=teams_ops.decode_token_claims(token).get("oid", ""),
-                )
-            else:
-                created = await teams_ops.asend_chat_message(
-                    client, chat_id, text, content_type="text"
-                )
-    except PermissionError as e:
-        return _not_connected(e)
-    except TeamsNotAvailableError:
-        return {"message": None, "error": "teams_unavailable"}
-    except FilesScopeMissingError:
-        return {"message": None, "error": "files_scope_missing"}
-
-    return {"message": _chat_message_json(created)}
 
 
 def _drive_item_json(item: dict) -> dict:
@@ -4485,6 +4559,34 @@ async def _alias_get_chat_attachment_json(
     return await get_teams_attachment(
         message_id, attachment_id, chat_id=chat_id, mode=mode, options=options
     )
+
+
+@mcp.tool(name="list_chats_page", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_list_chats_page(cursor: str = "", top: int = 50) -> dict:
+    """Deprecated alias for list_chats."""
+    return await list_chats(cursor=cursor, top=top)
+
+
+@mcp.tool(name="list_chat_messages_page", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "") -> dict:
+    """Deprecated alias for read_teams_messages."""
+    # The page option pins the json ancestor's semantics: one page, newest
+    # first, `since` filtering last-modified rather than creation time.
+    return await read_teams_messages(
+        chat_id=chat_id, since=since, cursor=cursor, options='{"page": true}'
+    )
+
+
+@mcp.tool(name="send_chat_message_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_send_chat_message_json(chat_id: str, text: str, attachments: str = "") -> dict:
+    """Deprecated alias for send_teams_message."""
+    # These two error strings are part of the frozen json contract; the merged
+    # tool speaks invalid_arguments instead, so they live only here.
+    if not chat_id.strip():
+        return {"message": None, "error": "chat_id must not be empty"}
+    if not text.strip() and not attachments.strip():
+        return {"message": None, "error": "text must not be empty"}
+    return await send_teams_message(message=text, chat_id=chat_id, attachments=attachments)
 
 
 if __name__ == "__main__":

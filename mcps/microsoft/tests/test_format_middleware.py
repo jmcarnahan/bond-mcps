@@ -19,11 +19,14 @@ from ms_graph.graph_client import GRAPH_BASE_URL
 from ms_graph.power_bi import POWERBI_BASE_URL
 
 from .conftest import (
+    SAMPLE_CHAT_MESSAGE_SYSTEM,
+    SAMPLE_CHAT_MESSAGE_WITH_FILE,
     SAMPLE_DRIVE_ITEM_FILE,
     SAMPLE_DRIVE_ITEM_FOLDER,
     SAMPLE_EXTERNAL_MESSAGE,
     SAMPLE_MESSAGE,
     SAMPLE_MESSAGES_RESPONSE,
+    TEAMS_FILE_ATTACHMENT_ID,
 )
 
 CONNECT_URL = "https://auth.example.com/connect/microsoft?ticket=t"
@@ -110,10 +113,10 @@ class TestCompactPath:
     async def test_str_tool_is_left_alone(self, mcp_server):
         """Markdown tools advertise a generated output schema and must keep
         their structured content, or the client rejects the result."""
-        result = await _call(mcp_server, "read_teams_messages", {})
+        result = await _call(mcp_server, "read_email", {"message_id": "x", "options": "not json"})
 
         assert result.structured_content == {"result": _get_text(result)}
-        assert _get_text(result) == "Provide either chat_id, or both team_id and channel_id."
+        assert _get_text(result).startswith("Parameter 'options' must be valid JSON")
 
     @respx.mock
     async def test_list_emails_renders_as_pipe_csv(self, mcp_server):
@@ -190,6 +193,89 @@ class TestCompactPath:
         assert _get_text(result) == ("[Region]|[Units]|[Margin]\nWest|4200|\nEast||0.12\ncount: 2")
 
     @respx.mock
+    async def test_read_teams_messages_renders_stripped_rows(self, mcp_server):
+        """The override flattens the nested rows the default rules would have
+        dumped as JSON: HTML stripped, attachments named, senders labelled."""
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(
+                200,
+                json={"value": [SAMPLE_CHAT_MESSAGE_WITH_FILE, SAMPLE_CHAT_MESSAGE_SYSTEM]},
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {"chat_id": "chat-1on1-001", "since": "2025-01-01"},
+            )
+
+        assert result.structured_content is None
+        lines = _get_text(result).split("\n")
+        assert lines[0] == "timestamp|sender|content|attachments|id"
+        assert lines[1] == (
+            "2026-02-01T10:00:00Z|Alice Smith|Here is the deck [File: roadmap.pptx]|"
+            f"roadmap.pptx [file:{TEAMS_FILE_ATTACHMENT_ID}]|chat-msg-file-001"
+        )
+        # A system event has no sender and no body at all.
+        assert lines[2] == "2026-01-05T12:00:00Z|(system)|(empty)||chat-msg-003"
+        # next_cursor is empty outside page mode, so only the count survives.
+        assert lines[3:] == ["count: 2"]
+
+    @respx.mock
+    async def test_read_teams_messages_truncates_without_leaking_the_hint(self, mcp_server):
+        """max_content_length shortens the content column and is itself dropped
+        — it is a rendering hint, not a result."""
+        long_msg = {
+            "id": "msg-long-001",
+            "messageType": "message",
+            "createdDateTime": "2025-12-15T12:00:00Z",
+            "from": {"user": {"displayName": "Tim"}, "application": None},
+            "body": {"contentType": "text", "content": "x" * 500},
+            "attachments": [],
+        }
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
+            return_value=httpx.Response(200, json={"value": [long_msg]})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_teams_messages",
+                {
+                    "chat_id": "chat-1on1-001",
+                    "since": "2025-01-01",
+                    "options": '{"max_content_length": 20}',
+                },
+            )
+
+        text = _get_text(result)
+        assert f"|{'x' * 20}...|" in text
+        assert "max_content_length" not in text
+
+    async def test_read_teams_messages_error_still_leads_with_the_code(self, mcp_server):
+        """An override preempts the error rule, so it must delegate back to it."""
+        result = await _call(mcp_server, "read_teams_messages", {})
+
+        assert result.structured_content is None
+        assert _get_text(result).split("\n")[0] == "error: invalid_arguments"
+
+    @respx.mock
+    async def test_send_teams_message_renders_a_confirmation(self, mcp_server):
+        respx.post(f"{GRAPH_BASE_URL}/chats/chat-1on1-001/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "send_teams_message",
+                {"message": "here you go", "chat_id": "chat-1on1-001"},
+            )
+
+        assert result.structured_content is None
+        assert _get_text(result) == (
+            "Message sent to Teams chat.\nid: chat-msg-file-001\nfiles: roadmap.pptx"
+        )
+
+    @respx.mock
     async def test_list_emails_notice_line_is_verbatim_under_the_policy(
         self, mcp_server, monkeypatch
     ):
@@ -226,10 +312,10 @@ class TestDesktopPath:
         }
 
     async def test_str_tool_is_identical_under_both_paths(self, mcp_server):
-        args: dict = {}
-        compact = await _call(mcp_server, "read_teams_messages", args)
+        args: dict = {"message_id": "x", "options": "not json"}
+        compact = await _call(mcp_server, "read_email", args)
         with _desktop_headers():
-            desktop = await _call(mcp_server, "read_teams_messages", args)
+            desktop = await _call(mcp_server, "read_email", args)
 
         assert _get_text(compact) == _get_text(desktop)
         assert desktop.structured_content == compact.structured_content
@@ -263,13 +349,13 @@ class TestOutputSchemas:
             "add_draft_attachment_json",
             "send_draft",
             "mark_mail_read",
-            "list_chats_page",
+            "list_chats",
             "get_chat_members",
             "ensure_chat",
-            "list_chat_messages_page",
+            "read_teams_messages",
             "get_teams_attachment",
             "mark_chat_read",
-            "send_chat_message_json",
+            "send_teams_message",
             "inspect_file",
             "connection_status",
             "list_teams",
