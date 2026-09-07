@@ -13,26 +13,31 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (49 tools):
-  Email     : get_user_profile, list_emails, read_email, get_email_attachment, send_email,
-              manage_inbox_rules, manage_mail_folders
+Tool summary (47 tools):
+  Email     : get_profile, list_emails, sync_mail, read_email, get_email_attachment,
+              send_email, mark_mail_read, manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
   Teams     : list_teams, list_chats, read_teams_messages, search_teams_messages,
-              get_teams_attachment, send_teams_message, get_teams_activity
+              get_teams_attachment, send_teams_message, get_teams_activity,
+              get_chat_members, ensure_chat, mark_chat_read
   Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, edit_document, manage_file
   Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
-  Desktop JSON : get_profile_json, search_people_json, list_mail_delta, get_mail_detail,
-                 get_mail_attachment_json, create_reply_draft_json, create_draft_json,
-                 update_draft_body, add_draft_attachment_json, send_draft, mark_mail_read_json,
-                 list_chats_page, get_chat_members_json, ensure_chat_json,
-                 list_chat_messages_page, get_chat_attachment_json, mark_chat_read_json,
-                 send_chat_message_json, inspect_file_json, connection_status
+  Directory : search_people
+  Desktop JSON : get_mail_detail, get_mail_attachment_json, create_reply_draft_json,
+                 create_draft_json, update_draft_body, add_draft_attachment_json, send_draft,
+                 list_chats_page, list_chat_messages_page, get_chat_attachment_json,
+                 send_chat_message_json, connection_status
 
-The 29 markdown tools above render prose for an LLM to read. The Desktop JSON
-namespace is for programmatic clients (the desktop mail app) and follows a
-different convention: every tool returns a ``dict``, which FastMCP surfaces as
-structuredContent. Parameters stay ``str``/``int`` only (empty string = absent)
-for Bedrock compatibility, as everywhere else in this server.
+27 of these tools return a prose/CSV string an LLM reads directly; the other 20
+return a ``dict`` and declare ``output_schema=None``, which opts them into the
+FormatNegotiation middleware: a caller sending ``X-Bond-Client: desktop`` (the
+desktop mail app) gets the dict as structuredContent, while every other caller
+gets a compact text rendering of the same dict. Parameters stay ``str``/``int``
+only (empty string = absent) for Bedrock compatibility, as everywhere else in
+this server.
+
+Tools that have been renamed keep their old names as deprecated aliases: still
+callable, but hidden from tools/list by HideDeprecatedAliases.
 """
 
 import base64
@@ -46,7 +51,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from bond_common import FormatNegotiation, HideDeprecatedAliases
+from bond_common import DEPRECATED_ALIAS_TAG, FormatNegotiation, HideDeprecatedAliases
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from starlette.responses import JSONResponse
@@ -250,41 +255,6 @@ register_noauth_wellknown(mcp)
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request):
     return JSONResponse({"status": "ok", "version": os.environ.get("BUILD_VERSION", "dev")})
-
-
-# ---------------------------------------------------------------------------
-# User profile
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-async def get_user_profile() -> str:
-    """
-    Get the authenticated user's profile information.
-
-    Returns the user's display name, email addresses, and account identifiers.
-    Useful for discovering who you are sending email as.
-
-    IMPORTANT: If a "Mailbox Address" is shown, use that as the from_address
-    when sending email. This is the address that the mail server is authorized
-    to send from, and avoids "via" warnings and spam filtering.
-    """
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        profile = await mail_ops.aget_profile(client)
-
-    lines = [
-        f"**Display Name:** {profile.get('displayName', '?')}",
-        f"**Mail:** {profile.get('mail', '(not set)')}",
-        f"**User Principal Name:** {profile.get('userPrincipalName', '?')}",
-    ]
-    mailbox_addr = profile.get("mailboxAddress")
-    if mailbox_addr:
-        lines.append(f"**Mailbox Address:** {mailbox_addr}")
-    if profile.get("jobTitle"):
-        lines.append(f"**Job Title:** {profile['jobTitle']}")
-    lines.append(f"**ID:** `{profile.get('id', '?')}`")
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -2355,126 +2325,6 @@ async def list_files(
 
 
 @mcp.tool()
-async def inspect_file(
-    item_id: str = "", site_id: str = "", url: str = "", read_content: bool = False
-) -> str:
-    """
-    Get metadata and optionally the content of a file from OneDrive or SharePoint.
-
-    Accepts either:
-    - item_id: A drive item ID (from list_files output)
-    - url: A SharePoint/OneDrive sharing URL (paste directly from browser or Teams)
-
-    By default returns metadata only (name, type, size, modified date, ID, URL).
-    Pass read_content=True to also download and return the file's content.
-    Supports text files (up to 2 MB) and Office documents (docx, pptx, xlsx, pdf
-    up to 50 MB — extracts text, tables, and notes; images are noted but not shown).
-
-    Args:
-        item_id: The drive item ID (from list_files output). Can also accept a sharing URL.
-        site_id: SharePoint site ID. Leave empty for OneDrive. Ignored when url is provided.
-        url: A SharePoint/OneDrive sharing URL. When provided, resolves the link first.
-        read_content: False (default) to return metadata only.
-                      True to download and return text content.
-    """
-    sharing_url = url.strip() if url else ""
-    if not sharing_url and item_id and files_ops.is_sharing_url(item_id):
-        sharing_url = item_id.strip()
-
-    if not sharing_url and not item_id:
-        return "Please provide either an item_id or a sharing url."
-
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        if sharing_url:
-            try:
-                if read_content:
-                    item, content = await files_ops.aresolve_sharing_link_content(
-                        client, sharing_url
-                    )
-                    if content is None:
-                        item, content = await files_ops.aresolve_sharing_link_extracted_content(
-                            client, sharing_url, item=item
-                        )
-                else:
-                    item = await files_ops.aresolve_sharing_link(client, sharing_url)
-                    content = None
-            except GraphError as e:
-                if e.status_code == 403:
-                    return (
-                        "**Access denied** to this sharing link.\n"
-                        "You don't have permission to access this item. "
-                        "The owner may need to re-share it with you."
-                    )
-                elif e.status_code == 404:
-                    return (
-                        "**Item not found** for this sharing link.\n"
-                        "The link may have expired, been revoked, or the item was deleted."
-                    )
-                elif e.status_code == 400:
-                    return (
-                        "**Invalid sharing link.**\n"
-                        "Could not resolve this URL. Make sure it's a valid "
-                        "SharePoint or OneDrive sharing link."
-                    )
-                raise
-        else:
-            if read_content:
-                item, content = await files_ops.aget_drive_item_content(
-                    client, item_id, site_id=site_id
-                )
-                if content is None:
-                    item, content = await files_ops.aget_drive_item_extracted_content(
-                        client, item_id, site_id=site_id, item=item
-                    )
-            else:
-                item = await files_ops.aget_drive_item(client, item_id, site_id=site_id)
-                content = None
-
-    name = item.get("name", "?")
-    modified = item.get("lastModifiedDateTime", "?")
-    modified_by = item.get("lastModifiedBy", {}).get("user", {}).get("displayName", "?")
-    web_url = item.get("webUrl", "")
-
-    if "folder" in item:
-        type_line = f"**Type:** Folder ({item['folder'].get('childCount', '?')} items)"
-    else:
-        mime = item.get("file", {}).get("mimeType", "unknown")
-        size = _format_size(item.get("size", 0))
-        type_line = f"**Type:** {mime} ({size})"
-
-    parent_ref = item.get("parentReference", {})
-    header = (
-        f"**Name:** {name}\n"
-        f"{type_line}\n"
-        f"**Modified:** {modified} by {modified_by}\n"
-        f"**ID:** `{item.get('id', '?')}`"
-    )
-    if parent_ref.get("driveId"):
-        header += f"\n**Drive ID:** `{parent_ref['driveId']}`"
-    if web_url:
-        header += f"\n**URL:** {web_url}"
-
-    if not read_content:
-        return header
-
-    if content is not None:
-        return f"{header}\n\n---\n{content}"
-
-    if "folder" in item:
-        msg = "This is a folder, not a file. Use list_files to browse its contents."
-    elif item.get("size", 0) > files_ops.MAX_DOCUMENT_DOWNLOAD_BYTES:
-        msg = "This file is too large for content extraction (limit: 50 MB)."
-    elif item.get("size", 0) > files_ops.MAX_TEXT_DOWNLOAD_BYTES:
-        msg = "This file is too large to display as text (limit: 2 MB)."
-    else:
-        msg = "This is a binary file and cannot be displayed as text."
-    if web_url:
-        msg += f"\nOpen in browser: {web_url}"
-    return f"{header}\n\n{msg}"
-
-
-@mcp.tool()
 async def upload_file(
     filename: str,
     content: str,
@@ -3038,11 +2888,12 @@ async def export_report(
 
 
 # ---------------------------------------------------------------------------
-# Desktop JSON tools
+# Dict-returning tools
 #
-# A separate namespace for programmatic clients (the desktop mail app). Unlike
-# the 29 markdown tools above, these return dicts — FastMCP renders them as
-# structuredContent. Parameters remain str/int only.
+# Unlike the 27 str-returning tools above, these return a canonical dict.
+# FormatNegotiation hands that dict to a programmatic caller (the desktop mail
+# app) as structuredContent and renders it compactly for everyone else.
+# Parameters remain str/int only.
 #
 # Error contract: a missing Microsoft connection returns the not_connected
 # payload (with a connect URL when one exists). The Teams write tools return
@@ -3051,20 +2902,20 @@ async def export_report(
 # structured permanent errors — invalid_mode, too_large, reference, empty_name,
 # invalid_base64 — which must not be retried either. The Teams attachment
 # reader returns not_found, access_denied, no_thumbnail, invalid_thumbnail,
-# is_folder, and too_large; inspect_file_json returns missing_target,
+# is_folder, and too_large; inspect_file returns missing_target,
 # access_denied, not_found, and invalid_link — all permanent.
 # send_chat_message_json returns invalid_attachments and files_scope_missing
 # (the account's connection lacks Files.ReadWrite) — both permanent. The mail
 # tools return external_sender when the mail sender policy hides a message —
 # also permanent, and never accompanied by any detail of the hidden message;
 # connection_status reports mail_policy.enabled so a client can explain the
-# gap and resync when it flips. The three paging tools (list_mail_delta,
+# gap and resync when it flips. The three paging tools (sync_mail,
 # list_chats_page, list_chat_messages_page) return invalid_cursor when the
 # cursor is not a Graph URL — permanent; the Graph client refuses to send the
 # bearer token anywhere else. send_draft reads the draft's ids before sending
 # and returns them, so a client can store its own copy of the sent mail.
-# search_people_json returns directory_scope_missing when the connection lacks
-# User.ReadBasic.All; ensure_chat_json returns invalid_members (an id that is
+# search_people returns directory_scope_missing when the connection lacks
+# User.ReadBasic.All; ensure_chat returns invalid_members (an id that is
 # not a Graph user id or UPN), no_identity (the caller cannot be read off the
 # token), and no_members (nobody left after dropping blanks and the caller),
 # plus teams_unavailable — all permanent.
@@ -3183,14 +3034,20 @@ def _stored_graph_scopes() -> list[str]:
 
 
 @mcp.tool(output_schema=None)
-async def get_profile_json() -> dict:
+async def get_profile() -> dict:
     """
-    Get the signed-in user's identity as structured JSON.
+    Get the signed-in user's identity.
 
-    For programmatic clients. Returns id, display_name, mail, and
-    user_principal_name. The id is the Graph user object ID — Teams messages
-    carry the same ID, so clients use it to tell their own messages apart from
-    everyone else's.
+    Returns id, display_name, mail, user_principal_name, mailbox_address, and
+    job_title. Every key is always present; mailbox_address and job_title are
+    null when Graph does not supply them.
+
+    IMPORTANT: when mailbox_address is set, use it as the from_address when
+    sending email. That is the address the mail server is authorized to send
+    from, and using it avoids "via" warnings and spam filtering.
+
+    The id is the Graph user object ID — Teams messages carry the same ID, so
+    clients use it to tell their own messages apart from everyone else's.
     """
     try:
         token = get_graph_token()
@@ -3198,22 +3055,26 @@ async def get_profile_json() -> dict:
             profile = await mail_ops.aget_profile(client)
     except PermissionError as e:
         return _not_connected(e)
-    return _profile_json(profile)
+    return {
+        **_profile_json(profile),
+        "mailbox_address": profile.get("mailboxAddress"),
+        "job_title": profile.get("jobTitle"),
+    }
 
 
 @mcp.tool(output_schema=None)
-async def search_people_json(query: str, top: int = 10) -> dict:
+async def search_people(query: str, top: int = 10) -> dict:
     """
-    Search the organisation directory as structured JSON.
+    Search the organisation directory by name or mail prefix.
 
-    For programmatic clients building a recipient typeahead. Matches people
-    whose display name has a word starting with the query or whose mail
-    starts with it, ordered by display name. Returns people: a list of
-    {id, display_name, mail, user_principal_name, job_title}; mail and
-    job_title may be null. The signed-in user can appear in the results —
-    the client filters them out if it wants to. A blank query, or one with
-    nothing searchable left once "&" is dropped, returns an empty list
-    without calling Graph.
+    Matches people whose display name has a word starting with the query or
+    whose mail starts with it, ordered by display name. Returns people: a list
+    of {id, display_name, mail, user_principal_name, job_title}, rendered as
+    pipe-CSV with those columns; mail and job_title may be null. The signed-in
+    user can appear in the results — a caller building a recipient typeahead
+    filters them out if it wants to. A blank query, or one with nothing
+    searchable left once "&" is dropped, returns an empty list without calling
+    Graph.
 
     Requires User.ReadBasic.All. Without it the tool returns
     {"error": "directory_scope_missing"}, which is permanent until the
@@ -3240,14 +3101,15 @@ async def search_people_json(query: str, top: int = 10) -> dict:
 
 
 @mcp.tool(output_schema=None)
-async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received: str = "") -> dict:
+async def sync_mail(folder: str = "inbox", cursor: str = "", min_received: str = "") -> dict:
     """
-    Fetch ONE page of a mail folder's delta feed as structured JSON.
+    Fetch ONE page of a mail folder's delta feed, for incremental sync.
 
-    For programmatic clients doing incremental sync. Returns messages (raw
-    Graph message objects, including `@removed` tombstones for deletions),
-    next_cursor (more pages in this run), delta_cursor (this run is done —
-    save it and pass it back next time), and resync.
+    Returns messages (raw Graph message objects, including `@removed`
+    tombstones for deletions), next_cursor (more pages in this run),
+    delta_cursor (this run is done — save it and pass it back next time), and
+    resync. The rows keep Graph's own nested camelCase shape, so they render as
+    compact JSON rather than CSV; use list_emails for a readable listing.
 
     Args:
         folder: Mail folder to sync (default: inbox).
@@ -3275,7 +3137,7 @@ async def list_mail_delta(folder: str = "inbox", cursor: str = "", min_received:
     except PermissionError as e:
         return _not_connected(e)
     except NonGraphUrlError:
-        logger.warning("list_mail_delta: refused a non-Graph cursor")
+        logger.warning("sync_mail: refused a non-Graph cursor")
         return {"error": "invalid_cursor"}
     except GraphError as e:
         if e.status_code == 410:
@@ -3700,14 +3562,14 @@ async def send_draft(draft_id: str) -> dict:
 
 
 @mcp.tool(output_schema=None)
-async def mark_mail_read_json(message_ids: str, is_read: str = "true") -> dict:
+async def mark_mail_read(message_ids: str, is_read: str = "true") -> dict:
     """
-    Mark messages read (or unread) in bulk. Returns structured JSON.
+    Mark messages read (or unread) in bulk.
 
-    For programmatic clients syncing read state. Best effort per message: a
-    message that no longer exists is reported in failed rather than failing the
-    whole call. Returns updated (how many were patched) and failed (one entry
-    per message that was not, with id and error). At most 100 IDs are processed
+    Best effort per message: a message that no longer exists is reported in
+    failed rather than failing the whole call. Returns updated (how many were
+    patched) and failed (one entry per message that was not), the latter
+    rendered as pipe-CSV with columns id|error. At most 100 IDs are processed
     per call; anything beyond that is ignored.
 
     Args:
@@ -3753,7 +3615,7 @@ async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
 
     For programmatic clients. Chats come back newest-activity-first. Each entry
     has id, topic (null for 1:1 chats — resolve a name via
-    get_chat_members_json), last_preview_at, and last_read_at (how far the
+    get_chat_members), last_preview_at, and last_read_at (how far the
     signed-in user has read the chat; null when Graph sends no viewpoint).
     Returns next_cursor for the next page, empty when the listing is complete.
     A cursor that is not a Graph URL returns {"error": "invalid_cursor"} without
@@ -3789,13 +3651,13 @@ async def list_chats_page(cursor: str = "", top: int = 50) -> dict:
 
 
 @mcp.tool(output_schema=None)
-async def get_chat_members_json(chat_id: str) -> dict:
+async def get_chat_members(chat_id: str) -> dict:
     """
-    List a chat's members as structured JSON.
+    List a chat's members.
 
-    For programmatic clients. Returns the chat's full member list, each entry
-    with user_id and display_name. Use it to label 1:1 chats, which have no
-    topic.
+    Returns members: the chat's full member list, each entry with user_id and
+    display_name, rendered as pipe-CSV with those columns. Use it to label 1:1
+    chats, which have no topic.
 
     Args:
         chat_id: The chat ID (from list_chats_page).
@@ -3818,17 +3680,16 @@ _CHAT_MEMBER_ID_RE = re.compile(r"[A-Za-z0-9._@+-]+")
 
 
 @mcp.tool(output_schema=None)
-async def ensure_chat_json(user_ids: str, topic: str = "") -> dict:
+async def ensure_chat(user_ids: str, topic: str = "") -> dict:
     """
-    Find or create a Teams chat with the given people. Returns structured JSON.
+    Find or create a Teams chat with the given people.
 
-    For programmatic clients that want to message someone who has no chat
-    yet. Pass one id and Graph returns the existing 1:1 chat with that person
-    if there is one, otherwise creates it — calling this twice is safe. Pass
-    two or more ids and Graph creates a NEW group chat every call (group
-    chats are never de-duplicated); topic applies only to a group chat. The
-    signed-in user is always a member and need not be listed. Requires
-    Chat.ReadWrite.
+    Use it to message someone who has no chat yet. Pass one id and Graph
+    returns the existing 1:1 chat with that person if there is one, otherwise
+    creates it — calling this twice is safe. Pass two or more ids and Graph
+    creates a NEW group chat every call (group chats are never de-duplicated);
+    topic applies only to a group chat. The signed-in user is always a member
+    and need not be listed. Requires Chat.ReadWrite.
 
     Returns chat_id and chat_type ("oneOnOne" or "group"). Permanent errors:
     invalid_members (an id is not a Graph user id or UPN), no_identity (the
@@ -3838,7 +3699,7 @@ async def ensure_chat_json(user_ids: str, topic: str = "") -> dict:
 
     Args:
         user_ids: Comma-separated Graph user ids or user principal names.
-            Prefer the id search_people_json returns: a UPN with a character
+            Prefer the id search_people returns: a UPN with a character
             outside letters, digits, and ._@+- (an apostrophe, say) is
             rejected as invalid_members.
         topic: Optional group-chat title; ignored for a 1:1 chat.
@@ -4028,15 +3889,14 @@ async def get_chat_attachment_json(
 
 
 @mcp.tool(output_schema=None)
-async def mark_chat_read_json(chat_id: str) -> dict:
+async def mark_chat_read(chat_id: str) -> dict:
     """
-    Mark a Teams chat read for the signed-in user. Returns structured JSON.
+    Mark a Teams chat read for the signed-in user.
 
     Read state in Teams is per CHAT, not per message: it is a viewpoint on the
     conversation, so this marks the chat read up to its newest message and
-    there is no way to ack one message and leave a later one unread. For
-    programmatic clients acking a read the client already recorded locally.
-    Requires Chat.ReadWrite.
+    there is no way to ack one message and leave a later one unread. Requires
+    Chat.ReadWrite.
 
     Returns ok: true on success. On failure ok is false and error says why —
     "no_identity" when the signed-in user cannot be read off the token,
@@ -4210,24 +4070,24 @@ def _drive_item_json(item: dict) -> dict:
 
 
 @mcp.tool(output_schema=None)
-async def inspect_file_json(
+async def inspect_file(
     item_id: str = "", url: str = "", read_content: str = "false", site_id: str = ""
 ) -> dict:
     """
-    Get a file's metadata, and optionally its text, as structured JSON.
-
-    The JSON sibling of inspect_file, for programmatic clients. This is how a
-    client resolves a Teams attachment's content_url or a mail link
-    attachment's source_url into something it can show or read.
+    Get a file's metadata from OneDrive or SharePoint, and optionally its text.
 
     Accepts either a drive item id (from list_files) or a SharePoint/OneDrive
-    sharing URL. An item_id that looks like a sharing URL is treated as one,
-    the same way inspect_file does.
+    sharing URL pasted from the browser or Teams. An item_id that looks like a
+    sharing URL is treated as one. This is also how a Teams attachment's
+    content_url or a mail link attachment's source_url is resolved into
+    something readable.
 
     Returns item_id, name, size, content_type, web_url, modified, and
     is_folder. With read_content "true" it also returns text — extracted from
-    Word, PowerPoint, Excel, and PDF documents, or decoded for text files, and
-    null when the content is binary, a folder, or over the size limits.
+    Word, PowerPoint, Excel, and PDF documents (up to 50 MB; tables and notes
+    included, images noted but not shown), or decoded for text files (up to
+    2 MB) — and null when the content is binary, a folder, or over those
+    limits.
 
     Permanent errors: missing_target (neither an id nor a url was given), and
     for sharing URLs access_denied (403), not_found (404), and invalid_link
@@ -4303,8 +4163,9 @@ async def connection_status() -> dict:
 
     For programmatic clients deciding what to show before any real call.
     Returns connected, scopes (bare lowercased names, e.g. "mail.read"),
-    connect_url (set only when disconnected), and account (the same shape as
-    get_profile_json, or null if the profile could not be fetched).
+    connect_url (set only when disconnected), and account ({id, display_name,
+    mail, user_principal_name}, or null if the profile could not be fetched —
+    get_profile returns the same four keys plus mailbox_address and job_title).
 
     An empty scopes list on a connected account means "unknown", not "none":
     token rows persisted before the scopes key was corrected have no scopes
@@ -4357,6 +4218,77 @@ async def connection_status() -> dict:
         "account": account,
         "mail_policy": policy,
     }
+
+
+# ---------------------------------------------------------------------------
+# Deprecated aliases
+#
+# Every renamed tool answers to its old name here. HideDeprecatedAliases keeps
+# these out of tools/list, so a model never sees two names for one tool, but a
+# call still works — bond-desktop's call sites move over on its own release
+# schedule, and these come out once it has. Each forwarder keeps its ancestor's
+# exact signature and declares output_schema=None, without which the alias
+# advertises a generated schema and FormatNegotiation has to pass it through
+# uncompacted.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(name="get_user_profile", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_get_user_profile() -> dict:
+    """Deprecated alias for get_profile."""
+    return await get_profile()
+
+
+@mcp.tool(name="get_profile_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_get_profile_json() -> dict:
+    """Deprecated alias for get_profile."""
+    return await get_profile()
+
+
+@mcp.tool(name="search_people_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_search_people_json(query: str, top: int = 10) -> dict:
+    """Deprecated alias for search_people."""
+    return await search_people(query, top=top)
+
+
+@mcp.tool(name="list_mail_delta", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_list_mail_delta(
+    folder: str = "inbox", cursor: str = "", min_received: str = ""
+) -> dict:
+    """Deprecated alias for sync_mail."""
+    return await sync_mail(folder=folder, cursor=cursor, min_received=min_received)
+
+
+@mcp.tool(name="mark_mail_read_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_mark_mail_read_json(message_ids: str, is_read: str = "true") -> dict:
+    """Deprecated alias for mark_mail_read."""
+    return await mark_mail_read(message_ids, is_read=is_read)
+
+
+@mcp.tool(name="get_chat_members_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_get_chat_members_json(chat_id: str) -> dict:
+    """Deprecated alias for get_chat_members."""
+    return await get_chat_members(chat_id)
+
+
+@mcp.tool(name="ensure_chat_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_ensure_chat_json(user_ids: str, topic: str = "") -> dict:
+    """Deprecated alias for ensure_chat."""
+    return await ensure_chat(user_ids, topic=topic)
+
+
+@mcp.tool(name="mark_chat_read_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_mark_chat_read_json(chat_id: str) -> dict:
+    """Deprecated alias for mark_chat_read."""
+    return await mark_chat_read(chat_id)
+
+
+@mcp.tool(name="inspect_file_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_inspect_file_json(
+    item_id: str = "", url: str = "", read_content: str = "false", site_id: str = ""
+) -> dict:
+    """Deprecated alias for inspect_file."""
+    return await inspect_file(item_id=item_id, url=url, read_content=read_content, site_id=site_id)
 
 
 if __name__ == "__main__":

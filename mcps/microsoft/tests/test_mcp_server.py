@@ -350,7 +350,7 @@ class TestMCPProfileTools:
     """Test user profile MCP tools via in-process FastMCP client."""
 
     @respx.mock
-    async def test_get_user_profile_with_mailbox_address(self, mcp_server):
+    async def test_get_profile_with_mailbox_address(self, mcp_server):
         respx.get(f"{GRAPH_BASE_URL}/me").mock(
             return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
         )
@@ -361,16 +361,20 @@ class TestMCPProfileTools:
             from fastmcp import Client
 
             async with Client(mcp_server) as client:
-                result = await client.call_tool("get_user_profile", {})
+                result = await client.call_tool("get_profile", {})
 
-        text = _get_text(result)
-        assert "Test User" in text
-        assert "user@example.com" in text
-        assert "Mailbox Address" in text
-        assert "mailbox@example.com" in text
+        assert _structured(result) == {
+            "id": "user-id-001",
+            "display_name": "Test User",
+            "mail": "user@example.com",
+            "user_principal_name": "user@example.com",
+            "mailbox_address": "mailbox@example.com",
+            "job_title": None,
+        }
 
     @respx.mock
-    async def test_get_user_profile_without_mailbox_scope(self, mcp_server):
+    async def test_get_profile_without_mailbox_scope(self, mcp_server):
+        """mailbox_address stays present and null when the scope is missing."""
         respx.get(f"{GRAPH_BASE_URL}/me").mock(
             return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
         )
@@ -383,11 +387,17 @@ class TestMCPProfileTools:
             from fastmcp import Client
 
             async with Client(mcp_server) as client:
-                result = await client.call_tool("get_user_profile", {})
+                result = await client.call_tool("get_profile", {})
 
-        text = _get_text(result)
-        assert "Test User" in text
-        assert "Mailbox Address" not in text
+        data = _structured(result)
+        assert data["display_name"] == "Test User"
+        assert data["mailbox_address"] is None
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "get_profile")
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 # ---------------------------------------------------------------------------
@@ -3419,168 +3429,6 @@ class TestMCPFileTools:
         assert "No files found" in _get_text(result)
 
     @respx.mock
-    async def test_inspect_file_metadata_only_default(self, mcp_server):
-        """Default (no read_content arg) → metadata only, no download."""
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{SAMPLE_DRIVE_ITEM_FILE['id']}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "inspect_file",
-                    {"item_id": SAMPLE_DRIVE_ITEM_FILE["id"]},
-                )
-
-        text = _get_text(result)
-        assert "report.csv" in text
-        assert "Alice Smith" in text
-        assert "---" not in text
-
-    @respx.mock
-    async def test_inspect_file_metadata_only_explicit(self, mcp_server):
-        """read_content=False → metadata only, no download."""
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{SAMPLE_DRIVE_ITEM_FILE['id']}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "inspect_file",
-                    {"item_id": SAMPLE_DRIVE_ITEM_FILE["id"], "read_content": False},
-                )
-
-        text = _get_text(result)
-        assert "report.csv" in text
-        assert "---" not in text
-
-    @respx.mock
-    async def test_inspect_file_with_content(self, mcp_server):
-        """read_content=True → downloads text content."""
-        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
-        )
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/content").mock(
-            return_value=httpx.Response(200, content=b"col1,col2\n1,2\n")
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "inspect_file",
-                    {"item_id": item_id, "read_content": True},
-                )
-
-        text = _get_text(result)
-        assert "report.csv" in text
-        assert "col1,col2" in text
-        assert "---" in text
-
-    @respx.mock
-    async def test_inspect_file_binary_returns_message(self, mcp_server):
-        """Non-extractable binary files (images) report they cannot be shown as text."""
-        image_item = {
-            "id": "file-id-img-001",
-            "name": "diagram.png",
-            "size": 500_000,
-            "file": {"mimeType": "image/png"},
-            "lastModifiedDateTime": "2025-12-15T10:00:00Z",
-            "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-001"}},
-            "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-img-001",
-            "parentReference": {"driveId": "drive-001", "path": "/drive/root:"},
-        }
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-img-001").mock(
-            return_value=httpx.Response(200, json=image_item)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "inspect_file", {"item_id": "file-id-img-001", "read_content": True}
-                )
-
-        text = _get_text(result)
-        assert "diagram.png" in text
-        assert "binary" in text.lower()
-
-    @respx.mock
-    async def test_inspect_file_extracts_pptx(self, mcp_server):
-        """PPTX files are now extracted via document extraction."""
-        import io
-
-        from pptx import Presentation
-
-        prs = Presentation()
-        slide = prs.slides.add_slide(prs.slide_layouts[0])
-        slide.shapes.title.text = "Test Slide Title"
-        buf = io.BytesIO()
-        prs.save(buf)
-        pptx_bytes = buf.getvalue()
-
-        item_id = SAMPLE_DRIVE_ITEM_BINARY["id"]
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_BINARY)
-        )
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/content").mock(
-            return_value=httpx.Response(200, content=pptx_bytes)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "inspect_file", {"item_id": item_id, "read_content": True}
-                )
-
-        text = _get_text(result)
-        assert "presentation.pptx" in text
-        assert "Test Slide Title" in text
-
-    @respx.mock
-    async def test_inspect_file_too_large(self, mcp_server):
-        item_id = SAMPLE_DRIVE_ITEM_LARGE_TEXT["id"]
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_LARGE_TEXT)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "inspect_file", {"item_id": item_id, "read_content": True}
-                )
-
-        text = _get_text(result)
-        assert "too large" in text.lower()
-
-    @respx.mock
-    async def test_inspect_file_sharepoint(self, mcp_server):
-        site_id = "site-id-001"
-        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
-        respx.get(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
-        )
-        respx.get(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}/content").mock(
-            return_value=httpx.Response(200, content=b"data")
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "inspect_file",
-                    {"item_id": item_id, "site_id": site_id, "read_content": True},
-                )
-
-        assert "report.csv" in _get_text(result)
-
-    @respx.mock
     async def test_graph_error_propagates_from_file_tool(self, mcp_server):
         from fastmcp.exceptions import ToolError
 
@@ -3598,8 +3446,8 @@ class TestMCPFileTools:
                     await client.call_tool("list_files", {})
 
 
-class TestMCPInspectFileJson:
-    """inspect_file_json: the structured sibling of inspect_file."""
+class TestMCPInspectFile:
+    """inspect_file: metadata by item id or sharing link, optionally with text."""
 
     @respx.mock
     async def test_by_item_id_returns_metadata_only(self, mcp_server):
@@ -3607,7 +3455,7 @@ class TestMCPInspectFileJson:
             return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
         )
         with _mock_token():
-            result = await _call(mcp_server, "inspect_file_json", {"item_id": "file-id-001"})
+            result = await _call(mcp_server, "inspect_file", {"item_id": "file-id-001"})
 
         assert _structured(result) == {
             "item_id": "file-id-001",
@@ -3625,7 +3473,7 @@ class TestMCPInspectFileJson:
             return_value=httpx.Response(200, json=SAMPLE_SHARED_TEXT_FILE)
         )
         with _mock_token():
-            result = await _call(mcp_server, "inspect_file_json", {"url": TEAMS_FILE_URL})
+            result = await _call(mcp_server, "inspect_file", {"url": TEAMS_FILE_URL})
 
         assert _structured(result) == {
             "item_id": "shared-file-002",
@@ -3643,7 +3491,7 @@ class TestMCPInspectFileJson:
             return_value=httpx.Response(200, json=SAMPLE_SHARED_TEXT_FILE)
         )
         with _mock_token():
-            result = await _call(mcp_server, "inspect_file_json", {"item_id": TEAMS_FILE_URL})
+            result = await _call(mcp_server, "inspect_file", {"item_id": TEAMS_FILE_URL})
 
         assert route.called
         assert _structured(result)["name"] == "notes.md"
@@ -3659,7 +3507,7 @@ class TestMCPInspectFileJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "inspect_file_json",
+                "inspect_file",
                 {"item_id": "file-id-001", "read_content": "true"},
             )
 
@@ -3673,7 +3521,7 @@ class TestMCPInspectFileJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "inspect_file_json",
+                "inspect_file",
                 {"item_id": "folder-id-001", "read_content": "true"},
             )
 
@@ -3681,9 +3529,110 @@ class TestMCPInspectFileJson:
         assert data["is_folder"] is True
         assert data["text"] is None
 
+    @respx.mock
+    async def test_read_content_false_downloads_nothing(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {"item_id": "file-id-001", "read_content": "false"},
+            )
+
+        assert "text" not in _structured(result)
+        assert _graph_trail() == [("GET", "/v1.0/me/drive/items/file-id-001")]
+
+    @respx.mock
+    async def test_a_binary_file_has_no_text(self, mcp_server):
+        """An image is neither decodable as text nor extractable as a document."""
+        image_item = {
+            "id": "file-id-img-001",
+            "name": "diagram.png",
+            "size": 500_000,
+            "file": {"mimeType": "image/png"},
+            "lastModifiedDateTime": "2025-12-15T10:00:00Z",
+            "lastModifiedBy": {"user": {"displayName": "Alice Smith", "id": "user-001"}},
+            "webUrl": "https://onedrive.live.com/edit.aspx?resid=file-id-img-001",
+            "parentReference": {"driveId": "drive-001", "path": "/drive/root:"},
+        }
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-img-001").mock(
+            return_value=httpx.Response(200, json=image_item)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": "file-id-img-001", "read_content": "true"}
+            )
+
+        data = _structured(result)
+        assert data["name"] == "diagram.png"
+        assert data["text"] is None
+
+    @respx.mock
+    async def test_pptx_text_is_extracted(self, mcp_server):
+        import io
+
+        from pptx import Presentation
+
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[0])
+        slide.shapes.title.text = "Test Slide Title"
+        buf = io.BytesIO()
+        prs.save(buf)
+
+        item_id = SAMPLE_DRIVE_ITEM_BINARY["id"]
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_BINARY)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}/content").mock(
+            return_value=httpx.Response(200, content=buf.getvalue())
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": item_id, "read_content": "true"}
+            )
+
+        data = _structured(result)
+        assert data["name"] == "presentation.pptx"
+        assert "Test Slide Title" in data["text"]
+
+    @respx.mock
+    async def test_a_file_over_the_size_limit_has_no_text(self, mcp_server):
+        item_id = SAMPLE_DRIVE_ITEM_LARGE_TEXT["id"]
+        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/{item_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_LARGE_TEXT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "inspect_file", {"item_id": item_id, "read_content": "true"}
+            )
+
+        assert _structured(result)["text"] is None
+
+    @respx.mock
+    async def test_site_id_reads_from_a_sharepoint_drive(self, mcp_server):
+        site_id = "site-id-001"
+        item_id = SAMPLE_DRIVE_ITEM_FILE["id"]
+        respx.get(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/sites/{site_id}/drive/items/{item_id}/content").mock(
+            return_value=httpx.Response(200, content=b"data")
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "inspect_file",
+                {"item_id": item_id, "site_id": site_id, "read_content": "true"},
+            )
+
+        assert _structured(result)["name"] == "report.csv"
+        assert _graph_trail()[0][1].startswith(f"/v1.0/sites/{site_id}/drive/items/")
+
     async def test_missing_target(self, mcp_server):
         with _mock_token():
-            result = await _call(mcp_server, "inspect_file_json", {})
+            result = await _call(mcp_server, "inspect_file", {})
 
         assert _structured(result) == {"error": "missing_target"}
 
@@ -3695,13 +3644,13 @@ class TestMCPInspectFileJson:
     async def test_sharing_link_failures_map_to_sentinels(self, mcp_server, status, error):
         respx.get(TEAMS_SHARE_BASE).mock(return_value=httpx.Response(status, json=GRAPH_ERROR_404))
         with _mock_token():
-            result = await _call(mcp_server, "inspect_file_json", {"url": TEAMS_FILE_URL})
+            result = await _call(mcp_server, "inspect_file", {"url": TEAMS_FILE_URL})
 
         assert _structured(result) == {"error": error}
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "inspect_file_json", {"item_id": "file-id-001"})
+            result = await _call(mcp_server, "inspect_file", {"item_id": "file-id-001"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
@@ -3714,7 +3663,7 @@ class TestMCPInspectFileJson:
 
         with _mock_token():
             with pytest.raises(ToolError, match="404"):
-                await _call(mcp_server, "inspect_file_json", {"item_id": "nope"})
+                await _call(mcp_server, "inspect_file", {"item_id": "nope"})
 
 
 class TestMCPUploadTool:
@@ -4484,9 +4433,10 @@ class TestMCPAuth:
         from fastmcp import Client
         from fastmcp.exceptions import ToolError
 
-        # Graph tools — blocked by get_graph_token failing
+        # Graph tools — blocked by get_graph_token failing. Dict-returning tools
+        # answer not_connected instead of raising, so they are covered by their
+        # own not-connected tests rather than listed here.
         graph_tools = [
-            ("get_user_profile", {}),
             ("list_emails", {}),
             ("read_email", {"message_id": "fake-id"}),
             ("send_email", {"to": "a@b.com", "subject": "S", "body": "B"}),
@@ -4498,7 +4448,6 @@ class TestMCPAuth:
             ("get_teams_activity", {}),
             ("list_sharepoint_sites", {}),
             ("list_files", {}),
-            ("inspect_file", {"item_id": "x"}),
             ("upload_file", {"filename": "x.txt", "content": "y"}),
             ("manage_file", {"item_id": "x", "new_name": "y"}),
         ]
@@ -4587,34 +4536,6 @@ class TestPostExchangeScopesKey:
         assert "scope" not in out
 
 
-class TestMCPProfileJson:
-    """get_profile_json."""
-
-    @respx.mock
-    async def test_maps_graph_fields(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me").mock(
-            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
-        )
-        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
-        )
-        with _mock_token():
-            result = await _call(mcp_server, "get_profile_json")
-
-        assert _structured(result) == {
-            "id": "user-id-001",
-            "display_name": "Test User",
-            "mail": "user@example.com",
-            "user_principal_name": "user@example.com",
-        }
-
-    async def test_not_connected(self, mcp_server):
-        with _mock_missing_connection():
-            result = await _call(mcp_server, "get_profile_json")
-
-        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
-
-
 USERS_SEARCH_PREFIX = f"{GRAPH_BASE_URL}/users?"
 
 
@@ -4626,13 +4547,13 @@ def _users_query() -> dict:
     raise AssertionError("no /users request was made")
 
 
-class TestMCPSearchPeopleJson:
-    """search_people_json."""
+class TestMCPSearchPeople:
+    """search_people."""
 
     @respx.mock
     async def test_blank_query_returns_empty_without_graph_or_token(self, mcp_server):
         """A typeahead fires on every keystroke, so an empty box costs nothing."""
-        result = await _call(mcp_server, "search_people_json", {"query": "   "})
+        result = await _call(mcp_server, "search_people", {"query": "   "})
 
         assert _structured(result) == {"people": []}
         assert _graph_trail() == []
@@ -4643,7 +4564,7 @@ class TestMCPSearchPeopleJson:
             return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
         )
         with _mock_token():
-            result = await _call(mcp_server, "search_people_json", {"query": "smi"})
+            result = await _call(mcp_server, "search_people", {"query": "smi"})
 
         assert _structured(result) == {
             "people": [
@@ -4674,7 +4595,7 @@ class TestMCPSearchPeopleJson:
             return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
         )
         with _mock_token():
-            await _call(mcp_server, "search_people_json", {"query": "smi", "top": 500})
+            await _call(mcp_server, "search_people", {"query": "smi", "top": 500})
 
         assert _users_query()["$top"] == ["50"]
 
@@ -4682,7 +4603,7 @@ class TestMCPSearchPeopleJson:
     async def test_nothing_searchable_returns_empty_without_graph(self, mcp_server):
         """ "&" is dropped by the escaper; what is left is blank, so no request."""
         with _mock_token():
-            result = await _call(mcp_server, "search_people_json", {"query": " & "})
+            result = await _call(mcp_server, "search_people", {"query": " & "})
 
         assert _structured(result) == {"people": []}
         assert _graph_trail() == []
@@ -4693,7 +4614,7 @@ class TestMCPSearchPeopleJson:
             return_value=httpx.Response(200, json=SAMPLE_USERS_SEARCH_RESPONSE)
         )
         with _mock_token():
-            await _call(mcp_server, "search_people_json", {"query": "  smi  "})
+            await _call(mcp_server, "search_people", {"query": "  smi  "})
 
         assert _users_query()["$search"] == ['"displayName:smi" OR "mail:smi"']
 
@@ -4703,7 +4624,7 @@ class TestMCPSearchPeopleJson:
             return_value=httpx.Response(403, json=GRAPH_ERROR_403)
         )
         with _mock_token():
-            result = await _call(mcp_server, "search_people_json", {"query": "smi"})
+            result = await _call(mcp_server, "search_people", {"query": "smi"})
 
         assert _structured(result) == {"error": "directory_scope_missing"}
 
@@ -4719,17 +4640,17 @@ class TestMCPSearchPeopleJson:
         )
         with _mock_token():
             with pytest.raises(ToolError, match="429"):
-                await _call(mcp_server, "search_people_json", {"query": "smi"})
+                await _call(mcp_server, "search_people", {"query": "smi"})
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "search_people_json", {"query": "smi"})
+            result = await _call(mcp_server, "search_people", {"query": "smi"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPListMailDelta:
-    """list_mail_delta."""
+class TestMCPSyncMail:
+    """sync_mail."""
 
     @respx.mock
     async def test_maps_next_link_and_passes_messages_through_raw(self, mcp_server):
@@ -4737,7 +4658,7 @@ class TestMCPListMailDelta:
             return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
         )
         with _mock_token():
-            result = await _call(mcp_server, "list_mail_delta", {"folder": "inbox"})
+            result = await _call(mcp_server, "sync_mail", {"folder": "inbox"})
 
         data = _structured(result)
         assert data["messages"] == [SAMPLE_DELTA_MESSAGE]
@@ -4752,7 +4673,7 @@ class TestMCPListMailDelta:
             return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL)
         )
         with _mock_token():
-            result = await _call(mcp_server, "list_mail_delta", {})
+            result = await _call(mcp_server, "sync_mail", {})
 
         data = _structured(result)
         assert data["messages"] == [SAMPLE_DELTA_TOMBSTONE]
@@ -4766,7 +4687,7 @@ class TestMCPListMailDelta:
             return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL)
         )
         with _mock_token():
-            result = await _call(mcp_server, "list_mail_delta", {"cursor": SAMPLE_DELTA_NEXT_LINK})
+            result = await _call(mcp_server, "sync_mail", {"cursor": SAMPLE_DELTA_NEXT_LINK})
 
         assert route.call_count == 1
         assert str(route.calls[0].request.url) == SAMPLE_DELTA_NEXT_LINK
@@ -4776,7 +4697,7 @@ class TestMCPListMailDelta:
     async def test_expired_cursor_returns_resync(self, mcp_server):
         respx.get(SAMPLE_DELTA_LINK).mock(return_value=httpx.Response(410, json=GRAPH_ERROR_410))
         with _mock_token():
-            result = await _call(mcp_server, "list_mail_delta", {"cursor": SAMPLE_DELTA_LINK})
+            result = await _call(mcp_server, "sync_mail", {"cursor": SAMPLE_DELTA_LINK})
 
         assert _structured(result) == {
             "messages": [],
@@ -4795,18 +4716,18 @@ class TestMCPListMailDelta:
 
         with _mock_token():
             with pytest.raises(ToolError, match="500"):
-                await _call(mcp_server, "list_mail_delta", {})
+                await _call(mcp_server, "sync_mail", {})
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "list_mail_delta", {})
+            result = await _call(mcp_server, "sync_mail", {})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     async def test_plain_permission_error_has_no_connect_url(self, mcp_server):
         """Laptop (MSAL) mode raises a bare PermissionError with no URL to offer."""
         with patch("ms_graph_mcp.get_graph_token", side_effect=PermissionError("no auth")):
-            result = await _call(mcp_server, "list_mail_delta", {})
+            result = await _call(mcp_server, "sync_mail", {})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": None}
 
@@ -5579,8 +5500,8 @@ class TestMCPCreateDraftJson:
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPMarkMailReadJson:
-    """mark_mail_read_json."""
+class TestMCPMarkMailRead:
+    """mark_mail_read."""
 
     @respx.mock
     async def test_marks_every_id_read(self, mcp_server):
@@ -5590,7 +5511,7 @@ class TestMCPMarkMailReadJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "mark_mail_read_json",
+                "mark_mail_read",
                 {"message_ids": json.dumps(["msg-1", "msg-2"])},
             )
 
@@ -5608,7 +5529,7 @@ class TestMCPMarkMailReadJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "mark_mail_read_json",
+                "mark_mail_read",
                 {"message_ids": json.dumps(["msg-1"]), "is_read": "false"},
             )
 
@@ -5627,7 +5548,7 @@ class TestMCPMarkMailReadJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "mark_mail_read_json",
+                "mark_mail_read",
                 {"message_ids": json.dumps(["gone", "msg-2"])},
             )
 
@@ -5645,7 +5566,7 @@ class TestMCPMarkMailReadJson:
             return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
         )
         with _mock_token():
-            result = await _call(mcp_server, "mark_mail_read_json", {"message_ids": bad})
+            result = await _call(mcp_server, "mark_mail_read", {"message_ids": bad})
 
         assert _structured(result) == {
             "updated": 0,
@@ -5662,7 +5583,7 @@ class TestMCPMarkMailReadJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "mark_mail_read_json",
+                "mark_mail_read",
                 {"message_ids": json.dumps(["msg-1"]), "is_read": "yes"},
             )
 
@@ -5681,7 +5602,7 @@ class TestMCPMarkMailReadJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "mark_mail_read_json",
+                "mark_mail_read",
                 {"message_ids": json.dumps(["msg-1"]), "is_read": "False"},
             )
 
@@ -5696,7 +5617,7 @@ class TestMCPMarkMailReadJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "mark_mail_read_json",
+                "mark_mail_read",
                 {"message_ids": json.dumps([f"msg-{i}" for i in range(150)])},
             )
 
@@ -5706,7 +5627,7 @@ class TestMCPMarkMailReadJson:
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
             result = await _call(
-                mcp_server, "mark_mail_read_json", {"message_ids": json.dumps(["msg-1"])}
+                mcp_server, "mark_mail_read", {"message_ids": json.dumps(["msg-1"])}
             )
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
@@ -5765,8 +5686,8 @@ def _chat_create_body() -> dict:
     raise AssertionError("no POST /chats request was made")
 
 
-class TestMCPEnsureChatJson:
-    """ensure_chat_json."""
+class TestMCPEnsureChat:
+    """ensure_chat."""
 
     @respx.mock
     async def test_one_id_makes_a_one_on_one_with_the_caller_first(self, mcp_server):
@@ -5776,7 +5697,7 @@ class TestMCPEnsureChatJson:
         with _mock_token(IDENTITY_TOKEN):
             result = await _call(
                 mcp_server,
-                "ensure_chat_json",
+                "ensure_chat",
                 {"user_ids": "bob@example.com", "topic": "ignored for a 1:1"},
             )
 
@@ -5802,7 +5723,7 @@ class TestMCPEnsureChatJson:
         with _mock_token(IDENTITY_TOKEN):
             result = await _call(
                 mcp_server,
-                "ensure_chat_json",
+                "ensure_chat",
                 {"user_ids": "bob@example.com, carol@example.com", "topic": " Launch "},
             )
 
@@ -5824,7 +5745,7 @@ class TestMCPEnsureChatJson:
         with _mock_token(IDENTITY_TOKEN):
             await _call(
                 mcp_server,
-                "ensure_chat_json",
+                "ensure_chat",
                 {"user_ids": " bob@example.com,, bob@example.com , "},
             )
 
@@ -5839,7 +5760,7 @@ class TestMCPEnsureChatJson:
     async def test_own_id_is_dropped_and_self_only_is_no_members(self, mcp_server):
         """Graph would answer 400 for a chat of one; say so without the round trip."""
         with _mock_token(IDENTITY_TOKEN):
-            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "user-obj-id"})
+            result = await _call(mcp_server, "ensure_chat", {"user_ids": "user-obj-id"})
 
         assert _structured(result) == {"error": "no_members"}
         assert _graph_trail() == []
@@ -5852,7 +5773,7 @@ class TestMCPEnsureChatJson:
         with _mock_token(IDENTITY_TOKEN):
             await _call(
                 mcp_server,
-                "ensure_chat_json",
+                "ensure_chat",
                 {"user_ids": "user-obj-id, bob@example.com"},
             )
 
@@ -5866,7 +5787,7 @@ class TestMCPEnsureChatJson:
     @respx.mock
     async def test_empty_user_ids_is_no_members(self, mcp_server):
         with _mock_token(IDENTITY_TOKEN):
-            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": " , "})
+            result = await _call(mcp_server, "ensure_chat", {"user_ids": " , "})
 
         assert _structured(result) == {"error": "no_members"}
         assert _graph_trail() == []
@@ -5874,7 +5795,7 @@ class TestMCPEnsureChatJson:
     @respx.mock
     async def test_invalid_member_makes_no_request(self, mcp_server):
         """The id lands inside users('…'), so it is checked before anything else."""
-        result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com, x'y"})
+        result = await _call(mcp_server, "ensure_chat", {"user_ids": "bob@example.com, x'y"})
 
         assert _structured(result) == {"error": "invalid_members"}
         assert _graph_trail() == []
@@ -5882,7 +5803,7 @@ class TestMCPEnsureChatJson:
     @respx.mock
     async def test_token_without_claims_is_no_identity(self, mcp_server):
         with _mock_token():
-            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com"})
+            result = await _call(mcp_server, "ensure_chat", {"user_ids": "bob@example.com"})
 
         assert _structured(result) == {"error": "no_identity"}
         assert _graph_trail() == []
@@ -5891,7 +5812,7 @@ class TestMCPEnsureChatJson:
     async def test_teams_403_reports_unavailable(self, mcp_server):
         respx.post(CHATS_CREATE_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
         with _mock_token(IDENTITY_TOKEN):
-            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com"})
+            result = await _call(mcp_server, "ensure_chat", {"user_ids": "bob@example.com"})
 
         assert _structured(result) == {"error": "teams_unavailable"}
 
@@ -5902,17 +5823,17 @@ class TestMCPEnsureChatJson:
         respx.post(CHATS_CREATE_URL).mock(return_value=httpx.Response(400, json=GRAPH_ERROR_400))
         with _mock_token(IDENTITY_TOKEN):
             with pytest.raises(ToolError, match="400"):
-                await _call(mcp_server, "ensure_chat_json", {"user_ids": "nobody@example.com"})
+                await _call(mcp_server, "ensure_chat", {"user_ids": "nobody@example.com"})
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "ensure_chat_json", {"user_ids": "bob@example.com"})
+            result = await _call(mcp_server, "ensure_chat", {"user_ids": "bob@example.com"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPMarkChatReadJson:
-    """mark_chat_read_json."""
+class TestMCPMarkChatRead:
+    """mark_chat_read."""
 
     @respx.mock
     async def test_marks_the_chat_for_the_token_identity(self, mcp_server):
@@ -5920,7 +5841,7 @@ class TestMCPMarkChatReadJson:
             return_value=httpx.Response(204)
         )
         with _mock_token(IDENTITY_TOKEN):
-            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+            result = await _call(mcp_server, "mark_chat_read", {"chat_id": "chat-1on1-001"})
 
         assert _structured(result) == {"ok": True}
         assert route.call_count == 1
@@ -5937,7 +5858,7 @@ class TestMCPMarkChatReadJson:
             return_value=httpx.Response(204)
         )
         with _mock_token(IDENTITY_TOKEN):
-            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "   "})
+            result = await _call(mcp_server, "mark_chat_read", {"chat_id": "   "})
 
         assert _structured(result) == {"ok": False, "error": "chat_id must not be empty"}
         assert route.call_count == 0
@@ -5949,7 +5870,7 @@ class TestMCPMarkChatReadJson:
             return_value=httpx.Response(204)
         )
         with _mock_token("test-ms-token"):
-            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+            result = await _call(mcp_server, "mark_chat_read", {"chat_id": "chat-1on1-001"})
 
         assert _structured(result) == {"ok": False, "error": "no_identity"}
         assert route.call_count == 0
@@ -5960,13 +5881,13 @@ class TestMCPMarkChatReadJson:
             return_value=httpx.Response(403, json=GRAPH_ERROR_403)
         )
         with _mock_token(IDENTITY_TOKEN):
-            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+            result = await _call(mcp_server, "mark_chat_read", {"chat_id": "chat-1on1-001"})
 
         assert _structured(result) == {"ok": False, "error": "teams_unavailable"}
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "mark_chat_read_json", {"chat_id": "chat-1on1-001"})
+            result = await _call(mcp_server, "mark_chat_read", {"chat_id": "chat-1on1-001"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
@@ -6263,7 +6184,7 @@ class TestMCPSendChatMessageJson:
 
 
 class TestMCPChatsPage:
-    """list_chats_page and get_chat_members_json."""
+    """list_chats_page and get_chat_members."""
 
     @respx.mock
     async def test_maps_chats_and_tolerates_null_preview(self, mcp_server):
@@ -6316,7 +6237,7 @@ class TestMCPChatsPage:
             return_value=httpx.Response(200, json=SAMPLE_CHAT_MEMBERS_RESPONSE)
         )
         with _mock_token():
-            result = await _call(mcp_server, "get_chat_members_json", {"chat_id": "chat-1on1-001"})
+            result = await _call(mcp_server, "get_chat_members", {"chat_id": "chat-1on1-001"})
 
         assert _structured(result) == {
             "members": [
@@ -7661,7 +7582,7 @@ GATED_MAIL_TOOLS = frozenset(
         "get_email_attachment",
         "send_email",
         "manage_inbox_rules",
-        "list_mail_delta",
+        "sync_mail",
         "get_mail_detail",
         "get_mail_attachment_json",
         "create_reply_draft_json",
@@ -7669,7 +7590,7 @@ GATED_MAIL_TOOLS = frozenset(
 )
 DELIBERATELY_UNGATED_MAIL_TOOLS = frozenset(
     {
-        "mark_mail_read_json",
+        "mark_mail_read",
         "update_draft_body",
         "send_draft",
         "add_draft_attachment_json",
@@ -8125,9 +8046,7 @@ class TestMailSenderPolicy:
     # -- Desktop JSON surfaces ---------------------------------------------
 
     @respx.mock
-    async def test_list_mail_delta_hides_external_and_keeps_tombstones(
-        self, mcp_server, monkeypatch
-    ):
+    async def test_sync_mail_hides_external_and_keeps_tombstones(self, mcp_server, monkeypatch):
         _policy_on(monkeypatch)
         page = {
             "@odata.nextLink": SAMPLE_DELTA_NEXT_LINK,
@@ -8141,7 +8060,7 @@ class TestMailSenderPolicy:
             return_value=httpx.Response(200, json=page)
         )
         with _mock_token():
-            result = await _call(mcp_server, "list_mail_delta", {})
+            result = await _call(mcp_server, "sync_mail", {})
 
         data = _structured(result)
         assert data["messages"] == [SAMPLE_DELTA_MESSAGE, SAMPLE_DELTA_TOMBSTONE]
@@ -8474,6 +8393,102 @@ class TestMailSenderPolicy:
         assert classified - names == set()
 
 
+# (old name, new name, minimal args) for every tool renamed in the round that
+# introduced the alias forwarders.
+RENAMED_TOOLS = [
+    ("get_user_profile", "get_profile", {}),
+    ("get_profile_json", "get_profile", {}),
+    ("search_people_json", "search_people", {"query": "x"}),
+    ("list_mail_delta", "sync_mail", {}),
+    ("mark_mail_read_json", "mark_mail_read", {"message_ids": "[]"}),
+    ("get_chat_members_json", "get_chat_members", {"chat_id": "c"}),
+    ("ensure_chat_json", "ensure_chat", {"user_ids": "u"}),
+    ("mark_chat_read_json", "mark_chat_read", {"chat_id": "c"}),
+    ("inspect_file_json", "inspect_file", {"item_id": "x"}),
+]
+
+
+class TestDeprecatedAliases:
+    """Old tool names stay callable, but out of sight."""
+
+    async def test_only_the_new_names_are_discoverable(self, mcp_server):
+        from fastmcp import Client
+
+        async with Client(mcp_server) as client:
+            names = {t.name for t in await client.list_tools()}
+
+        assert {old for old, _, _ in RENAMED_TOOLS} & names == set()
+        assert {new for _, new, _ in RENAMED_TOOLS} <= names
+
+    @pytest.mark.parametrize(("old", "new", "args"), RENAMED_TOOLS)
+    async def test_the_alias_answers_exactly_as_the_new_name(self, mcp_server, old, new, args):
+        """Same conditions, same payload — the alias only forwards.
+
+        A missing connection is the one condition every pair reaches without a
+        Graph request; the pairs that validate their arguments first short-
+        circuit before the token and still answer identically.
+        """
+        with _mock_missing_connection():
+            aliased = await _call(mcp_server, old, args)
+            renamed = await _call(mcp_server, new, args)
+
+        assert _structured(aliased) == _structured(renamed)
+
+    @pytest.mark.parametrize(
+        ("old", "args", "expected"),
+        [
+            ("search_people_json", {"query": "   "}, {"people": []}),
+            (
+                "mark_mail_read_json",
+                {"message_ids": "not json"},
+                {
+                    "updated": 0,
+                    "failed": [],
+                    "error": "message_ids must be a JSON array of strings",
+                },
+            ),
+            ("ensure_chat_json", {"user_ids": "x'y"}, {"error": "invalid_members"}),
+            (
+                "mark_chat_read_json",
+                {"chat_id": "   "},
+                {"ok": False, "error": "chat_id must not be empty"},
+            ),
+            ("inspect_file_json", {}, {"error": "missing_target"}),
+        ],
+    )
+    @respx.mock
+    async def test_the_alias_reaches_its_own_target(self, mcp_server, old, args, expected):
+        """Each payload here is unique to one tool, so a miswired forwarder shows.
+
+        These arguments are all refused before a token is needed, which is why
+        no connection is mocked and no Graph request may be made.
+        """
+        result = await _call(mcp_server, old, args)
+
+        assert _structured(result) == expected
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_the_merged_profile_alias_returns_the_merged_dict(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_user_profile")
+
+        assert _structured(result) == {
+            "id": "user-id-001",
+            "display_name": "Test User",
+            "mail": "user@example.com",
+            "user_principal_name": "user@example.com",
+            "mailbox_address": "mailbox@example.com",
+            "job_title": None,
+        }
+
+
 class TestCursorGuard:
     """A caller-supplied cursor that is not a Graph URL is refused with no request."""
 
@@ -8483,7 +8498,7 @@ class TestCursorGuard:
     @pytest.mark.parametrize(
         ("tool", "args"),
         [
-            ("list_mail_delta", {"cursor": EVIL}),
+            ("sync_mail", {"cursor": EVIL}),
             ("list_chats_page", {"cursor": EVIL}),
             ("list_chat_messages_page", {"chat_id": "19:chat", "cursor": EVIL}),
         ],
@@ -8501,7 +8516,7 @@ class TestCursorGuard:
             respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
                 return_value=httpx.Response(200, json={"value": [], "@odata.deltaLink": cursor})
             )
-            result = await _call(mcp_server, "list_mail_delta", {"cursor": cursor})
+            result = await _call(mcp_server, "sync_mail", {"cursor": cursor})
             assert _structured(result)["delta_cursor"] == cursor
 
 

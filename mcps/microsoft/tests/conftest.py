@@ -1458,7 +1458,7 @@ SAMPLE_UNSENT_DRAFT = {
 }
 
 
-# Two directory rows for search_people_json; the second has no mail and no
+# Two directory rows for search_people; the second has no mail and no
 # title, as a room mailbox or a fresh account looks.
 SAMPLE_USERS_SEARCH_RESPONSE = {
     "@odata.count": 2,

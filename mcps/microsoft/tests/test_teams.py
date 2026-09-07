@@ -1249,7 +1249,7 @@ class TestChatMembers:
 
         assert data == SAMPLE_CHAT_MEMBERS_RESPONSE
         assert "/chats/19%3Aa%2Fb%2Bc%40thread.v2/members" in str(route.calls[0].request.url)
-        # The async path is the one get_chat_members_json ships; $top here is
+        # The async path is the one get_chat_members ships; $top here is
         # what broke the tool, so pin the empty query string, not a substring.
         assert not route.calls[0].request.url.query
 

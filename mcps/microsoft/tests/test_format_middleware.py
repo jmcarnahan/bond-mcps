@@ -72,14 +72,14 @@ class TestCompactPath:
     @respx.mock
     async def test_empty_table_renders_as_the_none_marker(self, mcp_server):
         """Mirrors the blank-query contract test in test_mcp_server.py."""
-        result = await _call(mcp_server, "search_people_json", {"query": "   "})
+        result = await _call(mcp_server, "search_people", {"query": "   "})
 
         assert result.structured_content is None
         assert _get_text(result) == "people: (none)"
 
     async def test_error_dict_renders_as_a_leading_error_line(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "get_profile_json")
+            result = await _call(mcp_server, "get_profile")
 
         assert result.structured_content is None
         text = _get_text(result)
@@ -101,14 +101,14 @@ class TestDesktopPath:
     @respx.mock
     async def test_dict_tool_keeps_structured_content(self, mcp_server):
         with _desktop_headers():
-            result = await _call(mcp_server, "search_people_json", {"query": "   "})
+            result = await _call(mcp_server, "search_people", {"query": "   "})
 
         assert result.structured_content == {"people": []}
         assert json.loads(_get_text(result)) == {"people": []}
 
     async def test_error_dict_stays_a_dict(self, mcp_server):
         with _desktop_headers(), _mock_missing_connection():
-            result = await _call(mcp_server, "get_profile_json")
+            result = await _call(mcp_server, "get_profile")
 
         assert result.structured_content == {
             "error": "not_connected",
@@ -134,9 +134,9 @@ class TestOutputSchemas:
 
         no_schema = {tool.name for tool in tools if tool.outputSchema is None}
         assert no_schema == {
-            "get_profile_json",
-            "search_people_json",
-            "list_mail_delta",
+            "get_profile",
+            "search_people",
+            "sync_mail",
             "get_mail_detail",
             "get_mail_attachment_json",
             "create_reply_draft_json",
@@ -144,14 +144,14 @@ class TestOutputSchemas:
             "update_draft_body",
             "add_draft_attachment_json",
             "send_draft",
-            "mark_mail_read_json",
+            "mark_mail_read",
             "list_chats_page",
-            "get_chat_members_json",
-            "ensure_chat_json",
+            "get_chat_members",
+            "ensure_chat",
             "list_chat_messages_page",
             "get_chat_attachment_json",
-            "mark_chat_read_json",
+            "mark_chat_read",
             "send_chat_message_json",
-            "inspect_file_json",
+            "inspect_file",
             "connection_status",
         }
