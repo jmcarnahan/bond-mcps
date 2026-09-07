@@ -35,6 +35,14 @@ from .conftest import (
     SAMPLE_USER_PROFILE,
 )
 
+SAMPLE_ORG_MAILBOX_SETTINGS = {
+    "@odata.context": (
+        "https://graph.microsoft.com/v1.0/$metadata#users("
+        "'4b7ab6f2-9a4e-4a2b-8c1d-000000000001')/mailboxSettings"
+    ),
+    "timeZone": "Pacific Standard Time",
+}
+
 _RULES_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messageRules"
 _DRAFT_URL = f"{GRAPH_BASE_URL}/me/messages/AAMkAGI2draft777%3D"
 
@@ -92,6 +100,21 @@ class TestProfileSync:
         assert profile["displayName"] == "Test User"
         assert "mailboxAddress" not in profile
 
+    @respx.mock
+    def test_get_profile_org_tenant_guid_context(self):
+        """Org tenants put the user GUID in the users('…') slot, so no mailboxAddress."""
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_ORG_MAILBOX_SETTINGS)
+        )
+        with GraphClient("tok") as client:
+            profile = mail.get_profile(client)
+
+        assert profile["displayName"] == "Test User"
+        assert "mailboxAddress" not in profile
+
 
 class TestProfileAsync:
     """Async profile operation tests."""
@@ -120,6 +143,21 @@ class TestProfileAsync:
             return_value=httpx.Response(
                 403, json={"error": {"code": "ErrorAccessDenied", "message": "Access denied"}}
             )
+        )
+        async with AsyncGraphClient("tok") as client:
+            profile = await mail.aget_profile(client)
+
+        assert profile["displayName"] == "Test User"
+        assert "mailboxAddress" not in profile
+
+    @respx.mock
+    async def test_aget_profile_org_tenant_guid_context(self):
+        """Org tenants put the user GUID in the users('…') slot, so no mailboxAddress."""
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_ORG_MAILBOX_SETTINGS)
         )
         async with AsyncGraphClient("tok") as client:
             profile = await mail.aget_profile(client)

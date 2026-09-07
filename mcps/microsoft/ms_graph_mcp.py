@@ -3686,11 +3686,14 @@ async def get_profile() -> dict:
 
     Returns id, display_name, mail, user_principal_name, mailbox_address, and
     job_title. Every key is always present; mailbox_address and job_title are
-    null when Graph does not supply them.
+    null when Graph does not supply them. mailbox_address is only set when a
+    real mailbox email was discovered — in practice consumer accounts; org
+    tenants report null.
 
     IMPORTANT: when mailbox_address is set, use it as the from_address when
     sending email. That is the address the mail server is authorized to send
-    from, and using it avoids "via" warnings and spam filtering.
+    from, and using it avoids "via" warnings and spam filtering. When it is
+    null, omit from_address and let the default sender apply.
 
     The id is the Graph user object ID — Teams messages carry the same ID, so
     clients use it to tell their own messages apart from everyone else's.

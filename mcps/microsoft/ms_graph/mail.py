@@ -185,10 +185,16 @@ def _extract_mailbox_address(odata_context: str) -> str | None:
     For consumer accounts, the /me/mailboxSettings @odata.context contains the
     real mailbox address (e.g. ``user@outlook.com``) even when /me returns the
     external login email (e.g. ``user@gmail.com``).
+
+    On org tenants the same ``users('…')`` slot holds the user's GUID rather
+    than an email, so a value without an ``@`` is discarded instead of being
+    reported as a mailbox address.
     """
     match = re.search(r"users\('([^']+)'\)", odata_context)
     if match:
-        return unquote(match.group(1))
+        value = unquote(match.group(1))
+        if "@" in value:
+            return value
     return None
 
 
