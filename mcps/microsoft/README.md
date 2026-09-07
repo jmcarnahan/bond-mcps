@@ -111,14 +111,14 @@ One environment variable, `MS_MAIL_ALLOWED_SENDER_DOMAINS`, hides mail that arri
 
 **Configuring it.** List every domain the organisation legitimately sends *from*: the primary domain, every alias domain, and the tenant's own `<tenant>.onmicrosoft.com`, which is the domain Exchange's system senders use for postmaster messages and non-delivery reports. Anything not listed is hidden, so software-as-a-service senders that send on behalf of staff (DocuSign, Jira and the like) and any shared or external support mailboxes disappear from every mail surface unless their domain is on the list. A malformed value — a bare word such as `example`, a `*`, an entry with an empty label — is a configuration error: the server refuses to start and every mail tool fails, rather than running unfiltered.
 
-**What callers see.** The markdown tools return a single sentence: "This message is from a sender outside the allowed domains and is hidden by the mail policy." The Desktop JSON tools return `{"error": "external_sender"}`, which is a permanent error and must not be retried. `list_emails` and the CLI's `email list` append a constant notice, "Messages from senders outside the allowed domains are hidden by the mail policy.", whenever the policy is on, whether or not anything was actually hidden. No count of hidden messages is ever returned to a caller; that is deliberate, because a count against a `$search` query would let a caller probe the content of mail it cannot read. `connection_status` reports `mail_policy: {"enabled": true|false}`, and `{"enabled": true, "error": "invalid_config"}` when the configured value is malformed.
+**What callers see.** Every tool returns `{"error": "external_sender"}`, which is a permanent error and must not be retried; the CLI prints the sentence "This message is from a sender outside the allowed domains and is hidden by the mail policy." instead, and that same sentence is the `reason` when a send tries to forward an attachment off a hidden message. `list_emails` returns that same constant notice as its `notice` key, and the CLI's `email list` appends it, whenever the policy is on, whether or not anything was actually hidden: "Messages from senders outside the allowed domains are hidden by the mail policy." No count of hidden messages is ever returned to a caller; that is deliberate, because a count against a `$search` query would let a caller probe the content of mail it cannot read. `connection_status` reports `mail_policy: {"enabled": true|false}`, and `{"enabled": true, "error": "invalid_config"}` when the configured value is malformed.
 
-**Coverage.** Every surface that lists messages filters the list: `list_emails`, `list_mail_delta` (delta tombstones pass through unchanged so a client can still delete the rows they name), and the CLI's `email list`. Every surface that takes a message id verifies the sender before it does anything else with that message. `read_email`, `get_mail_detail`, and the CLI's `email read` judge the message they have just fetched, before any attachment listing or mark-as-read write; `get_email_attachment`, `get_mail_attachment_json`, `create_reply_draft_json`, the forward-an-attachment spec in `send_email` and `send_teams_message`, and the CLI's `email attachment` first make one small `$select` request for the message's `from` and `sender`, against the same mailbox the read will use, and stop there if it is external. An attached message — an item attachment — is judged by the same rule before any of its content or bytes are returned; its file name still appears in an attachment listing, because the listing describes the parent message rather than the attached one. `manage_inbox_rules` refuses to create or update a rule that forwards or redirects mail while the policy is on ("Inbox rules that forward or redirect mail cannot be created while the mail policy is on."), because such a rule would re-deliver external mail into the mailbox as internal mail and quietly undo the policy.
+**Coverage.** Every surface that lists messages filters the list: `list_emails`, `sync_mail` (delta tombstones pass through unchanged so a client can still delete the rows they name), and the CLI's `email list`. Every surface that takes a message id verifies the sender before it does anything else with that message. `read_email` and the CLI's `email read` judge the message they have just fetched, before any mark-as-read write; `get_mail_attachment`, `manage_draft` with `action="reply"`, the forward-an-attachment spec in `send_email` and `send_teams_message`, and the CLI's `email attachment` first make one small `$select` request for the message's `from` and `sender`, against the same mailbox the read will use, and stop there if it is external. An attached message — an item attachment — is judged by the same rule before any of its content or bytes are returned; its file name still appears in an attachment listing, because the listing describes the parent message rather than the attached one. `manage_inbox_rules` refuses to create or update a rule that forwards or redirects mail while the policy is on, returning `{"error": "forwarding_rule"}` whose reason reads "Inbox rules that forward or redirect mail cannot be created while the mail policy is on.", because such a rule would re-deliver external mail into the mailbox as internal mail and quietly undo the policy.
 
 **Deliberately not gated.**
 
-- `mark_mail_read_json` and `list_emails`' `mark_as_read` — writes against ids the caller already holds, returning counts only.
-- `update_draft_body`, `send_draft`, `add_draft_attachment_json` — draft ids only, which Exchange rejects on anything that is not a draft — and `create_draft_json`, which composes an outbound draft of the user's own and reads no message.
+- `mark_mail_read` and `list_emails`' `mark_as_read` — writes against ids the caller already holds, returning counts only.
+- `manage_draft`'s `update_body`, `send`, and `add_attachment` actions — draft ids only, which Exchange rejects on anything that is not a draft — and its `create` action, which composes an outbound draft of the user's own and reads no message. Only its `reply` action is gated.
 - `manage_mail_folders` — folder metadata, not mail.
 - Teams, calendar, files, and Power BI tools — out of scope for a mail policy.
 
@@ -130,18 +130,18 @@ One environment variable, `MS_MAIL_ALLOWED_SENDER_DOMAINS`, hides mail that arri
 
 1. **Turn it on locally.** Add `MS_MAIL_ALLOWED_SENDER_DOMAINS=<primary-domain>,<tenant>.onmicrosoft.com` to `mcps/microsoft/.env`, restart `make dev`, and confirm the boot log line `Mail sender policy: on (2 allowed domain(s))`.
 2. **Check the listings.** Run `list_emails` against the inbox: colleagues present, external senders absent, notice present. Repeat with `folder=drafts` and `folder=sentitems` and confirm your own items are still there. Non-delivery reports and postmaster items appear only when the `onmicrosoft.com` domain is listed.
-3. **Check the id surfaces.** With the id of an external message noted before you turned the policy on: `read_email` refuses, `get_email_attachment` refuses, `create_reply_draft_json` returns `external_sender`, and `manage_inbox_rules` refuses a create carrying `forwardTo`.
+3. **Check the id surfaces.** With the id of an external message noted before you turned the policy on: `read_email` returns `external_sender`, `get_mail_attachment` returns `external_sender`, `manage_draft` with `action="reply"` returns `external_sender`, and `manage_inbox_rules` refuses a create carrying `forwardTo`.
 4. **Check the status probe.** `connection_status` reports `mail_policy.enabled == true`.
 5. **Deploy it.** Add the same value to `ms_graph.extra_env` in `deployment/terraform-existing-vpc/environments/<env>.tfvars`, run `make deploy-plan` and then `make deploy`, confirm the same boot line in the pod log, repeat step 4 against the deployed server, and tell desktop-client users to resync.
 
 ## Directory search rollout
 
-`search_people_json` needs `User.ReadBasic.All`, which the consented default scope set does not include, and `ensure_chat_json` needs `Chat.ReadWrite`. Both are admin-gated in an organisational tenant. The order below matters: Entra evaluates a consent request as one bundle, so widening `MS_SCOPES` before the admin has granted the scope walls every sign-in behind "Approval required", mail included (the PR #18 release note explains the rule).
+`search_people` needs `User.ReadBasic.All`, which the consented default scope set does not include, and `ensure_chat` needs `Chat.ReadWrite`. Both are admin-gated in an organisational tenant. The order below matters: Entra evaluates a consent request as one bundle, so widening `MS_SCOPES` before the admin has granted the scope walls every sign-in behind "Approval required", mail included (the PR #18 release note explains the rule).
 
 1. **Admin consent first.** The Azure AD admin adds `User.ReadBasic.All` (delegated) — and `Chat.ReadWrite` if it is not there yet — on the app registration's API permissions and clicks **Grant admin consent for [tenant]**.
 2. **Widen the requested scopes.** Append `User.ReadBasic.All` (and `Chat.ReadWrite`) to `MS_SCOPES` — in `mcps/microsoft/.env` locally, and in `ms_graph.extra_env` of `deployment/terraform-existing-vpc/environments/<env>.tfvars` for a deployment, then `make deploy-plan` and `make deploy`. Unset, `MS_SCOPES` falls back to the consented default in `ms_graph/local_auth.py`, so the full list must be written out.
 3. **Every user reconnects.** A refresh token carries the scopes it was issued with, so an existing connection never gains the new ones. After reconnecting, `connection_status` lists `user.readbasic.all` (and `chat.readwrite`), which is what the desktop client keys its typeahead on.
-4. **Verify.** `search_people_json(query="<a colleague's name prefix>")` returns people. Before step 3 it returns `{"error": "directory_scope_missing"}`, which is the expected answer rather than a fault; `ensure_chat_json` likewise returns `teams_unavailable` on a connection without `Chat.ReadWrite` — the same error a missing Teams licence produces, because both arrive as a Graph 403.
+4. **Verify.** `search_people(query="<a colleague's name prefix>")` returns people. Before step 3 it returns `{"error": "directory_scope_missing"}`, which is the expected answer rather than a fault; `ensure_chat` likewise returns `teams_unavailable` on a connection without `Chat.ReadWrite` — the same error a missing Teams licence produces, because both arrive as a Graph 403.
 
 ## CLI Usage
 
@@ -158,7 +158,7 @@ export MS_CLIENT_ID=<your-application-client-id>
 export MS_CLIENT_SECRET=<your-client-secret>   # if Azure app is confidential
 ```
 
-The CLI is organized into subcategories: `whoami`, `email`, `calendar`, `teams`, `files`, `powerbi`. Run `poetry run ms-graph-cli <category> --help` for the full subcommand list.
+The CLI is organized into subcategories: `whoami`, `powerbi-whoami`, `email`, `rules`, `calendar`, `teams`, `files`, `powerbi`. Run `poetry run ms-graph-cli <category> --help` for the full subcommand list.
 
 `email list`, `email read`, and `email attachment` honour `MS_MAIL_ALLOWED_SENDER_DOMAINS` exactly as the server does — see [Mail sender policy](#mail-sender-policy) above.
 
@@ -200,7 +200,7 @@ poetry run ms-graph-cli files sites                                     # Follow
 poetry run ms-graph-cli files sites --query engineering                 # Search sites
 poetry run ms-graph-cli files list --site-id <site_id>                  # Files in a SharePoint site
 poetry run ms-graph-cli files upload "notes.md" "# Hello" --folder Documents    # Create/overwrite text file
-poetry run ms-graph-cli files copy <item_id> <dest_folder_id>
+poetry run ms-graph-cli files copy <item_id> "copy-of-report.docx" --dest-folder <folder_id>
 poetry run ms-graph-cli files rename <item_id> "new-name.txt"
 
 # Power BI (organizational accounts only — separate scope token)
@@ -282,71 +282,195 @@ If the browser path fails (SSH, headless), MSAL falls back to device code flow �
 poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 ```
 
-### Available Tools (49)
+### Available Tools (35)
 
 | Tool | Description |
 |------|-------------|
-| `get_user_profile` | Get the authenticated user's profile information |
-| `list_emails` | List recent emails or search email messages; optionally mark specific IDs as read |
-| `read_email` | Read a single email message by its ID; optionally mark as read/unread; lists attachments |
-| `get_email_attachment` | Read, download (base64), or save to OneDrive one email attachment |
-| `send_email` | Send an email message, optionally with attachments |
-| `manage_inbox_rules` | Manage Outlook inbox rules: list, get, create, update, delete |
-| `manage_mail_folders` | Manage Outlook mail folders: list, get, create, rename, move, delete |
-| `list_calendar_events` | List calendar events in a date range |
-| `get_calendar_event` | Get detailed information about a specific calendar event |
-| `create_calendar_event` | Create a new calendar event |
-| `check_availability` | Check free/busy availability for one or more people |
-| `list_teams` | List joined Microsoft Teams, or list channels within a specific team |
-| `list_chats` | List Teams chats (1:1, group, meeting) with last message preview |
-| `read_teams_messages` | Read recent messages from a Teams channel or chat, with an attachments column |
-| `search_teams_messages` | Search all Teams chats and channels for messages by hashtag or keyword |
-| `get_teams_attachment` | Read, download (base64), or save to OneDrive a file or inline image from a Teams message |
-| `send_teams_message` | Send a message to a Teams channel or chat, optionally with files and inline images |
-| `get_teams_activity` | Get recent Teams activity across all channels and chats as a CSV digest |
-| `list_sharepoint_sites` | Search for SharePoint sites, or list followed sites |
-| `list_files` | List or search files in OneDrive or SharePoint |
-| `inspect_file` | Get metadata and optionally the content of a file from OneDrive or SharePoint |
-| `upload_file` | Create or overwrite a text file in OneDrive or SharePoint |
-| `edit_document` | Edit an existing Word document or Excel workbook in place |
-| `manage_file` | Copy, rename, or delete a file or folder |
-| `list_powerbi_workspaces` | List all Power BI workspaces the user has access to |
-| `list_powerbi_content` | List datasets, reports, and/or dashboards in a Power BI workspace |
-| `query_dataset` | Execute a DAX query against a Power BI dataset and return results as CSV |
-| `refresh_dataset` | Trigger an on-demand refresh of a Power BI dataset |
-| `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive |
-| `get_profile_json` | Get the signed-in user's identity as structured JSON |
-| `search_people_json` | Search the organisation directory by name or mail prefix |
-| `list_mail_delta` | Fetch one page of a mail folder's delta feed for incremental sync |
-| `get_mail_detail` | Get a message's plain-text body, internet headers, and attachment list |
-| `get_mail_attachment_json` | Get one email attachment's metadata, extracted text, or base64 bytes |
-| `create_reply_draft_json` | Create a reply draft and return its ids, web link, and recipients |
-| `create_draft_json` | Create a new mail draft with recipients and a plain-text body; returns its ids |
-| `update_draft_body` | Replace a draft's body with plain text |
-| `add_draft_attachment_json` | Attach a base64 file to a draft before sending |
-| `send_draft` | Send an existing draft; returns the ids the sent copy carries |
-| `mark_mail_read_json` | Mark messages read or unread in bulk, best effort per message |
-| `list_chats_page` | Fetch one page of the user's Teams chats, newest activity first |
-| `get_chat_members_json` | List a chat's members (user IDs and display names) |
-| `ensure_chat_json` | Find or create a Teams chat with one person, or create a group chat |
-| `list_chat_messages_page` | Fetch one page of a chat's messages, flattened, with attachments |
-| `get_chat_attachment_json` | Get a chat attachment's bytes, or a file's thumbnail, as base64 |
-| `mark_chat_read_json` | Mark a Teams chat read for the signed-in user |
-| `send_chat_message_json` | Send a plain-text message, optionally with file attachments, to a Teams chat |
-| `inspect_file_json` | Get a drive item's or sharing link's metadata (and optionally text) as structured JSON |
+| `list_emails` | List recent emails or search email messages; optionally mark specific IDs as read; returns a `messages` table plus `count`, `folder`, `query`, `marked_read`, `notice` |
+| `read_email` | Read a single email message by its ID; returns `subject`, `from_name`, `from_address`, `to`, `cc`, `received`, `is_read`, `is_draft`, `body_text`, `headers`, `has_attachments`, `attachments`, `attachment_count`, and `marked_as_read` when asked to mark; `options` take `mark_as_read`, `max_content_length`, `include_headers`, `include_inline`, `full_body` |
+| `get_mail_attachment` | Read one email attachment's text, metadata, or bytes, or save it to OneDrive; returns the attachment summary plus what the mode adds |
+| `send_email` | Send an email message, optionally with attachments; returns the ids the sent copy carries |
+| `manage_inbox_rules` | Manage Outlook inbox rules: list, get, create, update, delete; returns a `rules` table, one `rule`, or the action taken and its id |
+| `manage_mail_folders` | Manage Outlook mail folders: list, get, create, rename, move, delete; returns a `folders` table, one `folder`, or the action taken and its id |
+| `list_calendar_events` | List calendar events in a date range; returns an `events` table plus `count` |
+| `get_calendar_event` | Get detailed information about a specific calendar event; returns its `attendees` table plus the event's own fields |
+| `create_calendar_event` | Create a new calendar event; returns its id, times, and links |
+| `check_availability` | Check free/busy availability for one or more people; returns a `busy` table of every block, a per-person free-time `summary`, and `busy_count` |
+| `list_teams` | List joined Microsoft Teams, or list channels within a specific team; returns a `teams` or `channels` table plus `count` |
+| `list_chats` | List Teams chats (1:1, group, meeting), newest activity first; returns a `chats` table (unread, chat_type, topic, members, last_sender, last_preview, last_preview_at, last_read_at, id) plus `count`, `next_cursor`, and `marked_as_read` when the mark-as-read option was used |
+| `read_teams_messages` | Read a Teams channel or chat: everything back to `since` (last 7 days by default), or ONE page newest-first in page mode; returns a `messages` table plus `count` and `next_cursor` |
+| `search_teams_messages` | Search all Teams chats and channels for messages by hashtag or keyword; returns a `messages` table plus `count`, `query`, `since`, `conversation_id`, `skipped`, `notice` |
+| `get_teams_attachment` | Read, download, thumbnail, or save to OneDrive a file, inline image, or card from a Teams message; `mode` is `text`, `metadata`, `bytes`, `onedrive`, or `thumbnail` (its size rides `options`), and every mode returns `kind`, `name`, `content_type`, and `size` plus what the mode adds |
+| `send_teams_message` | Send a message to a Teams channel or chat, optionally with files and inline images; returns the created `message`, `sent_to`, and a `note` when mention_everyone was ignored |
+| `get_teams_activity` | Get recent Teams activity across all channels and chats; returns an `activity` table plus `count`, `sources`, `hours` |
+| `list_sharepoint_sites` | Search for SharePoint sites, or list followed sites; returns a `sites` table plus `count` and `query` |
+| `list_files` | List or search files in OneDrive, SharePoint, or a sharing link; returns one `files` table plus `count`, `folder_path`, `query` |
+| `edit_document` | Edit an existing Word document or Excel workbook in place; returns what was applied, the sheet names or the revision author, and the item's link |
+| `manage_file` | Create, copy, rename, or delete a file or folder; returns the `action` taken and the item's id, name, and link |
+| `list_powerbi` | List Power BI workspaces, or the datasets, reports, and dashboards in one; returns a `workspaces` or `items` table plus `count` |
+| `query_dataset` | Execute a DAX query against a Power BI dataset; returns the result `rows` plus `count` |
+| `refresh_dataset` | Trigger an on-demand refresh of a Power BI dataset; returns the acknowledgement |
+| `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive; returns the file's size, `item_id`, and link |
+| `get_profile` | Get the signed-in user's identity, including the mailbox address to send from |
+| `search_people` | Search the organisation directory by name or mail prefix |
+| `sync_mail` | Fetch one page of a mail folder's delta feed for incremental sync |
+| `manage_draft` | Compose, edit, attach to, and send mail drafts: `action` is `create`, `reply`, `update_body`, `add_attachment`, or `send`; the draft actions return its ids, web link, and recipients, `update_body` returns `ok`, `add_attachment` returns `attachment_id`, and `send` returns the ids the sent copy carries |
+| `mark_mail_read` | Mark messages read or unread in bulk, best effort per message |
+| `get_chat_members` | List a chat's members (user IDs and display names) |
+| `ensure_chat` | Find or create a Teams chat with one person, or create a group chat |
+| `mark_chat_read` | Mark a Teams chat read for the signed-in user |
+| `inspect_file` | Get a drive item's or sharing link's metadata, and optionally its text |
 | `connection_status` | Report whether Microsoft is connected, and with which scopes |
 
-All parameters use simple `str`/`int` types for Bedrock compatibility. Teams tools return a friendly message when Teams is not available for the account (personal MSA accounts). File tools work with both OneDrive (consumer) and SharePoint (organizational). Power BI tools require an organizational tenant and use a separate token scope. Sending files into Teams uploads them to OneDrive first (chats: the `Microsoft Teams Chat Files` folder, shared read-only with the chat's members; channels: the channel's Files folder) and posts a file card that references them, so it needs the `Files.ReadWrite` permission. In an org tenant whose admin consented only `Files.Read.All`, file sends fail with a clear message while plain messages keep working.
+All parameters use simple `str`/`int` types for Bedrock compatibility. Teams tools return a permanent `teams_unavailable` (or `teams_not_available`) error when Teams is not available for the account (personal MSA accounts). File tools work with both OneDrive (consumer) and SharePoint (organizational). Power BI tools require an organizational tenant and use a separate token scope. Sending files into Teams uploads them to OneDrive first (chats: the `Microsoft Teams Chat Files` folder, shared read-only with the chat's members; channels: the channel's Files folder) and posts a file card that references them, so it needs the `Files.ReadWrite` permission. In an org tenant whose admin consented only `Files.Read.All`, file sends come back `files_scope_missing` while plain messages keep working.
 
-`search_teams_messages` runs the Microsoft Search API over every chat and channel the user can see, then reads each hit in full, including replies inside channel threads. The index strips `#` from hashtags, so the tool searches the bare term and re-checks each message body for the literal `#tag` before returning it; several tags must all be present; plain keywords are stemmed by the index and not re-checked. `since` empty means all time (unlike `read_teams_messages`, which defaults to the last seven days), and `conversation_id` narrows the results to one chat or channel client-side, because the index has no conversation filter. It needs no new permissions: `Chat.Read` or `Chat.ReadWrite` together with `ChannelMessage.Read.All`. Search covers work and school accounts only; a personal account gets a clear message instead of results.
+`search_teams_messages` runs the Microsoft Search API over every chat and channel the user can see, then reads each hit in full, including replies inside channel threads. The index strips `#` from hashtags, so the tool searches the bare term and re-checks each message body for the literal `#tag` before returning it; several tags must all be present; plain keywords are stemmed by the index and not re-checked. `since` empty means all time (unlike `read_teams_messages`, which defaults to the last seven days), and `conversation_id` narrows the results to one chat or channel client-side, because the index has no conversation filter. It needs no new permissions: `Chat.Read` or `Chat.ReadWrite` together with `ChannelMessage.Read.All`. Search covers work and school accounts only; a personal account gets `search_unsupported` instead of results.
 
-### Desktop JSON tools
+### Response formats and the desktop header
 
-The last twenty tools in the table are a separate namespace for programmatic clients — specifically the desktop mail client, which needs cursors, timestamps, and IDs it can act on rather than prose. They follow one convention that differs from the rest of the server: **each returns a `dict`, which FastMCP renders as `structuredContent`**. Parameters stay `str`/`int` only, as everywhere else, with an empty string meaning "absent".
+Every one of the 35 tools returns a canonical `dict` — no tool returns prose any
+more — and that one dict serves both audiences. A caller sending the header
+`X-Bond-Client: desktop` (the desktop mail client, which needs the cursors,
+timestamps, and IDs it can act on) gets the dict as `structuredContent`. Every
+other caller — the LLMs — gets a compact text rendering of the same dict, with
+`structuredContent` omitted, because a client that has both channels forwards
+only the structured one to the model and the verbose JSON would win. Parameters
+stay `str`/`int` only, as everywhere else, with an empty string meaning
+"absent".
 
-The 29 markdown tools above are unchanged and stay the interface for LLM callers (Claude Code, Bond AI). Nothing in this namespace alters their output.
+The switch is `FormatNegotiation`, the middleware in the repo's shared
+[`common/`](../../common) package (`bond_common`), and a tool opts into it by
+declaring `output_schema=None`. That declaration is the signal because it is the
+only one left: in fastmcp every tool produces structured content — even a
+`-> str` tool, auto-wrapped as `{"result": ...}` behind a generated schema — so
+the presence of structured content cannot tell the two surfaces apart, while the
+advertised schema can.
 
-A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. The Teams write tools (`mark_chat_read_json`, `send_chat_message_json`) also return a structured `"teams_unavailable"` error for the permanent no-Teams-license 403, which a client must not retry. The mail attachment tools (`get_mail_attachment_json`, `add_draft_attachment_json`) likewise return structured permanent errors — `invalid_mode`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `get_mail_attachment_json` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. The Teams attachment reader (`get_chat_attachment_json`) returns `not_found`, `access_denied`, `no_thumbnail`, `invalid_thumbnail`, `is_folder`, and `too_large` — it shares the same 10 MB cap, decided from the driveItem size before a file is downloaded — `send_chat_message_json` returns `invalid_attachments` (bad JSON or an entry missing `name`/`content_base64`) and `files_scope_missing` (the connection lacks `Files.ReadWrite`), and `inspect_file_json` returns `missing_target`, `access_denied`, `not_found`, and `invalid_link`; all of these are permanent too. `search_people_json` returns `directory_scope_missing` when the connection lacks `User.ReadBasic.All`, and `ensure_chat_json` returns `invalid_members` (an id that is not a Graph user id or UPN), `no_identity` (the signed-in user cannot be read off the token), and `no_members` (nobody left after dropping blanks and the caller), as well as `teams_unavailable`; these are permanent as well. `send_draft` reads the draft's `conversation_id` and `internet_message_id` before it sends and returns them, so a client can store its own copy of the sent mail at once and match it to the Sent Items copy by `internet_message_id`. The three paging tools (`list_mail_delta`, `list_chats_page`, `list_chat_messages_page`) return `invalid_cursor` when the cursor they were given is not a Graph URL: cursors only ever come from those tools, and the server refuses to send the bearer token anywhere but Graph. `get_mail_detail`, `get_mail_attachment_json`, and `create_reply_draft_json` return `external_sender` when the mail sender policy hides the message, which is permanent as well, and `connection_status` reports the policy's state under `mail_policy` so a client can explain the refusal. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
+The compact renderer applies five rules in order, and every tool docstring
+documents which one it lands on:
+
+1. **A per-tool renderer**, if the tool registered one — consulted before
+   everything below, including the error rule.
+2. **An error envelope** — any payload with an `error` key — renders as
+   `key: value` lines with `error: <code>` first.
+3. **A table** — one list of flat rows plus scalars — renders as pipe-CSV (a
+   header row of the union of the row keys in first-seen order) with the
+   remaining non-empty scalars as trailing `key: value` lines. An empty list
+   renders as `<key>: (none)`.
+4. **A record** — an all-scalar payload — renders as `key: value` lines.
+5. **Anything still nested** falls back to compact JSON.
+
+Three tools nest too deeply for the table rule and register a renderer of their
+own: `read_teams_messages` and `send_teams_message`, whose message rows carry
+their own attachment lists, and `read_email`, whose envelope, body, attachments,
+and headers are four shapes in one payload. All three hand error payloads back
+to the shared rules, since rule 1 runs ahead of rule 2 rather than after it.
+
+#### What the merges changed
+
+`send_email` now always sends through a draft, because Graph's `sendMail`
+answers 202 with no body: creating the draft first is the only way to learn the
+`internet_message_id` and `conversation_id` that identify the Sent Items copy.
+`check_availability` lists every busy block it was told about rather than the
+first ten. `query_dataset` returns the DAX rows exactly as Power BI sent them
+instead of pre-formatting CSV; Power BI omits null-valued columns from a row,
+and the shared renderer unions the row keys in first-seen order and renders the
+omissions as empty cells. `manage_file` also fixed its error handling: it used
+to catch every `GraphError` and turn it into a success-shaped string, so a
+throttle or a 5xx read as a permanent answer. It now maps only 404 to
+`not_found` and lets everything else propagate as a tool error, and
+`edit_document` does the same on its item fetch.
+
+Five sets of tools merged outright:
+
+- **Power BI and files.** `list_powerbi` absorbed `list_powerbi_workspaces` and
+  `list_powerbi_content`: an empty `workspace_id` lists the workspaces, and a
+  workspace id — or `"me"` for My workspace — lists its contents with a `kind`
+  column. `manage_file` absorbed `upload_file` as `action="upload"`, where
+  `folder_path` and `site_id` move into `options`; base64 content still wins
+  over the file extension, so a base64 `.docx` uploads its bytes rather than
+  being generated from markdown.
+- **Teams chats.** `list_chats` absorbed `list_chats_page`, gaining `cursor` and
+  returning a `next_cursor`; `top` above 50 now pages internally (Graph caps
+  `/me/chats` at 50 a page) where the json name simply errored, and the rows
+  carry the member names, the unread flag, and the last preview the old markdown
+  listing showed. `read_teams_messages` absorbed `list_chat_messages_page` and
+  now has two modes: by default it paginates back to `since` filtering on
+  creation time, and under `{"page": true}` — or any `cursor` — it returns ONE
+  page, newest first, with `since` filtering last-modified time so an edited
+  message resurfaces. That page mode is chats only. `send_teams_message`
+  absorbed `send_chat_message_json`, taking the desktop's base64 file array as a
+  top-level `attachments` parameter beside the source specs in `options`, and
+  returning the created message rather than a sentence. Its `content_type`
+  default changed from `auto` to `text` as part of the merge: a typed `<` must
+  reach the chat as a `<`, and markup now needs an explicit
+  `{"content_type": "html"}` or `{"content_type": "auto"}`.
+- **Attachments.** `get_mail_attachment` absorbed `get_email_attachment` and
+  `get_mail_attachment_json`: one tool with `mode=metadata|text|bytes|onedrive`,
+  a `mailbox` for shared mailboxes, and `folder_path` / `site_id` in `options`.
+  `get_teams_attachment` absorbed `get_chat_attachment_json`, gaining `metadata`
+  (the only mode that describes a card or a quoted reference), `thumbnail`, the
+  10 MB `bytes` cap, and structured error codes, while keeping the team/channel
+  scope the json tool never had.
+- **The mail reader.** `read_email` absorbed `get_mail_detail` and became a
+  dict: its `body_text` is Exchange's server-converted `uniqueBody` — the
+  reply-relevant part only, without the quoted thread — where the markdown
+  version dumped a whole raw HTML body into the model's context, and the
+  attachment list now rides the same `$expand` as the body instead of costing a
+  second request (with it goes the old "could not list attachments" note, which
+  had no failure left to report). `headers` is always in the dict;
+  `include_headers` only decides whether the compact rendering prints it, as
+  `max_content_length` and `include_inline` only decide how much of the body and
+  which attachment rows are shown. `{"full_body": true}` swaps `body_text` to
+  the whole thread, quoted history included, and is the only thing that asks
+  Graph for it.
+- **The draft flow.** `manage_draft` collapsed the five draft tools into one
+  `action` word: `create`, `reply`, `update_body`, `add_attachment`, `send`. The
+  frozen payloads survive unchanged at the new name; only `create_draft_json`'s
+  `body` parameter was renamed to `text`, which is what `update_body` already
+  called it. The mail sender policy gates exactly one of the five actions:
+  `reply`, because Graph would quote a hidden original into a draft whose `from`
+  is the user. The other four touch only the user's own outbound mail and are
+  deliberately ungated.
+
+#### Hidden aliases
+
+Every old name still answers, but is tagged `deprecated-alias` and hidden from
+`tools/list`, so a model never sees two names for one tool. They exist for the
+desktop client, which migrates on its own schedule; they come out in a later
+round once it has. Where an alias preserves a quirk that does not survive at the
+new name, the quirk is named here and nowhere else.
+
+| Old name (hidden) | Answers as | Quirk it preserves |
+|---|---|---|
+| `get_user_profile` | `get_profile` | |
+| `get_profile_json` | `get_profile` | |
+| `search_people_json` | `search_people` | |
+| `list_mail_delta` | `sync_mail` | |
+| `mark_mail_read_json` | `mark_mail_read` | |
+| `get_chat_members_json` | `get_chat_members` | |
+| `ensure_chat_json` | `ensure_chat` | |
+| `mark_chat_read_json` | `mark_chat_read` | |
+| `inspect_file_json` | `inspect_file` | |
+| `list_powerbi_workspaces` | `list_powerbi` | no `workspace_id` parameter |
+| `list_powerbi_content` | `list_powerbi` | |
+| `upload_file` | `manage_file` | pins `action="upload"`; `folder_path` / `site_id` stay flat parameters |
+| `get_email_attachment` | `get_mail_attachment` | `mode="base64"` still means `bytes` |
+| `get_mail_attachment_json` | `get_mail_attachment` | `mode` still defaults to `bytes`, not `text` |
+| `get_chat_attachment_json` | `get_teams_attachment` | `thumbnail` is still a flat parameter |
+| `list_chats_page` | `list_chats` | |
+| `list_chat_messages_page` | `read_teams_messages` | pins page mode (`{"page": true}`) |
+| `send_chat_message_json` | `send_teams_message` | the prose errors `"chat_id must not be empty"` and `"text must not be empty"`, where the new name answers `invalid_arguments` |
+| `get_mail_detail` | `read_email` | |
+| `create_reply_draft_json` | `manage_draft` | pins `action="reply"` |
+| `create_draft_json` | `manage_draft` | pins `action="create"`; its `body` parameter, renamed `text` at the new name |
+| `update_draft_body` | `manage_draft` | pins `action="update_body"` |
+| `add_draft_attachment_json` | `manage_draft` | pins `action="add_attachment"` |
+| `send_draft` | `manage_draft` | pins `action="send"` |
+
+#### Permanent errors
+
+A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. Argument-validation failures come back as error dicts rather than prose — `invalid_options`, `invalid_action`, `invalid_arguments`, `invalid_attachments`, `invalid_date`, `missing_rule_id`, `missing_folder_id`, `no_data`, and `folder_not_found`. The Teams write tools (`mark_chat_read`, `send_teams_message`) return a structured `"teams_unavailable"` error (with a `reason` on `send_teams_message`, `list_chats`, and `read_teams_messages`) for the permanent no-Teams-license 403, which a client must not retry; `list_teams`, `get_teams_activity`, and `search_teams_messages` spell that same 403 `teams_not_available`, and `search_teams_messages` adds `search_unsupported` for the consumer accounts Microsoft Search does not index. The mail attachment surfaces (`get_mail_attachment`, `manage_draft` with `action="add_attachment"`) likewise return structured permanent errors — `invalid_mode`, `invalid_options`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `manage_draft` adds `invalid_action` for an unknown action word and `invalid_arguments` for a missing `draft_id` or `message_id`, both answered before any request; `get_mail_attachment` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. The Teams attachment reader (`get_teams_attachment`) returns `not_found` (whose `available` list names the ids the message does carry), `access_denied`, `no_thumbnail`, `invalid_thumbnail`, `is_folder`, `invalid_arguments`, `teams_unavailable`, and `too_large` — it shares the same 10 MB cap, decided from the driveItem size before a file is downloaded — `send_teams_message` returns `invalid_attachments` (bad JSON or an entry missing `name`/`content_base64`) and `files_scope_missing` (the connection lacks `Files.ReadWrite`), `list_chats` and `read_teams_messages` return `no_identity` when a mark-as-read option cannot name the signed-in user and `read_teams_messages` adds `invalid_date` for a malformed `since`, and `inspect_file` returns `missing_target`, `access_denied`, `not_found`, and `invalid_link`; all of these are permanent too. `list_files` maps an unusable sharing link to `access_denied`, `not_found`, or `invalid_link`; `manage_file` returns `not_found` for a missing item and `too_large` (with the byte `limit`) for upload content over the 4 MB simple-upload cap; `edit_document` returns `edit_failed` when a document rejects an edit operation. `search_people` returns `directory_scope_missing` when the connection lacks `User.ReadBasic.All`, and `ensure_chat` returns `invalid_members` (an id that is not a Graph user id or UPN), `no_identity` (the signed-in user cannot be read off the token), and `no_members` (nobody left after dropping blanks and the caller), as well as `teams_unavailable`; these are permanent as well. `manage_draft` with `action="send"` reads the draft's `conversation_id` and `internet_message_id` before it sends and returns them, so a client can store its own copy of the sent mail at once and match it to the Sent Items copy by `internet_message_id`. The three paging tools (`sync_mail`, `list_chats`, `read_teams_messages`) return `invalid_cursor` when the cursor they were given is not a Graph URL: cursors only ever come from those tools, and the server refuses to send the bearer token anywhere but Graph. `read_email`, `get_mail_attachment`, and `manage_draft` with `action="reply"` return `external_sender` as a dict when the mail sender policy hides the message, which is permanent as well, and `connection_status` reports the policy's state under `mail_policy` so a client can explain the refusal. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".
 
 ## Bond AI Integration
 

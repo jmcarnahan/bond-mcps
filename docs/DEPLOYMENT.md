@@ -392,9 +392,14 @@ There is no build step to run. `terraform apply` builds and pushes every
 repo-built image itself (`deployment/terraform-existing-vpc/build-stages.tf`):
 
 - Each image's tag is a 12-char md5 content hash of exactly the files its
-  Dockerfile `COPY`s — plus, for the MCP images, the vendored auth package
-  (`auth/auth/**/*.py`, `**/*.mako`, `auth/pyproject.toml`, `auth/poetry.lock`)
-  that gets staged into `_shared_auth_pkg/` at build time.
+  Dockerfile `COPY`s — plus the vendored shared packages it stages at build
+  time: the auth package (`auth/auth/**/*.py`, `**/*.mako`,
+  `auth/pyproject.toml`, `auth/poetry.lock`) into `_shared_auth_pkg/` for
+  every MCP image, and the response-format middleware
+  (`common/bond_common/**/*.py`, `common/pyproject.toml`,
+  `common/poetry.lock`) into `_shared_common_pkg/` for the images whose
+  `needs_shared_common` flag is set (microsoft today). Both staging dirs are
+  removed by a single `trap ... EXIT` after each build.
 - Changed code ⇒ new tag ⇒ terraform builds (`docker buildx`,
   `--platform linux/amd64`, builder `bond-mcps-builder`), pushes, and the helm
   release rolls. Unchanged code ⇒ same tag ⇒ no-op.

@@ -1258,6 +1258,20 @@ SAMPLE_MESSAGE_DETAIL = {
     ],
 }
 
+# The same shape once read_email widened DETAIL_SELECT: the list envelope
+# (subject, from, recipients, received, flags) rides along with the body.
+SAMPLE_READ_DETAIL = {
+    **SAMPLE_MESSAGE_DETAIL,
+    "subject": SAMPLE_MESSAGE["subject"],
+    "from": SAMPLE_MESSAGE["from"],
+    "sender": SAMPLE_MESSAGE["from"],
+    "toRecipients": SAMPLE_MESSAGE["toRecipients"],
+    "ccRecipients": [{"emailAddress": {"name": None, "address": "carol@example.com"}}],
+    "receivedDateTime": SAMPLE_MESSAGE["receivedDateTime"],
+    "isRead": False,
+    "isDraft": False,
+}
+
 SAMPLE_ATTACHMENTS_NEXT_LINK = (
     "https://graph.microsoft.com/v1.0/me/messages/AAMkAGI2TG93AAA%3D/attachments"
     "?$skiptoken=attach%2Bskip"
@@ -1457,8 +1471,16 @@ SAMPLE_UNSENT_DRAFT = {
     "hasAttachments": False,
 }
 
+# The same draft as read_email's DETAIL_SELECT fetch sees it: uniqueBody in
+# place of body, still with no from and no sender.
+SAMPLE_UNSENT_DRAFT_DETAIL = {
+    **{k: v for k, v in SAMPLE_UNSENT_DRAFT.items() if k != "body"},
+    "uniqueBody": {"contentType": "text", "content": "DRAFT-BODY"},
+    "internetMessageHeaders": [],
+}
 
-# Two directory rows for search_people_json; the second has no mail and no
+
+# Two directory rows for search_people; the second has no mail and no
 # title, as a room mailbox or a fresh account looks.
 SAMPLE_USERS_SEARCH_RESPONSE = {
     "@odata.count": 2,

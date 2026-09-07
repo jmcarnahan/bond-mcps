@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Microsoft Graph CLI -- test all ms_graph_mcp tools from the command line.
+Microsoft Graph CLI -- exercise the Microsoft Graph operations from the
+command line.
 
-Mirrors the 23 consolidated MCP tools exactly so you can test them locally
-with the shared auth proxy already running.
+Covers the same Graph operations the MCP server's tools expose, calling the
+sync ops layer directly, so you can test them locally with the shared auth
+proxy already running.
 
 Usage:
     export MS_CLIENT_ID=<your-azure-app-client-id>
@@ -1201,7 +1203,7 @@ def cmd_pbi_export(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Microsoft Graph CLI — mirrors the 23 consolidated MCP tools",
+        description="Microsoft Graph CLI — the same Graph operations the MCP server's tools expose",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)

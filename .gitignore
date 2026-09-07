@@ -35,9 +35,10 @@ tmp/
 # fork-shareable repo. Local working notes only.
 docs/REDIRECT_URIS.md
 
-# CI-generated build context (auth/ subtree copied into each MCP's build dir
-# before `docker build`; cleaned up afterward).
+# CI-generated build context (auth/ and common/ subtrees copied into each
+# MCP's build dir before `docker build`; cleaned up afterward).
 mcps/*/_shared_auth_pkg/
+mcps/*/_shared_common_pkg/
 
 # Terraform
 .terraform/

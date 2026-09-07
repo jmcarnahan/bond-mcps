@@ -15,12 +15,34 @@ from ms_graph.graph_client import GRAPH_BASE_URL
 from .conftest import SAMPLE_DRIVE_ITEM_WORD
 
 
+@pytest.fixture(autouse=True)
+def _desktop_client_header():
+    """Pin this module to the desktop JSON contract.
+
+    In-process clients carry no HTTP headers, so FormatNegotiation would
+    render every dict tool compactly and `_structured` would have no dict to
+    read. The compact rendering is covered by test_format_middleware.py.
+    """
+    with patch(
+        "bond_common.middleware.get_http_headers",
+        return_value={"x-bond-client": "desktop"},
+    ):
+        yield
+
+
 def _mock_token(token: str = "test-ms-token"):
     return patch("ms_graph_mcp.get_graph_token", return_value=token)
 
 
 def _get_text(result) -> str:
     return result.content[0].text
+
+
+def _structured(result) -> dict:
+    """The dict edit_document returned, however the client surfaced it."""
+    if result.structured_content is not None:
+        return result.structured_content
+    return json.loads(_get_text(result))
 
 
 def _make_docx_bytes(*paragraphs: str) -> bytes:
@@ -83,9 +105,17 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        text = _get_text(result)
-        assert "edited successfully" in text
-        assert "Track Changes" in text
+        assert _structured(result) == {
+            "ok": True,
+            "kind": "word",
+            "name": SAMPLE_DRIVE_ITEM_WORD["name"],
+            "operations": 1,
+            "ops": "replace",
+            "track_changes": True,
+            "author": "Bond AI",
+            "id": ITEM_ID,
+            "web_url": SAMPLE_UPLOADED_WORD["webUrl"],
+        }
         assert upload_route.called
 
         # Verify the uploaded bytes contain track changes
@@ -116,7 +146,9 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "not an editable document" in _get_text(result)
+        data = _structured(result)
+        assert data["error"] == "invalid_arguments"
+        assert "not an editable document" in data["reason"]
 
     @respx.mock
     async def test_invalid_edits_json(self, mcp_server):
@@ -135,7 +167,9 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "Invalid edits" in _get_text(result)
+        data = _structured(result)
+        assert data["error"] == "invalid_arguments"
+        assert data["reason"].startswith("Invalid edits:")
 
     @respx.mock
     async def test_text_not_found_error(self, mcp_server, sample_doc_bytes):
@@ -160,8 +194,9 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "Edit failed" in _get_text(result)
-        assert "Text not found" in _get_text(result)
+        data = _structured(result)
+        assert data["error"] == "edit_failed"
+        assert "Text not found" in data["reason"]
 
     @respx.mock
     async def test_track_changes_disabled(self, mcp_server, sample_doc_bytes):
@@ -190,9 +225,7 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        text = _get_text(result)
-        assert "edited successfully" in text
-        assert "Track Changes" not in text
+        assert _structured(result)["track_changes"] is False
 
         # Verify no revision markup in uploaded doc
         uploaded_bytes = upload_route.calls[0].request.content
@@ -227,8 +260,7 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        text = _get_text(result)
-        assert "Aitor González" in text
+        assert _structured(result)["author"] == "Aitor González"
 
         # Verify author in the revision markup
         uploaded_bytes = upload_route.calls[0].request.content
@@ -264,7 +296,7 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "edited successfully" in _get_text(result)
+        assert _structured(result)["ok"] is True
 
         # Verify comment markers in uploaded doc
         uploaded_bytes = upload_route.calls[0].request.content
@@ -304,9 +336,9 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        text = _get_text(result)
-        assert "3" in text  # 3 operations
-        assert "replace, append, comment" in text
+        data = _structured(result)
+        assert data["operations"] == 3
+        assert data["ops"] == "replace, append, comment"
 
     @respx.mock
     async def test_sharepoint_site_id(self, mcp_server, sample_doc_bytes):
@@ -336,7 +368,7 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "edited successfully" in _get_text(result)
+        assert _structured(result)["ok"] is True
 
     @respx.mock
     async def test_file_not_found(self, mcp_server):
@@ -358,7 +390,10 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "not found" in _get_text(result).lower() or "Error" in _get_text(result)
+        assert _structured(result) == {
+            "error": "not_found",
+            "reason": f"File not found: {ITEM_ID}",
+        }
 
     @respx.mock
     async def test_empty_edits_array(self, mcp_server):
@@ -379,7 +414,10 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "No edit operations" in _get_text(result)
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "No edit operations provided.",
+        }
 
     @respx.mock
     async def test_full_edit_workflow_produces_readable_document(
@@ -416,7 +454,7 @@ class TestEditWordDocumentTool:
                     },
                 )
 
-        assert "edited successfully" in _get_text(result)
+        assert _structured(result)["ok"] is True
 
         # Deeply verify the uploaded document
         uploaded_bytes = upload_route.calls[0].request.content

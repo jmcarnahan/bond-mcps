@@ -1791,9 +1791,21 @@ CHAT_MESSAGE_SORT_PROP = "lastModifiedDateTime"
 _CHATS_ORDERBY = "lastMessagePreview/createdDateTime desc"
 
 
-def _chats_page_path(top: int) -> str:
-    """Build the fresh-start /me/chats page URL."""
-    return f"/me/chats?$top={top}&$expand=lastMessagePreview&$orderby={quote(_CHATS_ORDERBY)}"
+def _chats_page_path(top: int, chat_type: str = "") -> str:
+    """Build the fresh-start /me/chats page URL.
+
+    members rides the expand beside the preview so a page carries who is in
+    each chat — /me/chats serves both expansions together with this orderby.
+    """
+    path = (
+        f"/me/chats?$top={top}&$expand=lastMessagePreview,members"
+        f"&$orderby={quote(_CHATS_ORDERBY)}"
+    )
+    if chat_type:
+        # The caller validates chat_type against a closed set, so quoting the
+        # clause for the URL is all the escaping this filter needs.
+        path += "&$filter=" + quote(f"chatType eq '{chat_type}'")
+    return path
 
 
 def _chat_messages_page_path(chat_id: str, since: str) -> str:
@@ -1861,11 +1873,13 @@ def chat_messages_page(
     return client.get(_chat_messages_page_path(chat_id, since))
 
 
-async def achats_page(client: AsyncGraphClient, cursor: str = "", top: int = 50) -> dict[str, Any]:
-    """Fetch ONE page of the user's chats (async)."""
+async def achats_page(
+    client: AsyncGraphClient, cursor: str = "", top: int = 50, chat_type: str = ""
+) -> dict[str, Any]:
+    """Fetch ONE page of the user's chats (async). A cursor already encodes the query."""
     if cursor:
         return await client.get(cursor)
-    return await client.get(_chats_page_path(top))
+    return await client.get(_chats_page_path(top, chat_type))
 
 
 async def achat_members(client: AsyncGraphClient, chat_id: str) -> dict[str, Any]:

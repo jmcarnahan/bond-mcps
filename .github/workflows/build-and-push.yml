@@ -17,11 +17,13 @@ on:
     branches: [main]
     paths:
       - 'auth/**'
+      - 'common/**'
       - 'mcps/**'
       - '.github/workflows/build-and-push.yml'
   pull_request:
     paths:
       - 'auth/**'
+      - 'common/**'
       - 'mcps/**'
       - '.github/workflows/build-and-push.yml'
       - '**/Dockerfile'
@@ -46,22 +48,27 @@ jobs:
             context: auth
             dockerfile: auth/Dockerfile
             needs_shared_auth: false
+            needs_shared_common: false
           - name: mcp-github
             context: mcps/github
             dockerfile: mcps/github/Dockerfile
             needs_shared_auth: true
+            needs_shared_common: false
           - name: mcp-microsoft
             context: mcps/microsoft
             dockerfile: mcps/microsoft/Dockerfile
             needs_shared_auth: true
+            needs_shared_common: true
           - name: mcp-atlassian
             context: mcps/atlassian
             dockerfile: mcps/atlassian/Dockerfile
             needs_shared_auth: true
+            needs_shared_common: false
           - name: mcp-databricks
             context: mcps/databricks
             dockerfile: mcps/databricks/Dockerfile
             needs_shared_auth: true
+            needs_shared_common: false
 
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +87,19 @@ jobs:
           cp -r auth/auth "$dest/auth"
           cp auth/pyproject.toml "$dest/pyproject.toml"
           cp auth/poetry.lock "$dest/poetry.lock"
+
+      # Same staging dance for bond-common = {path = "../../common"}, which
+      # the Dockerfile COPYs to /common as _shared_common_pkg/.
+      - name: Prep shared_common (MCPs only)
+        if: matrix.service.needs_shared_common
+        run: |
+          set -euo pipefail
+          dest="${{ matrix.service.context }}/_shared_common_pkg"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          cp -r common/bond_common "$dest/bond_common"
+          cp common/pyproject.toml "$dest/pyproject.toml"
+          cp common/poetry.lock "$dest/poetry.lock"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

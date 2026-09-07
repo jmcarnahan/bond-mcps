@@ -57,6 +57,7 @@ JWT_SHARED_SECRET_FILE ?= $(HOME)/.bond_mcps/jwt_shared_secret
 
 install:
 	cd auth && poetry install
+	cd common && poetry install
 	cd mcps/microsoft && poetry install
 	cd mcps/github && poetry install
 	cd mcps/atlassian && poetry install
@@ -77,12 +78,12 @@ hooks-run:
 
 # Read-only Python lint. CI runs the same via pre-commit.
 lint:
-	cd auth && poetry run ruff check ../auth ../mcps
+	cd auth && poetry run ruff check ../auth ../common ../mcps
 
 # Auto-fix Python lint + reformat. Run before committing big changes.
 format:
-	cd auth && poetry run ruff check --fix ../auth ../mcps
-	cd auth && poetry run ruff format ../auth ../mcps
+	cd auth && poetry run ruff check --fix ../auth ../common ../mcps
+	cd auth && poetry run ruff format ../auth ../common ../mcps
 
 # Terraform formatting. Recursive over the whole module.
 tf-fmt:

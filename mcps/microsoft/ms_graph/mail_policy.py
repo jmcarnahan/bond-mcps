@@ -41,15 +41,16 @@ hold the message dict check it for free; id-only surfaces pay one extra
 ``GET {base}/messages/{id}?$select=id,from,sender`` and only while the policy
 is on.
 
-**Deliberately not gated.** ``mark_mail_read_json`` and ``list_emails``'
+**Deliberately not gated.** ``mark_mail_read`` and ``list_emails``'
 ``mark_as_read`` are writes that return counts only, on ids the caller must
 already hold — and the gated surfaces never hand out an external id.
-``update_draft_body``, ``send_draft``, and ``add_draft_attachment_json`` take
-draft ids, which Exchange rejects on non-drafts, and ``create_draft_json``
-creates an outbound draft of the user's own composition. ``manage_mail_folders``
-returns folder metadata, not mail. Teams, calendar, files, and Power BI are out
-of scope; calendar invites from external organisers are the recommended next
-follow-up.
+``manage_draft``'s ``update_body``, ``send``, and ``add_attachment`` actions
+take draft ids, which Exchange rejects on non-drafts, and its ``create`` action
+composes an outbound draft of the user's own; only its ``reply`` action is
+gated, because Graph would quote a hidden original into the new draft.
+``manage_mail_folders`` returns folder metadata, not mail. Teams, calendar,
+files, and Power BI are out of scope; calendar invites from external organisers
+are the recommended next follow-up.
 
 **Scope of the control.** It keys on Exchange's ``from``/``sender``, so it is a
 control against agents reading mail that *arrived* from outside. It does not
@@ -81,11 +82,12 @@ EXTERNAL_SENDER_TEXT = (
     "This message is from a sender outside the allowed domains and is hidden by the mail policy."
 )
 
-# Desktop JSON `error` value — a permanent error, never retried.
+# The `error` value every gated tool returns — permanent, never retried.
 EXTERNAL_SENDER_ERROR = "external_sender"
 
-# Appended to list_emails whenever the policy is on, independent of what was
-# hidden: a hidden *count* on a $search query would be a content oracle.
+# Returned as list_emails' `notice` (and appended by the CLI) whenever the
+# policy is on, independent of what was hidden: a hidden *count* on a $search
+# query would be a content oracle.
 POLICY_NOTICE = "Messages from senders outside the allowed domains are hidden by the mail policy."
 
 # A rule carrying any of these re-delivers every external message as an

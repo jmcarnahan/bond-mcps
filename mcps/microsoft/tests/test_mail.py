@@ -36,6 +36,25 @@ from .conftest import (
 )
 
 _RULES_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messageRules"
+_DRAFT_URL = f"{GRAPH_BASE_URL}/me/messages/AAMkAGI2draft777%3D"
+
+
+def _select_of(request) -> str:
+    """The $select query parameter of a recorded request."""
+    return parse_qs(str(request.url).split("?", 1)[-1]).get("$select", [""])[0]
+
+
+def _mock_async_send():
+    """The two requests asend_message always makes: create the draft, then send it.
+
+    Returns the create route, whose request body is the bare message payload —
+    the sendMail path wrapped it in {"message": ...}, the draft path does not.
+    """
+    create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+        return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+    )
+    respx.post(f"{_DRAFT_URL}/send").mock(return_value=httpx.Response(202))
+    return create
 
 
 class TestProfileSync:
@@ -304,21 +323,27 @@ class TestMailAsync:
         assert msg["subject"] == "Weekly Report"
 
     @respx.mock
-    async def test_asend_message(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+    async def test_asend_message_goes_through_a_draft(self):
+        """The ids the caller needs only exist because the draft is created first."""
+        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        create = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
-            await mail.asend_message(
+            draft = await mail.asend_message(
                 client,
                 to=["alice@example.com"],
                 subject="Async Hello",
                 body="Async body",
             )
 
-        assert route.called
+        assert create.called
+        assert not send_mail.called
+        assert draft == SAMPLE_DRAFT_MESSAGE
 
     @respx.mock
     async def test_asend_message_with_from_address(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -329,7 +354,7 @@ class TestMailAsync:
             )
 
         payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["from"]["emailAddress"]["address"] == "mailbox@example.com"
+        assert payload["from"]["emailAddress"]["address"] == "mailbox@example.com"
 
     @respx.mock
     async def test_asearch_messages(self):
@@ -807,11 +832,15 @@ class TestBodyTypeParameterSync:
 
 
 class TestBodyTypeParameterAsync:
-    """Tests for body_type parameter in async asend_message."""
+    """Tests for body_type parameter in async asend_message.
+
+    The async send always goes through a draft, so the payload asserted here is
+    the draft POST body rather than a sendMail envelope.
+    """
 
     @respx.mock
     async def test_auto_detects_html_fragment(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -821,12 +850,12 @@ class TestBodyTypeParameterAsync:
             )
 
         payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "HTML"
+        assert payload["body"]["contentType"] == "HTML"
 
     @respx.mock
     async def test_auto_detects_anchor_link(self):
         """Regression: anchor tags must be detected so links render as hyperlinks."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -836,11 +865,11 @@ class TestBodyTypeParameterAsync:
             )
 
         payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "HTML"
+        assert payload["body"]["contentType"] == "HTML"
 
     @respx.mock
     async def test_auto_detects_plain_text(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -850,12 +879,12 @@ class TestBodyTypeParameterAsync:
             )
 
         payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "Text"
+        assert payload["body"]["contentType"] == "Text"
 
     @respx.mock
     async def test_auto_placeholder_not_mistaken_for_html(self):
         """'Dear <FirstName>,' must stay Text."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -865,11 +894,11 @@ class TestBodyTypeParameterAsync:
             )
 
         payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "Text"
+        assert payload["body"]["contentType"] == "Text"
 
     @respx.mock
     async def test_explicit_html_overrides_plain_body(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -880,11 +909,11 @@ class TestBodyTypeParameterAsync:
             )
 
         payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "HTML"
+        assert payload["body"]["contentType"] == "HTML"
 
     @respx.mock
     async def test_explicit_text_overrides_html_body(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_async_send()
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -895,7 +924,7 @@ class TestBodyTypeParameterAsync:
             )
 
         payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "Text"
+        assert payload["body"]["contentType"] == "Text"
 
     async def test_invalid_body_type_raises(self):
         with pytest.raises(ValueError, match="body_type"):
@@ -1065,10 +1094,10 @@ class TestGetMessageDetailSync:
         assert data == SAMPLE_MESSAGE_DETAIL
         req = route.calls[0].request
         assert req.headers["prefer"] == 'outlook.body-content-type="text"'
-        assert (
-            "$select=id%2Cfrom%2Csender%2CisDraft%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments"
-            in str(req.url)
-        )
+        assert f"$select={quote(mail.DETAIL_SELECT)}" in str(req.url)
+        # The envelope the merged read_email flattens rides the same select.
+        for field in ("subject", "toRecipients", "receivedDateTime", "isRead"):
+            assert field in mail.DETAIL_SELECT
         # One round trip carries the attachment metadata, and never contentBytes.
         assert "$expand=attachments%28%24select%3D" in str(req.url)
         assert "contentId" in str(req.url)
@@ -1098,8 +1127,47 @@ class TestGetMessageDetailAsync:
 
         assert data == SAMPLE_MESSAGE_DETAIL
         assert route.calls[0].request.headers["prefer"] == 'outlook.body-content-type="text"'
+        assert f"$select={quote(mail.DETAIL_SELECT)}" in str(route.calls[0].request.url)
         assert "$expand=attachments%28%24select%3D" in str(route.calls[0].request.url)
         assert "contentBytes" not in str(route.calls[0].request.url)
+
+    @respx.mock
+    async def test_default_select_leaves_the_thread_body_out(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.aget_message_detail(client, SAMPLE_MESSAGE["id"])
+
+        assert "body" not in _select_of(route.calls[0].request).split(",")
+
+    @respx.mock
+    async def test_full_body_adds_body_to_the_select(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.aget_message_detail(client, SAMPLE_MESSAGE["id"], full_body=True)
+
+        select = _select_of(route.calls[0].request).split(",")
+        assert "body" in select
+        assert "uniqueBody" in select
+        # The Prefer header converts both bodies, so neither arrives as HTML.
+        assert route.calls[0].request.headers["prefer"] == 'outlook.body-content-type="text"'
+
+    @respx.mock
+    async def test_mailbox_routes_through_the_shared_mailbox(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/users/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.aget_message_detail(
+                client, SAMPLE_MESSAGE["id"], mailbox="support@example.com"
+            )
+
+        assert route.calls[0].request.url.path.startswith(
+            "/v1.0/users/support@example.com/messages"
+        )
 
 
 class TestCreateReplyDraftSync:
@@ -1587,9 +1655,9 @@ class TestSharedMailboxAsync:
 
     @respx.mock
     async def test_asend_message_shared(self):
-        route = respx.post(f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        base = f"{GRAPH_BASE_URL}/users/{SHARED_MAILBOX}/messages"
+        create = respx.post(base).mock(return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE))
+        send = respx.post(f"{base}/AAMkAGI2draft777%3D/send").mock(return_value=httpx.Response(202))
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client,
@@ -1599,7 +1667,7 @@ class TestSharedMailboxAsync:
                 mailbox=SHARED_MAILBOX,
             )
 
-        assert route.called
+        assert create.called and send.called
 
     @respx.mock
     async def test_asearch_messages_shared(self):
@@ -1625,7 +1693,6 @@ class TestSharedMailboxAsync:
 
 
 _DRAFT_ID = SAMPLE_DRAFT_MESSAGE["id"]
-_DRAFT_URL = f"{GRAPH_BASE_URL}/me/messages/AAMkAGI2draft777%3D"
 
 
 class TestBuildMessagePayload:
@@ -1767,20 +1834,23 @@ class TestSendMessageWithAttachments:
         assert json.loads(attach.calls[1].request.content)["name"] == "data.csv"
 
     @respx.mock
-    async def test_async_without_attachments_still_uses_send_mail(self):
+    async def test_async_without_attachments_still_uses_the_draft_path(self):
+        """No attachments is not a shortcut: sendMail would lose the ids."""
         send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
             return_value=httpx.Response(202)
         )
-        create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+        create = _mock_async_send()
+        attach = respx.post(f"{_DRAFT_URL}/attachments").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CREATED_ATTACHMENT)
         )
         async with AsyncGraphClient("tok") as client:
             await mail.asend_message(
                 client, to=["alice@example.com"], subject="Hello", body="Hi!", attachments=[]
             )
 
-        assert send_mail.call_count == 1
-        assert not create.called
+        assert create.call_count == 1
+        assert not send_mail.called
+        assert not attach.called
 
     @respx.mock
     async def test_async_attach_failure_deletes_the_draft(self):
