@@ -186,7 +186,7 @@ logger = logging.getLogger(__name__)
 
 
 def _not_connected(e: PermissionError) -> dict:
-    """Build the Desktop JSON "no Microsoft connection" payload.
+    """Build the "no Microsoft connection" payload every tool returns.
 
     ``MissingProviderConnection`` (JWT mode) carries the per-user connect URL
     as an attribute; legacy laptop mode raises a plain PermissionError with no
