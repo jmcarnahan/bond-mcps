@@ -84,8 +84,9 @@ EXTERNAL_SENDER_TEXT = (
 # Desktop JSON `error` value — a permanent error, never retried.
 EXTERNAL_SENDER_ERROR = "external_sender"
 
-# Appended to list_emails whenever the policy is on, independent of what was
-# hidden: a hidden *count* on a $search query would be a content oracle.
+# Returned as list_emails' `notice` (and appended by the CLI) whenever the
+# policy is on, independent of what was hidden: a hidden *count* on a $search
+# query would be a content oracle.
 POLICY_NOTICE = "Messages from senders outside the allowed domains are hidden by the mail policy."
 
 # A rule carrying any of these re-delivers every external message as an

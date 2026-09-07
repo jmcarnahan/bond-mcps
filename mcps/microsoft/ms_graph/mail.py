@@ -358,8 +358,12 @@ async def _asend_via_draft(
     message: dict[str, Any],
     attachments: list[Any],
     mailbox: str | None,
-) -> None:
-    """Create a draft, attach every resolved attachment, then send it (async)."""
+) -> dict[str, Any]:
+    """Create a draft, attach every resolved attachment, then send it (async).
+
+    Returns the draft as Graph created it — the only record of the ids the send
+    produced.
+    """
     from . import attachments as attachment_ops  # local import: attachments imports mail
 
     draft = await client.post(f"{_base(mailbox)}/messages", json_data=message) or {}
@@ -373,6 +377,7 @@ async def _asend_via_draft(
     except Exception:
         await _adiscard_draft(client, draft_id, mailbox)
         raise
+    return draft
 
 
 def search_messages(
@@ -478,15 +483,20 @@ async def asend_message(
     body_type: str = "auto",
     mailbox: str | None = None,
     attachments: list[Any] | None = None,
-) -> None:
-    """Send an email message (async). See :func:`send_message` for the draft path."""
+) -> dict[str, Any]:
+    """Send an email message (async) and return the draft it was sent from.
+
+    The draft path is the only way to learn the ids of a message this server
+    sent: Graph's ``sendMail`` answers 202 with no body and no correlator, so a
+    caller has nothing to match the Sent Items copy against. The draft's id,
+    internetMessageId, and conversationId are assigned at creation and must be
+    read before the send — the sent copy keeps internetMessageId and
+    conversationId, while the draft id stops resolving once Exchange moves the
+    copy to Sent Items. See :func:`send_message` for the sync path, which still
+    uses ``sendMail`` when there are no attachments.
+    """
     message = _build_message_payload(to, subject, body, cc, bcc, from_address, body_type)
-    if attachments:
-        await _asend_via_draft(client, message, attachments, mailbox)
-        return
-    await client.post(
-        f"{_base(mailbox)}/sendMail", json_data={"message": message, "saveToSentItems": True}
-    )
+    return await _asend_via_draft(client, message, attachments or [], mailbox)
 
 
 async def acreate_draft(

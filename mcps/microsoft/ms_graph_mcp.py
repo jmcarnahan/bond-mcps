@@ -14,22 +14,22 @@ Run (standalone):
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
 Tool summary (47 tools):
-  Email     : get_profile, list_emails, sync_mail, read_email, get_email_attachment,
+  Email     : get_profile, list_emails, sync_mail, read_email*, get_email_attachment*,
               send_email, mark_mail_read, manage_inbox_rules, manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
-  Teams     : list_teams, list_chats, read_teams_messages, search_teams_messages,
-              get_teams_attachment, send_teams_message, get_teams_activity,
+  Teams     : list_teams*, list_chats*, read_teams_messages*, search_teams_messages*,
+              get_teams_attachment*, send_teams_message*, get_teams_activity*,
               get_chat_members, ensure_chat, mark_chat_read
-  Files     : list_sharepoint_sites, list_files, inspect_file, upload_file, edit_document, manage_file
-  Power BI  : list_powerbi_workspaces, list_powerbi_content, query_dataset, refresh_dataset, export_report
+  Files     : list_sharepoint_sites*, list_files*, inspect_file, upload_file*, edit_document*, manage_file*
+  Power BI  : list_powerbi_workspaces*, list_powerbi_content*, query_dataset*, refresh_dataset*, export_report*
   Directory : search_people
   Desktop JSON : get_mail_detail, get_mail_attachment_json, create_reply_draft_json,
                  create_draft_json, update_draft_body, add_draft_attachment_json, send_draft,
                  list_chats_page, list_chat_messages_page, get_chat_attachment_json,
                  send_chat_message_json, connection_status
 
-27 of these tools return a prose/CSV string an LLM reads directly; the other 20
-return a ``dict`` and declare ``output_schema=None``, which opts them into the
+The 19 tools marked ``*`` return a prose/CSV string an LLM reads directly; the
+other 28 return a ``dict`` and declare ``output_schema=None``, which opts them into the
 FormatNegotiation middleware: a caller sending ``X-Bond-Client: desktop`` (the
 desktop mail app) gets the dict as structuredContent, while every other caller
 gets a compact text rendering of the same dict. Parameters stay ``str``/``int``
@@ -262,12 +262,12 @@ async def healthz(request):
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_emails(
     folder: str = "inbox", query: str = "", top: int = 1000, mailbox: str = "", options: str = ""
-) -> str:
+) -> dict:
     """
-    List recent emails or search email messages. Returns pipe-delimited CSV.
+    List recent emails or search email messages.
 
     When query is empty, lists recent messages in the specified folder (default: inbox).
     When query is provided, searches messages matching the keyword query. A custom
@@ -288,17 +288,25 @@ async def list_emails(
             {"mark_as_read": ["id1", "id2"]}  — mark specified message IDs as read after listing.
 
     Returns:
-        Pipe-delimited CSV. The has_attachments column flags messages that carry
-        attachments; read_email lists them and get_email_attachment reads one.
-        While the mail sender policy is on, messages from senders outside the
-        allowed domains are omitted and a notice is appended.
-    """
-    import csv
-    import io
+        messages (a row per message), count, folder, query, marked_read, notice.
+        Each row carries date, from_name, from_address, to, subject, is_read,
+        body_preview, has_attachments, id. The has_attachments column flags
+        messages that carry attachments; read_email lists them and
+        get_email_attachment reads one.
 
+        You see this as pipe-CSV — one header line of those column names, one
+        line per message — followed by `count:`, `folder:`, `query:`,
+        `marked_read:` and `notice:` lines (empty ones are dropped). No messages
+        renders as `messages: (none)`.
+
+        While the mail sender policy is on, messages from senders outside the
+        allowed domains are omitted and the notice says so; the notice is
+        constant, because a hidden count would turn a $search query into a
+        content oracle.
+    """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     _SELECT = (
         "id,subject,from,sender,isDraft,toRecipients,receivedDateTime,isRead,"
@@ -306,90 +314,76 @@ async def list_emails(
     )
 
     # Resolved before any Graph call so a malformed allowlist fails the call
-    # instead of returning unfiltered mail. The notice is constant: a hidden
-    # count would turn a $search query into a content oracle.
-    notice = f"\n{mail_policy.POLICY_NOTICE}" if mail_policy.enabled() else ""
+    # instead of returning unfiltered mail.
+    notice = mail_policy.POLICY_NOTICE if mail_policy.enabled() else ""
 
     mb = mailbox or None
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        # A custom folder display name (anything other than the default inbox) is
-        # resolved to a real folder ID; well-known names pass through unchanged.
-        resolved_folder: str | None = None
-        if folder and folder != "inbox":
-            try:
-                resolved_folder = await folder_ops.aresolve_folder_id(client, folder, mailbox=mb)
-            except folder_ops.FolderNotFoundError as e:
-                return str(e)
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            # A custom folder display name (anything other than the default inbox) is
+            # resolved to a real folder ID; well-known names pass through unchanged.
+            resolved_folder: str | None = None
+            if folder and folder != "inbox":
+                try:
+                    resolved_folder = await folder_ops.aresolve_folder_id(
+                        client, folder, mailbox=mb
+                    )
+                except folder_ops.FolderNotFoundError as e:
+                    return {"error": "folder_not_found", "reason": str(e)}
 
-        if query:
-            # Scope the search to an explicit custom folder; the default inbox
-            # keeps the historical global-search behavior.
-            messages = await mail_ops.asearch_messages(
-                client, query=query, top=top, select=_SELECT, mailbox=mb, folder=resolved_folder
-            )
-        else:
-            messages = await mail_ops.alist_messages(
-                client, folder=resolved_folder or folder, top=top, select=_SELECT, mailbox=mb
-            )
-        messages = mail_policy.filter_messages(messages)
+            if query:
+                # Scope the search to an explicit custom folder; the default inbox
+                # keeps the historical global-search behavior.
+                messages = await mail_ops.asearch_messages(
+                    client, query=query, top=top, select=_SELECT, mailbox=mb, folder=resolved_folder
+                )
+            else:
+                messages = await mail_ops.alist_messages(
+                    client, folder=resolved_folder or folder, top=top, select=_SELECT, mailbox=mb
+                )
+            messages = mail_policy.filter_messages(messages)
 
-        mark_ids = opts.get("mark_as_read", [])
-        if mark_ids:
-            if not isinstance(mark_ids, list):
-                return "Option 'mark_as_read' must be a JSON array of message IDs."
-            for mid in mark_ids:
-                await mail_ops.amark_read(client, mid, mailbox=mb)
+            mark_ids = opts.get("mark_as_read", [])
+            if mark_ids:
+                if not isinstance(mark_ids, list):
+                    return {
+                        "error": "invalid_options",
+                        "reason": "Option 'mark_as_read' must be a JSON array of message IDs.",
+                    }
+                for mid in mark_ids:
+                    await mail_ops.amark_read(client, mid, mailbox=mb)
+    except PermissionError as e:
+        return _not_connected(e)
 
-    if not messages:
-        prefix = f'No messages found matching "{query}".' if query else "No messages found."
-        if mark_ids and isinstance(mark_ids, list):
-            return f"{prefix}\n\n{len(mark_ids)} message(s) marked as read.{notice}"
-        return f"{prefix}{notice}"
-
-    output = io.StringIO()
-    if query:
-        output.write(f'{len(messages)} result(s) for "{query}"\n\n')
-    else:
-        output.write(f"{len(messages)} message(s) in {folder}\n\n")
-
-    writer = csv.writer(output, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(
-        [
-            "date",
-            "from_name",
-            "from_address",
-            "to",
-            "subject",
-            "is_read",
-            "body_preview",
-            "has_attachments",
-            "id",
-        ]
-    )
+    rows = []
     for msg in messages:
         sender = msg.get("from", {}).get("emailAddress", {})
-        to_addrs = ", ".join(
-            r.get("emailAddress", {}).get("address", "") for r in msg.get("toRecipients", [])
-        )
-        writer.writerow(
-            [
-                msg.get("receivedDateTime", ""),
-                sender.get("name", ""),
-                sender.get("address", ""),
-                to_addrs,
-                msg.get("subject", ""),
-                msg.get("isRead", ""),
-                msg.get("bodyPreview", ""),
-                msg.get("hasAttachments", ""),
-                msg.get("id", ""),
-            ]
+        rows.append(
+            {
+                "date": msg.get("receivedDateTime", ""),
+                "from_name": sender.get("name", ""),
+                "from_address": sender.get("address", ""),
+                "to": ", ".join(
+                    r.get("emailAddress", {}).get("address", "")
+                    for r in msg.get("toRecipients", [])
+                ),
+                "subject": msg.get("subject", ""),
+                "is_read": msg.get("isRead"),
+                "body_preview": msg.get("bodyPreview", ""),
+                "has_attachments": msg.get("hasAttachments"),
+                "id": msg.get("id", ""),
+            }
         )
 
-    if mark_ids:
-        output.write(f"\n{len(mark_ids)} message(s) marked as read.")
-
-    return output.getvalue() + notice
+    return {
+        "messages": rows,
+        "count": len(rows),
+        "folder": folder,
+        "query": query,
+        "marked_read": len(mark_ids) if isinstance(mark_ids, list) else 0,
+        "notice": notice,
+    }
 
 
 def _attachment_line(summary: dict, show_inline: bool) -> str:
@@ -712,10 +706,15 @@ async def get_email_attachment(
     return _render_attachment_result(header, result, mode)
 
 
-@mcp.tool()
-async def send_email(to: str, subject: str, body: str, mailbox: str = "", options: str = "") -> str:
+@mcp.tool(output_schema=None)
+async def send_email(
+    to: str, subject: str, body: str, mailbox: str = "", options: str = ""
+) -> dict:
     """
     Send an email message.
+
+    Graph accepts the send asynchronously, so a successful return means
+    "queued", not "delivered".
 
     Args:
         to: Recipient email address (comma-separated for multiple). Supports
@@ -752,50 +751,71 @@ async def send_email(to: str, subject: str, body: str, mailbox: str = "", option
              override the type guessed from the name. While the mail sender
              policy is on, a {"message_id", "attachment_id"} spec is refused
              when that message came from a sender outside the allowed domains.
+
+    Returns:
+        ok, plus the sent mail's id, conversation_id, internet_message_id,
+        subject, to, cc, bcc_count, from, attachments, and sent_at. The id is
+        the draft the send was built from and stops resolving once the copy
+        lands in Sent Items, so it serves only as a client-side key;
+        internet_message_id and conversation_id carry over to the sent copy, so
+        the Sent Items copy is found by matching internet_message_id. bcc_count
+        stands in for the BCC addresses, which are deliberately not echoed back.
+        sent_at is the server's UTC clock when Graph queued the send; Exchange's
+        own sentDateTime may differ from it by seconds.
+
+        You see this as one `key: value` line per field, empty fields included.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
     body_type = opts.get("body_type", "auto")
     cc = opts.get("cc", "")
     bcc = opts.get("bcc", "")
     from_address = opts.get("from_address", "")
 
     mb = mailbox or None
-    token = get_graph_token()
     to_list = [addr.strip() for addr in to.split(",") if addr.strip()]
     cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()] if cc else None
     bcc_list = [addr.strip() for addr in bcc.split(",") if addr.strip()] if bcc else None
 
     resolved: list = []
-    async with AsyncGraphClient(token) as client:
-        specs = opts.get("attachments")
-        if specs is not None:
-            try:
-                resolved = await attachment_ops.aresolve_attachment_sources(client, specs)
-            except ValueError as e:
-                return str(e)
-        await mail_ops.asend_message(
-            client,
-            to=to_list,
-            subject=subject,
-            body=body,
-            cc=cc_list,
-            bcc=bcc_list,
-            from_address=from_address or None,
-            body_type=body_type,
-            mailbox=mb,
-            attachments=resolved or None,
-        )
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            specs = opts.get("attachments")
+            if specs is not None:
+                try:
+                    resolved = await attachment_ops.aresolve_attachment_sources(client, specs)
+                except ValueError as e:
+                    return {"error": "invalid_attachments", "reason": str(e)}
+            draft = await mail_ops.asend_message(
+                client,
+                to=to_list,
+                subject=subject,
+                body=body,
+                cc=cc_list,
+                bcc=bcc_list,
+                from_address=from_address or None,
+                body_type=body_type,
+                mailbox=mb,
+                attachments=resolved or None,
+            )
+    except PermissionError as e:
+        return _not_connected(e)
 
-    cc_note = f" (CC: {cc})" if cc else ""
-    bcc_note = f" (BCC: {len(bcc_list)} recipients)" if bcc_list else ""
-    source = f" from {mailbox}" if mb else ""
-    attach_note = ""
-    if resolved:
-        listed = ", ".join(f"{a.name} ({_format_size(len(a.data))})" for a in resolved)
-        attach_note = f" with {len(resolved)} attachment(s): {listed}"
-    return f"Email sent to {to}{source}{cc_note}{bcc_note}{attach_note}."
+    return {
+        "ok": True,
+        "id": draft["id"],
+        "conversation_id": draft.get("conversationId"),
+        "internet_message_id": draft.get("internetMessageId"),
+        "subject": subject,
+        "to": ", ".join(to_list),
+        "cc": ", ".join(cc_list) if cc_list else "",
+        "bcc_count": len(bcc_list) if bcc_list else 0,
+        "from": mailbox or from_address or "",
+        "attachments": ", ".join(f"{a.name} ({_format_size(len(a.data))})" for a in resolved),
+        "sent_at": _utcnow_iso(),
+    }
 
 
 def _summarize_rule_keys(predicate: dict) -> str:
@@ -803,22 +823,8 @@ def _summarize_rule_keys(predicate: dict) -> str:
     return ", ".join(predicate.keys()) if isinstance(predicate, dict) else ""
 
 
-def _format_rule_detail(rule: dict) -> str:
-    """Render one inbox rule as readable JSON for full visibility into conditions/actions."""
-    import json
-
-    return json.dumps(rule, indent=2, default=str)
-
-
-def _format_folder_detail(folder: dict) -> str:
-    """Render one mail folder as readable JSON (includes its ID for use in other calls)."""
-    import json
-
-    return json.dumps(folder, indent=2, default=str)
-
-
-@mcp.tool()
-async def manage_inbox_rules(action: str = "list", rule_id: str = "", options: str = "") -> str:
+@mcp.tool(output_schema=None)
+async def manage_inbox_rules(action: str = "list", rule_id: str = "", options: str = "") -> dict:
     """
     Manage Outlook inbox rules (messageRules): list | get | create | update | delete.
 
@@ -832,81 +838,101 @@ async def manage_inbox_rules(action: str = "list", rule_id: str = "", options: s
             Create requires displayName, sequence, and actions.
 
     Returns:
-        list: pipe-delimited CSV (id|displayName|sequence|isEnabled|conditions|actions).
-        get: full JSON of the rule object (conditions, actions with values).
-        create/update: confirmation message with rule ID and name. While the
-            mail sender policy is on, a rule that forwards or redirects mail is
-            refused, because it would re-deliver external mail as internal.
-        delete: confirmation message.
+        list: rules (id, display_name, sequence, is_enabled, conditions,
+            actions) and count — conditions/actions are the comma-joined key
+            names, not their values. You see pipe-CSV of those columns plus a
+            trailing `count:` line; no rules renders as `rules: (none)`.
+        get: rule — the whole Graph rule object, conditions and actions with
+            their values. You see it as compact JSON.
+        create/update: action ("created"/"updated"), id, display_name, as
+            `key: value` lines. While the mail sender policy is on, a rule that
+            forwards or redirects mail is refused, because it would re-deliver
+            external mail as internal.
+        delete: action ("deleted") and id.
     """
-    import csv
-    import io
-
     action = action.strip().lower()
     valid_actions = {"list", "get", "create", "update", "delete"}
     if action not in valid_actions:
-        return f"Unknown action {action!r}. Use one of: {', '.join(sorted(valid_actions))}."
+        return {
+            "error": "invalid_action",
+            "reason": f"Unknown action {action!r}. Use one of: {', '.join(sorted(valid_actions))}.",
+        }
 
     if action in ("get", "update", "delete") and not rule_id:
-        return f"A rule_id is required for action {action!r}."
+        return {
+            "error": "missing_rule_id",
+            "reason": f"A rule_id is required for action {action!r}.",
+        }
 
     if action in ("create", "update"):
         opts, err = parse_options(options)
         if err:
-            return err
+            return {"error": "invalid_options", "reason": err}
         if not isinstance(opts, dict) or not opts:
-            return (
-                f"Action {action!r} requires a non-empty options JSON object (the rule definition)."
-            )
+            return {
+                "error": "invalid_options",
+                "reason": (
+                    f"Action {action!r} requires a non-empty options JSON object "
+                    "(the rule definition)."
+                ),
+            }
         if action == "create":
             missing = {"displayName", "sequence", "actions"} - opts.keys()
             if missing:
-                return f"Action 'create' requires: {', '.join(sorted(missing))}."
+                return {
+                    "error": "invalid_options",
+                    "reason": f"Action 'create' requires: {', '.join(sorted(missing))}.",
+                }
 
         # Refused before the token is even acquired: a forwarding rule
         # re-originates every external message as an internal one, which is a
         # durable, self-service bypass of the whole policy.
         if mail_policy.enabled() and mail_policy.rule_forwards(opts):
-            return mail_policy.FORWARDING_RULE_TEXT
+            return {"error": "forwarding_rule", "reason": mail_policy.FORWARDING_RULE_TEXT}
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        if action == "list":
-            rules = await mail_ops.alist_inbox_rules(client)
-            if not rules:
-                return "No inbox rules found."
-            output = io.StringIO()
-            output.write(f"{len(rules)} rule(s)\n\n")
-            writer = csv.writer(output, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-            writer.writerow(["id", "displayName", "sequence", "isEnabled", "conditions", "actions"])
-            for rule in rules:
-                writer.writerow(
-                    [
-                        rule.get("id", ""),
-                        rule.get("displayName", ""),
-                        rule.get("sequence", ""),
-                        rule.get("isEnabled", ""),
-                        _summarize_rule_keys(rule.get("conditions", {})),
-                        _summarize_rule_keys(rule.get("actions", {})),
-                    ]
-                )
-            return output.getvalue()
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            if action == "list":
+                rules = await mail_ops.alist_inbox_rules(client)
+                return {
+                    "rules": [
+                        {
+                            "id": rule.get("id", ""),
+                            "display_name": rule.get("displayName", ""),
+                            "sequence": rule.get("sequence"),
+                            "is_enabled": rule.get("isEnabled"),
+                            "conditions": _summarize_rule_keys(rule.get("conditions", {})),
+                            "actions": _summarize_rule_keys(rule.get("actions", {})),
+                        }
+                        for rule in rules
+                    ],
+                    "count": len(rules),
+                }
 
-        if action == "get":
-            rule = await mail_ops.aget_inbox_rule(client, rule_id)
-            return _format_rule_detail(rule)
+            if action == "get":
+                return {"rule": await mail_ops.aget_inbox_rule(client, rule_id)}
 
-        if action == "create":
-            created = await mail_ops.acreate_inbox_rule(client, opts) or {}
-            return f"Rule {created.get('id', '?')} ({created.get('displayName', '?')}) created."
+            if action == "create":
+                created = await mail_ops.acreate_inbox_rule(client, opts) or {}
+                return {
+                    "action": "created",
+                    "id": created.get("id"),
+                    "display_name": created.get("displayName"),
+                }
 
-        if action == "update":
-            updated = await mail_ops.aupdate_inbox_rule(client, rule_id, opts)
-            return f"Rule {updated.get('id', rule_id)} ({updated.get('displayName', '?')}) updated."
+            if action == "update":
+                updated = await mail_ops.aupdate_inbox_rule(client, rule_id, opts) or {}
+                return {
+                    "action": "updated",
+                    "id": updated.get("id", rule_id),
+                    "display_name": updated.get("displayName"),
+                }
 
-        # delete
-        await mail_ops.adelete_inbox_rule(client, rule_id)
-        return f"Rule {rule_id} deleted."
+            await mail_ops.adelete_inbox_rule(client, rule_id)
+            return {"action": "deleted", "id": rule_id}
+    except PermissionError as e:
+        return _not_connected(e)
 
 
 # ---------------------------------------------------------------------------
@@ -914,8 +940,8 @@ async def manage_inbox_rules(action: str = "list", rule_id: str = "", options: s
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def manage_mail_folders(action: str = "list", folder_id: str = "", options: str = "") -> str:
+@mcp.tool(output_schema=None)
+async def manage_mail_folders(action: str = "list", folder_id: str = "", options: str = "") -> dict:
     """
     Manage Outlook mail folders: list | get | create | rename | move | delete.
 
@@ -931,88 +957,110 @@ async def manage_mail_folders(action: str = "list", folder_id: str = "", options
             move: {"destination_id": "<folder-id-or-well-known-name>"}.
 
     Returns:
-        list: pipe-delimited CSV (id|displayName|childFolderCount|totalItemCount|unreadItemCount).
-        get: full JSON of the folder (including its ID for use in other calls).
-        create/rename/move: confirmation message with folder ID and name.
-        delete: confirmation message.
+        list: folders (id, display_name, child_folder_count, total_item_count,
+            unread_item_count) and count. You see pipe-CSV of those columns plus
+            a trailing `count:` line; no folders renders as `folders: (none)`.
+        get: folder — the whole Graph folder object, including its ID for use in
+            other calls. You see it as compact JSON.
+        create/rename: action ("created"/"renamed"), id, display_name, as
+            `key: value` lines.
+        move: action ("moved"), id, parent_id.
+        delete: action ("deleted") and id.
     """
-    import csv
-    import io
-
     action = action.strip().lower()
     valid_actions = {"list", "get", "create", "rename", "move", "delete"}
     if action not in valid_actions:
-        return f"Unknown action {action!r}. Use one of: {', '.join(sorted(valid_actions))}."
+        return {
+            "error": "invalid_action",
+            "reason": f"Unknown action {action!r}. Use one of: {', '.join(sorted(valid_actions))}.",
+        }
 
     if action in ("get", "rename", "move", "delete") and not folder_id:
-        return f"A folder_id is required for action {action!r}."
+        return {
+            "error": "missing_folder_id",
+            "reason": f"A folder_id is required for action {action!r}.",
+        }
 
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     if action in ("create", "rename"):
         display_name = str(opts.get("display_name", "")).strip()
         if not display_name:
-            return f"Action {action!r} requires a non-empty 'display_name' in options."
+            return {
+                "error": "invalid_options",
+                "reason": f"Action {action!r} requires a non-empty 'display_name' in options.",
+            }
 
     if action == "move":
         destination_id = str(opts.get("destination_id", "")).strip()
         if not destination_id:
-            return "Action 'move' requires a non-empty 'destination_id' in options."
+            return {
+                "error": "invalid_options",
+                "reason": "Action 'move' requires a non-empty 'destination_id' in options.",
+            }
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        if action == "list":
-            parent_id = opt_str(opts.get("parent_id"))
-            top = max(1, opt_int(opts.get("top"), 100))
-            result = await folder_ops.alist_folders(
-                client,
-                parent_id=parent_id,
-                top=top,
-                include_hidden=opt_bool(opts.get("include_hidden"), False),
-            )
-            if not result:
-                return "No folders found."
-            output = io.StringIO()
-            output.write(f"{len(result)} folder(s)\n\n")
-            writer = csv.writer(output, delimiter="|", quoting=csv.QUOTE_MINIMAL)
-            writer.writerow(
-                ["id", "displayName", "childFolderCount", "totalItemCount", "unreadItemCount"]
-            )
-            for folder in result:
-                writer.writerow(
-                    [
-                        folder.get("id", ""),
-                        folder.get("displayName", ""),
-                        folder.get("childFolderCount", ""),
-                        folder.get("totalItemCount", ""),
-                        folder.get("unreadItemCount", ""),
-                    ]
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            if action == "list":
+                parent_id = opt_str(opts.get("parent_id"))
+                top = max(1, opt_int(opts.get("top"), 100))
+                result = await folder_ops.alist_folders(
+                    client,
+                    parent_id=parent_id,
+                    top=top,
+                    include_hidden=opt_bool(opts.get("include_hidden"), False),
                 )
-            return output.getvalue()
+                return {
+                    "folders": [
+                        {
+                            "id": folder.get("id", ""),
+                            "display_name": folder.get("displayName", ""),
+                            "child_folder_count": folder.get("childFolderCount"),
+                            "total_item_count": folder.get("totalItemCount"),
+                            "unread_item_count": folder.get("unreadItemCount"),
+                        }
+                        for folder in result
+                    ],
+                    "count": len(result),
+                }
 
-        if action == "get":
-            folder = await folder_ops.aget_folder(client, folder_id)
-            return _format_folder_detail(folder)
+            if action == "get":
+                return {"folder": await folder_ops.aget_folder(client, folder_id)}
 
-        if action == "create":
-            parent_id = opt_str(opts.get("parent_id"))
-            created = await folder_ops.acreate_folder(client, display_name, parent_id=parent_id)
-            created = created or {}
-            return f"Folder {created.get('id', '?')} ({created.get('displayName', '?')}) created."
+            if action == "create":
+                parent_id = opt_str(opts.get("parent_id"))
+                created = (
+                    await folder_ops.acreate_folder(client, display_name, parent_id=parent_id)
+                ) or {}
+                return {
+                    "action": "created",
+                    "id": created.get("id"),
+                    "display_name": created.get("displayName"),
+                }
 
-        if action == "rename":
-            updated = (await folder_ops.arename_folder(client, folder_id, display_name)) or {}
-            return f"Folder {updated.get('id', folder_id)} renamed to {updated.get('displayName', '?')!r}."
+            if action == "rename":
+                updated = (await folder_ops.arename_folder(client, folder_id, display_name)) or {}
+                return {
+                    "action": "renamed",
+                    "id": updated.get("id", folder_id),
+                    "display_name": updated.get("displayName"),
+                }
 
-        if action == "move":
-            moved = (await folder_ops.amove_folder(client, folder_id, destination_id)) or {}
-            return f"Folder {folder_id} moved to {moved.get('parentFolderId', destination_id)!r}."
+            if action == "move":
+                moved = (await folder_ops.amove_folder(client, folder_id, destination_id)) or {}
+                return {
+                    "action": "moved",
+                    "id": folder_id,
+                    "parent_id": moved.get("parentFolderId", destination_id),
+                }
 
-        # delete
-        await folder_ops.adelete_folder(client, folder_id)
-        return f"Folder {folder_id} deleted."
+            await folder_ops.adelete_folder(client, folder_id)
+            return {"action": "deleted", "id": folder_id}
+    except PermissionError as e:
+        return _not_connected(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,12 +1068,12 @@ async def manage_mail_folders(action: str = "list", folder_id: str = "", options
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_calendar_events(
     start_date: str = "",
     end_date: str = "",
     top: int = 10,
-) -> str:
+) -> dict:
     """
     List calendar events in a date range.
 
@@ -1038,6 +1086,15 @@ async def list_calendar_events(
         end_date: End date/time in ISO 8601 format (e.g., "2026-05-14T00:00:00Z").
                   Defaults to 7 days from start_date.
         top: Maximum number of events to return (default: 10).
+
+    Returns:
+        events (a row per event) and count. Each row carries subject, start,
+        end, timezone, organizer, location, online_url, is_all_day,
+        is_cancelled, id — start/end are the raw Graph dateTime strings and
+        timezone applies to both.
+
+        You see this as pipe-CSV of those columns plus a trailing `count:` line;
+        an empty range renders as `events: (none)`.
     """
     from datetime import datetime, timedelta
     from datetime import timezone as tz
@@ -1046,50 +1103,44 @@ async def list_calendar_events(
         now = datetime.now(tz.utc)
         start_date = now.isoformat()
     if not end_date:
-        start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+        except ValueError as e:
+            return {"error": "invalid_date", "reason": str(e)}
         end_date = (start_dt + timedelta(days=7)).isoformat()
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        events = await calendar_ops.alist_calendar_events(
-            client, start_datetime=start_date, end_datetime=end_date, top=top
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            events = await calendar_ops.alist_calendar_events(
+                client, start_datetime=start_date, end_datetime=end_date, top=top
+            )
+    except PermissionError as e:
+        return _not_connected(e)
+
+    rows = []
+    for event in events:
+        start = event.get("start", {})
+        rows.append(
+            {
+                "subject": event.get("subject", ""),
+                "start": start.get("dateTime", ""),
+                "end": event.get("end", {}).get("dateTime", ""),
+                "timezone": start.get("timeZone", ""),
+                "organizer": event.get("organizer", {}).get("emailAddress", {}).get("name", ""),
+                "location": event.get("location", {}).get("displayName", ""),
+                "online_url": event.get("onlineMeetingUrl", ""),
+                "is_all_day": event.get("isAllDay"),
+                "is_cancelled": event.get("isCancelled"),
+                "id": event.get("id", ""),
+            }
         )
 
-    if not events:
-        return "No calendar events found in the specified date range."
-
-    lines = [f"Found {len(events)} event(s):\n"]
-    for i, event in enumerate(events, 1):
-        subject = event.get("subject", "(no subject)")
-        start = event.get("start", {})
-        end = event.get("end", {})
-        start_str = start.get("dateTime", "?")
-        end_str = end.get("dateTime", "?")
-        start_tz = start.get("timeZone", "")
-        location = event.get("location", {}).get("displayName", "")
-        organizer = event.get("organizer", {}).get("emailAddress", {}).get("name", "")
-        is_all_day = event.get("isAllDay", False)
-        is_cancelled = event.get("isCancelled", False)
-        online_url = event.get("onlineMeetingUrl", "")
-
-        time_str = "All day" if is_all_day else f"{start_str} - {end_str} ({start_tz})"
-        status = " [CANCELLED]" if is_cancelled else ""
-
-        entry = f"{i}. **{subject}**{status}\n   Time: {time_str}\n"
-        if organizer:
-            entry += f"   Organizer: {organizer}\n"
-        if location:
-            entry += f"   Location: {location}\n"
-        if online_url:
-            entry += f"   Online: {online_url}\n"
-        entry += f"   ID: `{event.get('id', '?')}`"
-        lines.append(entry)
-
-    return "\n\n".join(lines)
+    return {"events": rows, "count": len(rows)}
 
 
-@mcp.tool()
-async def get_calendar_event(event_id: str, options: str = "") -> str:
+@mcp.tool(output_schema=None)
+async def get_calendar_event(event_id: str, options: str = "") -> dict:
     """
     Get detailed information about a specific calendar event.
 
@@ -1098,80 +1149,78 @@ async def get_calendar_event(event_id: str, options: str = "") -> str:
         options: JSON string with optional fields:
             {"max_content_length": -1}  — max characters for the event body. Default -1
                 (no limit). Set a positive integer to truncate long event descriptions.
+
+    Returns:
+        attendees (a row per attendee: name, address, response), plus subject,
+        start, end, timezone, organizer_name, organizer_address, location,
+        online_url, is_all_day, recurrence, id, body_type, body_text.
+        start/end are the raw Graph dateTime strings and timezone applies to
+        both; body_type ("html" or "text") says how to read body_text.
+
+        You see this as pipe-CSV of the attendee columns followed by one
+        `key: value` line per remaining field, with the empty ones dropped; an
+        event nobody was invited to renders as `attendees: (none)`.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     max_content_length = opt_int(opts.get("max_content_length"), -1)
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        event = await calendar_ops.aget_calendar_event(client, event_id)
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            event = await calendar_ops.aget_calendar_event(client, event_id)
+    except PermissionError as e:
+        return _not_connected(e)
 
-    subject = event.get("subject", "(no subject)")
     start = event.get("start", {})
-    end = event.get("end", {})
-    start_str = f"{start.get('dateTime', '?')} ({start.get('timeZone', '?')})"
-    end_str = f"{end.get('dateTime', '?')} ({end.get('timeZone', '?')})"
-    location = event.get("location", {}).get("displayName", "")
     organizer = event.get("organizer", {}).get("emailAddress", {})
     body = event.get("body", {})
-    body_content = body.get("content", "")
-    if body.get("contentType") != "text":
-        body_text = body_content if max_content_length <= 0 else body_content[:max_content_length]
-        body_content = f"[HTML content, {len(body_content)} chars]\n{body_text}"
-    elif max_content_length > 0:
-        body_content = body_content[:max_content_length]
+    body_text = body.get("content", "")
+    if max_content_length > 0:
+        body_text = body_text[:max_content_length]
 
-    attendees = event.get("attendees", [])
-    attendee_lines = []
-    for att in attendees:
-        email = att.get("emailAddress", {})
-        status = att.get("status", {}).get("response", "none")
-        attendee_lines.append(
-            f"  - {email.get('name', '?')} <{email.get('address', '?')}> ({status})"
-        )
-
-    is_all_day = event.get("isAllDay", False)
-    online_url = event.get("onlineMeetingUrl", "")
     recurrence = event.get("recurrence")
+    pattern = (recurrence or {}).get("pattern", {})
 
-    lines = [
-        f"**Subject:** {subject}",
-        f"**Time:** {'All day' if is_all_day else f'{start_str} to {end_str}'}",
-    ]
-    if organizer:
-        lines.append(
-            f"**Organizer:** {organizer.get('name', '?')} <{organizer.get('address', '?')}>"
-        )
-    if location:
-        lines.append(f"**Location:** {location}")
-    if online_url:
-        lines.append(f"**Online Meeting:** {online_url}")
-    if recurrence:
-        pattern = recurrence.get("pattern", {})
-        lines.append(
-            f"**Recurrence:** {pattern.get('type', 'unknown')} (every {pattern.get('interval', 1)} {pattern.get('type', '')})"
-        )
-    if attendee_lines:
-        lines.append(f"**Attendees ({len(attendee_lines)}):**")
-        lines.extend(attendee_lines)
-    lines.append(f"**ID:** `{event.get('id', '?')}`")
-    if body_content:
-        lines.append(f"\n---\n{body_content}")
+    return {
+        "attendees": [
+            {
+                "name": att.get("emailAddress", {}).get("name", ""),
+                "address": att.get("emailAddress", {}).get("address", ""),
+                "response": att.get("status", {}).get("response", "none"),
+            }
+            for att in event.get("attendees", [])
+        ],
+        "subject": event.get("subject", ""),
+        "start": start.get("dateTime", ""),
+        "end": event.get("end", {}).get("dateTime", ""),
+        "timezone": start.get("timeZone", ""),
+        "organizer_name": organizer.get("name", ""),
+        "organizer_address": organizer.get("address", ""),
+        "location": event.get("location", {}).get("displayName", ""),
+        "online_url": event.get("onlineMeetingUrl", ""),
+        "is_all_day": event.get("isAllDay"),
+        "recurrence": (
+            f"{pattern.get('type', 'unknown')} (every {pattern.get('interval', 1)})"
+            if recurrence
+            else ""
+        ),
+        "id": event.get("id", ""),
+        "body_type": body.get("contentType", ""),
+        "body_text": body_text,
+    }
 
-    return "\n".join(lines)
 
-
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def create_calendar_event(
     subject: str,
     start_datetime: str,
     end_datetime: str,
     timezone: str = "UTC",
     options: str = "",
-) -> str:
+) -> dict:
     """
     Create a new calendar event.
 
@@ -1182,10 +1231,15 @@ async def create_calendar_event(
         timezone: IANA timezone for start/end times (e.g., "America/New_York", "UTC"). Default: UTC.
         options: JSON string with optional fields:
             {"attendees": "a@b.com,c@d.com", "location": "Room 42", "body": "Meeting notes...", "is_online_meeting": true, "is_all_day": false}
+
+    Returns:
+        ok, id, subject, start, end, timezone, online_meeting_url, web_link —
+        start/end/timezone come back from Graph, which may normalize what was
+        asked for. You see one `key: value` line per field.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
     attendees = opts.get("attendees", "")
     location = opts.get("location", "")
     body = opts.get("body", "")
@@ -1196,38 +1250,45 @@ async def create_calendar_event(
         [addr.strip() for addr in attendees.split(",") if addr.strip()] if attendees else None
     )
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        event = await calendar_ops.acreate_calendar_event(
-            client,
-            subject=subject,
-            start_datetime=start_datetime,
-            start_timezone=timezone,
-            end_datetime=end_datetime,
-            end_timezone=timezone,
-            body=body,
-            attendees=attendee_list,
-            location=location,
-            is_online_meeting=is_online_meeting,
-            is_all_day=is_all_day,
-        )
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            event = await calendar_ops.acreate_calendar_event(
+                client,
+                subject=subject,
+                start_datetime=start_datetime,
+                start_timezone=timezone,
+                end_datetime=end_datetime,
+                end_timezone=timezone,
+                body=body,
+                attendees=attendee_list,
+                location=location,
+                is_online_meeting=is_online_meeting,
+                is_all_day=is_all_day,
+            )
+    except PermissionError as e:
+        return _not_connected(e)
 
-    result = f"Event '{subject}' created successfully."
     start = event.get("start", {})
-    result += f"\nTime: {start.get('dateTime', '?')} ({start.get('timeZone', '?')})"
-    if event.get("onlineMeetingUrl"):
-        result += f"\nMeeting link: {event['onlineMeetingUrl']}"
-    result += f"\nID: `{event.get('id', '?')}`"
-    return result
+    return {
+        "ok": True,
+        "id": event.get("id", ""),
+        "subject": subject,
+        "start": start.get("dateTime", ""),
+        "end": event.get("end", {}).get("dateTime", ""),
+        "timezone": start.get("timeZone", ""),
+        "online_meeting_url": event.get("onlineMeetingUrl", ""),
+        "web_link": event.get("webLink", ""),
+    }
 
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def check_availability(
     emails: str,
     start_datetime: str,
     end_datetime: str,
     timezone: str = "UTC",
-) -> str:
+) -> dict:
     """
     Check free/busy availability for one or more people.
 
@@ -1239,52 +1300,64 @@ async def check_availability(
         start_datetime: Start of the time range in ISO 8601 format (e.g., "2026-05-08T09:00:00").
         end_datetime: End of the time range in ISO 8601 format (e.g., "2026-05-08T17:00:00").
         timezone: IANA timezone (e.g., "America/New_York", "UTC"). Default: UTC.
+
+    Returns:
+        busy (a row per busy block across everyone asked about: person, start,
+        end, subject, status — subject is "(private)" when the calendar does not
+        share it), summary (one free-percentage phrase per person, joined with
+        "; "), and busy_count. Every block is listed, so busy_count is the real
+        total.
+
+        You see this as pipe-CSV of the busy columns plus trailing `summary:`
+        and `busy_count:` lines; nobody busy renders as `busy: (none)`.
     """
     email_list = [addr.strip() for addr in emails.split(",") if addr.strip()]
     if not email_list:
-        return "No email addresses provided."
+        return {"error": "invalid_arguments", "reason": "No email addresses provided."}
 
-    token = get_graph_token()
-    async with AsyncGraphClient(token) as client:
-        result = await calendar_ops.acheck_availability(
-            client,
-            schedules=email_list,
-            start_datetime=start_datetime,
-            start_timezone=timezone,
-            end_datetime=end_datetime,
-            end_timezone=timezone,
-        )
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            result = await calendar_ops.acheck_availability(
+                client,
+                schedules=email_list,
+                start_datetime=start_datetime,
+                start_timezone=timezone,
+                end_datetime=end_datetime,
+                end_timezone=timezone,
+            )
+    except PermissionError as e:
+        return _not_connected(e)
 
     schedules = result.get("value", [])
     if not schedules:
-        return "No availability information returned."
+        return {"error": "no_data", "reason": "No availability information returned."}
 
-    lines = [f"Availability for {len(schedules)} schedule(s):\n"]
+    busy = []
+    summaries = []
     for sched in schedules:
-        email = sched.get("scheduleId", "?")
+        person = sched.get("scheduleId", "")
         avail_view = sched.get("availabilityView", "")
-        schedule_items = sched.get("scheduleItems", [])
-
         free_count = avail_view.count("0")
         total_slots = len(avail_view)
-        if total_slots > 0:
+        if total_slots:
             free_pct = int((free_count / total_slots) * 100)
-            summary = f"{free_pct}% free ({free_count}/{total_slots} slots)"
+            summaries.append(f"{person}: {free_pct}% free ({free_count}/{total_slots} slots)")
         else:
-            summary = "No slots"
+            summaries.append(f"{person}: no slots")
 
-        entry = f"**{email}** — {summary}"
-        if schedule_items:
-            entry += "\n   Busy times:"
-            for item in schedule_items[:10]:
-                item_subject = item.get("subject", "(private)")
-                item_start = item.get("start", {}).get("dateTime", "?")
-                item_end = item.get("end", {}).get("dateTime", "?")
-                item_status = item.get("status", "?")
-                entry += f"\n   - {item_start} to {item_end}: {item_subject} ({item_status})"
-        lines.append(entry)
+        for item in sched.get("scheduleItems", []):
+            busy.append(
+                {
+                    "person": person,
+                    "start": item.get("start", {}).get("dateTime", ""),
+                    "end": item.get("end", {}).get("dateTime", ""),
+                    "subject": item.get("subject", "(private)"),
+                    "status": item.get("status", ""),
+                }
+            )
 
-    return "\n\n".join(lines)
+    return {"busy": busy, "summary": "; ".join(summaries), "busy_count": len(busy)}
 
 
 # ---------------------------------------------------------------------------

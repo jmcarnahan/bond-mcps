@@ -6,6 +6,7 @@ get_graph_token() directly instead of get_http_headers().
 
 import base64
 import json
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -25,6 +26,9 @@ from .conftest import (
     GRAPH_ERROR_404,
     GRAPH_ERROR_410,
     SAMPLE_ATTACHMENTS_RESPONSE,
+    SAMPLE_CALENDAR_EVENT,
+    SAMPLE_CALENDAR_EVENT_ALLDAY,
+    SAMPLE_CALENDAR_EVENTS_RESPONSE,
     SAMPLE_CHANNEL_FILES_FOLDER,
     SAMPLE_CHANNEL_MESSAGES_RESPONSE,
     SAMPLE_CHANNELS_RESPONSE,
@@ -45,6 +49,7 @@ from .conftest import (
     SAMPLE_COPY_COMPLETED,
     SAMPLE_COPY_FAILED,
     SAMPLE_CREATED_ATTACHMENT,
+    SAMPLE_CREATED_EVENT,
     SAMPLE_DELTA_LINK,
     SAMPLE_DELTA_MESSAGE,
     SAMPLE_DELTA_NEXT_LINK,
@@ -94,6 +99,7 @@ from .conftest import (
     SAMPLE_PBI_WORKSPACES_RESPONSE,
     SAMPLE_REFERENCE_ATTACHMENT,
     SAMPLE_REPLY_DRAFT,
+    SAMPLE_SCHEDULE_RESPONSE,
     SAMPLE_SEARCH_CHANNEL_HIT,
     SAMPLE_SEARCH_CHAT_HIT,
     SAMPLE_SEARCH_MESSAGES_EMPTY,
@@ -296,6 +302,42 @@ def _graph_trail() -> list[tuple[str, str]]:
     return [(c.request.method, c.request.url.path) for c in respx.calls]
 
 
+# The draft send_email builds, plus the two ids Graph stamps at creation — the
+# only handle a caller ever gets on the copy that lands in Sent Items.
+SENT_DRAFT = {
+    **SAMPLE_DRAFT_MESSAGE,
+    "conversationId": "AAQkAGI2conv777=",
+    "internetMessageId": "<draft777@example.com>",
+}
+
+# The row list_emails builds from SAMPLE_MESSAGE.
+MSG_ROW = {
+    "date": "2025-12-15T10:30:00Z",
+    "from_name": "Alice Smith",
+    "from_address": "alice@example.com",
+    "to": "bob@example.com",
+    "subject": "Weekly Report",
+    "is_read": False,
+    "body_preview": "Here is the weekly report. Best, Alice",
+    "has_attachments": None,
+    "id": "AAMkAGI2TG93AAA=",
+}
+
+
+def _mock_send_email() -> respx.Route:
+    """The two requests send_email always makes: create the draft, then send it."""
+    create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+        return_value=httpx.Response(201, json=SENT_DRAFT)
+    )
+    respx.post(f"{DRAFT_BASE}/send").mock(return_value=httpx.Response(202))
+    return create
+
+
+def _sent_payload(route: respx.Route) -> dict:
+    """The message body of the draft-creating POST send_email made."""
+    return json.loads(route.calls[0].request.content)
+
+
 def _docx_bytes() -> bytes:
     """A real docx so the text sink exercises the extractor, not a stub."""
     from ms_graph import document_create
@@ -410,42 +452,38 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_list_emails_no_query(self, mcp_server):
-        """No query → lists inbox as pipe-delimited CSV."""
+        """No query → lists the inbox, one row per message."""
         respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
             return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"top": 10})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"top": 10})
-
-        text = _get_text(result)
-        assert "2 message(s) in inbox" in text
-        assert (
-            "date|from_name|from_address|to|subject|is_read|body_preview|has_attachments|id" in text
-        )
-        assert "Weekly Report" in text
-        assert "alice@example.com" in text
+        data = _structured(result)
+        assert data["messages"][0] == MSG_ROW
+        assert [row["subject"] for row in data["messages"]] == [
+            "Weekly Report",
+            "Re: Project Update",
+        ]
+        assert data["count"] == 2
+        assert data["folder"] == "inbox"
+        assert data["query"] == ""
+        assert data["marked_read"] == 0
+        assert data["notice"] == ""
 
     @respx.mock
     async def test_list_emails_with_query(self, mcp_server):
-        """query set → search mode, CSV output."""
+        """query set → search mode; the query comes back in the payload."""
         respx.get(f"{GRAPH_BASE_URL}/me/messages").mock(
             return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"query": "weekly"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"query": "weekly"})
-
-        text = _get_text(result)
-        assert '1 result(s) for "weekly"' in text
-        assert (
-            "date|from_name|from_address|to|subject|is_read|body_preview|has_attachments|id" in text
-        )
-        assert "Weekly Report" in text
+        data = _structured(result)
+        assert data["messages"] == [MSG_ROW]
+        assert data["count"] == 1
+        assert data["query"] == "weekly"
 
     @respx.mock
     async def test_list_emails_search_no_results(self, mcp_server):
@@ -453,14 +491,12 @@ class TestMCPEmailTools:
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"query": "nonexistent"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"query": "nonexistent"})
-
-        text = _get_text(result)
-        assert "No messages found" in text
-        assert "nonexistent" in text
+        data = _structured(result)
+        assert data["messages"] == []
+        assert data["count"] == 0
+        assert data["query"] == "nonexistent"
 
     @respx.mock
     async def test_list_emails_empty_inbox(self, mcp_server):
@@ -468,12 +504,16 @@ class TestMCPEmailTools:
             return_value=httpx.Response(200, json={"value": []})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {})
-
-        assert "No messages found" in _get_text(result)
+        assert _structured(result) == {
+            "messages": [],
+            "count": 0,
+            "folder": "inbox",
+            "query": "",
+            "marked_read": 0,
+            "notice": "",
+        }
 
     @respx.mock
     async def test_list_emails_custom_folder(self, mcp_server):
@@ -481,14 +521,11 @@ class TestMCPEmailTools:
             return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"folder": "sentitems"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"folder": "sentitems"})
-
-        text = _get_text(result)
-        assert "2 message(s) in sentitems" in text
-        assert "Weekly Report" in text
+        data = _structured(result)
+        assert data["count"] == 2
+        assert data["folder"] == "sentitems"
 
     @respx.mock
     async def test_list_emails_custom_display_name_resolves(self, mcp_server):
@@ -501,14 +538,11 @@ class TestMCPEmailTools:
             return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"folder": "projects"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"folder": "projects"})
-
-        text = _get_text(result)
-        assert "2 message(s) in projects" in text  # header keeps the display name
-        assert "Weekly Report" in text
+        data = _structured(result)
+        assert data["count"] == 2
+        assert data["folder"] == "projects"  # the payload keeps the display name
 
     @respx.mock
     async def test_list_emails_unknown_folder_returns_clear_error(self, mcp_server):
@@ -517,12 +551,12 @@ class TestMCPEmailTools:
             return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"folder": "ghost"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"folder": "ghost"})
-
-        assert _get_text(result) == "Folder 'ghost' not found."
+        assert _structured(result) == {
+            "error": "folder_not_found",
+            "reason": "Folder 'ghost' not found.",
+        }
 
     @respx.mock
     async def test_list_emails_well_known_skips_folder_lookup(self, mcp_server):
@@ -562,7 +596,8 @@ class TestMCPEmailTools:
         assert scoped.called
         scoped_url = str(scoped.calls[0].request.url)
         assert "$search" in scoped_url or "%24search" in scoped_url
-        assert '1 result(s) for "report"' in _get_text(result)
+        data = _structured(result)
+        assert (data["count"], data["query"]) == (1, "report")
 
     @respx.mock
     async def test_list_emails_query_default_inbox_stays_global(self, mcp_server):
@@ -595,39 +630,26 @@ class TestMCPEmailTools:
             side_effect=lambda req: next(responses)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"top": 1000})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"top": 1000})
-
-        text = _get_text(result)
-        assert "2 message(s) in inbox" in text
-        assert "Weekly Report" in text
-        assert "Re: Project Update" in text
+        data = _structured(result)
+        assert [row["subject"] for row in data["messages"]] == [
+            "Weekly Report",
+            "Re: Project Update",
+        ]
+        assert data["count"] == 2
 
     @respx.mock
-    async def test_list_emails_csv_structure(self, mcp_server):
-        """Verify CSV output is parseable and has correct field values."""
-        import csv
-        import io
-
+    async def test_list_emails_row_keys_and_values(self, mcp_server):
+        """Every row key is spelled out, and the booleans stay booleans."""
         respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
             return_value=httpx.Response(200, json=SAMPLE_MESSAGES_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"top": 10})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"top": 10})
-
-        text = _get_text(result)
-        # Skip the header comment line and blank line
-        csv_text = text.split("\n\n", 1)[1]
-        reader = csv.reader(io.StringIO(csv_text), delimiter="|")
-        rows = list(reader)
-
-        # Header row
-        assert rows[0] == [
+        rows = _structured(result)["messages"]
+        assert list(rows[0]) == [
             "date",
             "from_name",
             "from_address",
@@ -638,19 +660,9 @@ class TestMCPEmailTools:
             "has_attachments",
             "id",
         ]
-        # First data row (SAMPLE_MESSAGE)
-        assert rows[1][0] == "2025-12-15T10:30:00Z"  # date
-        assert rows[1][1] == "Alice Smith"  # from_name
-        assert rows[1][2] == "alice@example.com"  # from_address
-        assert rows[1][3] == "bob@example.com"  # to
-        assert rows[1][4] == "Weekly Report"  # subject
-        assert rows[1][5] == "False"  # is_read
-        assert rows[1][6] == "Here is the weekly report. Best, Alice"  # body_preview
-        assert rows[1][7] == ""  # has_attachments — absent on this sample
-        assert rows[1][8] == "AAMkAGI2TG93AAA="  # id
-        # Second data row (SAMPLE_MESSAGE_2)
-        assert rows[2][4] == "Re: Project Update"
-        assert rows[2][5] == "True"
+        assert rows[0] == MSG_ROW
+        assert rows[1]["subject"] == "Re: Project Update"
+        assert rows[1]["is_read"] is True
 
     @respx.mock
     async def test_list_emails_requests_has_attachments(self, mcp_server):
@@ -665,14 +677,11 @@ class TestMCPEmailTools:
 
         select = parse_qs(urlparse(str(route.calls[0].request.url)).query)["$select"][0]
         assert "hasAttachments" in select
-        assert "|True|AAMkAGI2TG93AAA=" in _get_text(result)
+        assert _structured(result)["messages"][0]["has_attachments"] is True
 
     @respx.mock
-    async def test_list_emails_pipe_in_subject(self, mcp_server):
-        """Subjects containing pipe characters are properly quoted in CSV."""
-        import csv
-        import io
-
+    async def test_list_emails_pipe_in_subject_is_carried_verbatim(self, mcp_server):
+        """Pipes are the compact renderer's delimiter; the dict keeps them raw."""
         msg_with_pipe = {
             **SAMPLE_MESSAGE,
             "subject": "Re: Q4 | Budget Review",
@@ -682,17 +691,11 @@ class TestMCPEmailTools:
             return_value=httpx.Response(200, json={"value": [msg_with_pipe]})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "list_emails", {"top": 10})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("list_emails", {"top": 10})
-
-        text = _get_text(result)
-        csv_text = text.split("\n\n", 1)[1]
-        reader = csv.reader(io.StringIO(csv_text), delimiter="|")
-        rows = list(reader)
-        assert rows[1][4] == "Re: Q4 | Budget Review"
-        assert rows[1][6] == "Preview with | pipe char"
+        row = _structured(result)["messages"][0]
+        assert row["subject"] == "Re: Q4 | Budget Review"
+        assert row["body_preview"] == "Preview with | pipe char"
 
     @respx.mock
     async def test_list_emails_with_mark_as_read(self, mcp_server):
@@ -704,37 +707,52 @@ class TestMCPEmailTools:
             return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": True})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "list_emails",
+                {"top": 10, "options": f'{{"mark_as_read": ["{msg_id}"]}}'},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "list_emails",
-                    {"top": 10, "options": f'{{"mark_as_read": ["{msg_id}"]}}'},
-                )
-
-        text = _get_text(result)
-        assert "Weekly Report" in text
+        data = _structured(result)
+        assert data["count"] == 1
+        assert data["marked_read"] == 1
         assert patch_route.called
-        payload = json.loads(patch_route.calls[0].request.content)
-        assert payload == {"isRead": True}
-        assert "1 message(s) marked as read" in text
+        assert json.loads(patch_route.calls[0].request.content) == {"isRead": True}
 
     @respx.mock
     async def test_list_emails_mark_as_read_rejects_non_array(self, mcp_server):
         respx.get(f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages").mock(
             return_value=httpx.Response(200, json={"value": [SAMPLE_MESSAGE]})
         )
+        patch_route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "list_emails",
+                {"top": 10, "options": '{"mark_as_read": "single-id"}'},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "list_emails",
-                    {"top": 10, "options": '{"mark_as_read": "single-id"}'},
-                )
+        assert _structured(result) == {
+            "error": "invalid_options",
+            "reason": "Option 'mark_as_read' must be a JSON array of message IDs.",
+        }
+        assert not patch_route.called
 
-        text = _get_text(result)
-        assert "must be a JSON array" in text
+    @respx.mock
+    async def test_list_emails_bad_options_json(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "list_emails", {"options": "not json"})
+
+        assert _structured(result)["error"] == "invalid_options"
+        assert _graph_trail() == []
+
+    async def test_list_emails_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "list_emails", {})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_read_email_plain_body(self, mcp_server):
@@ -821,181 +839,192 @@ class TestMCPEmailTools:
         assert "marked as unread" in text.lower()
 
     @respx.mock
-    async def test_send_email_plain_text(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+    async def test_send_email_returns_the_sent_ids(self, mcp_server):
+        """The ack carries every id the caller can match Sent Items on."""
+        route = _mock_send_email()
+        with _mock_token(), patch("ms_graph_mcp._utcnow_iso", return_value="2026-09-06T12:00:00Z"):
+            result = await _call(
+                mcp_server,
+                "send_email",
+                {"to": "alice@example.com", "subject": "Hi", "body": "Hello!"},
+            )
+
+        assert _structured(result) == {
+            "ok": True,
+            "id": SENT_DRAFT["id"],
+            "conversation_id": SENT_DRAFT["conversationId"],
+            "internet_message_id": SENT_DRAFT["internetMessageId"],
+            "subject": "Hi",
+            "to": "alice@example.com",
+            "cc": "",
+            "bcc_count": 0,
+            "from": "",
+            "attachments": "",
+            "sent_at": "2026-09-06T12:00:00Z",
+        }
+        assert _sent_payload(route)["body"]["contentType"] == "Text"
+
+    @respx.mock
+    async def test_send_email_always_goes_through_a_draft(self, mcp_server):
+        """sendMail answers 202 with no body, so it can never report the ids."""
+        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
+            return_value=httpx.Response(202)
+        )
+        _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            await _call(
+                mcp_server,
+                "send_email",
+                {"to": "alice@example.com", "subject": "Hi", "body": "Hello!"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_email",
-                    {"to": "alice@example.com", "subject": "Hi", "body": "Hello!"},
-                )
+        assert not send_mail.called
+        assert _graph_trail() == [
+            ("POST", "/v1.0/me/messages"),
+            ("POST", f"/v1.0/me/messages/{SENT_DRAFT['id']}/send"),
+        ]
 
-        assert "sent" in _get_text(result).lower()
-        assert route.called
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "Text"
+    async def test_send_email_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server, "send_email", {"to": "a@b.com", "subject": "S", "body": "B"}
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
     async def test_send_email_html_body_auto_detected(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "alice@example.com",
+                    "subject": "HTML test",
+                    "body": "<p>Hello <strong>Alice</strong>! Click <a href='https://example.com'>here</a>.</p>",
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "send_email",
-                    {
-                        "to": "alice@example.com",
-                        "subject": "HTML test",
-                        "body": "<p>Hello <strong>Alice</strong>! Click <a href='https://example.com'>here</a>.</p>",
-                    },
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "HTML"
+        assert _sent_payload(route)["body"]["contentType"] == "HTML"
 
     @respx.mock
     async def test_send_email_placeholder_not_mistaken_for_html(self, mcp_server):
         """'Dear <FirstName>,' must stay Text."""
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "alice@example.com",
+                    "subject": "Template",
+                    "body": "Dear <FirstName>, thanks for reaching out.",
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "send_email",
-                    {
-                        "to": "alice@example.com",
-                        "subject": "Template",
-                        "body": "Dear <FirstName>, thanks for reaching out.",
-                    },
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "Text"
+        assert _sent_payload(route)["body"]["contentType"] == "Text"
 
     @respx.mock
     async def test_send_email_with_cc(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "alice@example.com",
+                    "subject": "Hi",
+                    "body": "Hello!",
+                    "options": '{"cc": "bob@example.com"}',
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_email",
-                    {
-                        "to": "alice@example.com",
-                        "subject": "Hi",
-                        "body": "Hello!",
-                        "options": '{"cc": "bob@example.com"}',
-                    },
-                )
-
-        text = _get_text(result)
-        assert "CC" in text
-        payload = json.loads(route.calls[0].request.content)
-        assert len(payload["message"]["ccRecipients"]) == 1
+        assert _structured(result)["cc"] == "bob@example.com"
+        assert len(_sent_payload(route)["ccRecipients"]) == 1
 
     @respx.mock
     async def test_send_email_with_bcc(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "alice@example.com",
+                    "subject": "Hi",
+                    "body": "Hello!",
+                    "options": '{"bcc": "hidden@example.com,secret@example.com"}',
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "send_email",
-                    {
-                        "to": "alice@example.com",
-                        "subject": "Hi",
-                        "body": "Hello!",
-                        "options": '{"bcc": "hidden@example.com,secret@example.com"}',
-                    },
-                )
-
-        text = _get_text(result)
-        assert "BCC" in text
-        assert "2 recipients" in text
-        # BCC addresses should NOT appear in the return message
-        assert "hidden@example.com" not in text
-        payload = json.loads(route.calls[0].request.content)
-        assert len(payload["message"]["bccRecipients"]) == 2
-        assert (
-            payload["message"]["bccRecipients"][0]["emailAddress"]["address"]
-            == "hidden@example.com"
-        )
+        data = _structured(result)
+        assert data["bcc_count"] == 2
+        # BCC addresses must not come back out of the tool.
+        assert "hidden@example.com" not in json.dumps(data)
+        payload = _sent_payload(route)
+        assert len(payload["bccRecipients"]) == 2
+        assert payload["bccRecipients"][0]["emailAddress"]["address"] == "hidden@example.com"
 
     @respx.mock
     async def test_send_email_multiple_recipients(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "send_email",
+                {"to": "alice@example.com, bob@example.com", "subject": "Hi", "body": "Hello!"},
+            )
 
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "send_email",
-                    {"to": "alice@example.com, bob@example.com", "subject": "Hi", "body": "Hello!"},
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert len(payload["message"]["toRecipients"]) == 2
+        assert _structured(result)["to"] == "alice@example.com, bob@example.com"
+        assert len(_sent_payload(route)["toRecipients"]) == 2
 
     @respx.mock
     async def test_send_email_explicit_text_overrides_html(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "alice@example.com",
+                    "subject": "S",
+                    "body": "<p>HTML</p>",
+                    "options": '{"body_type": "Text"}',
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "send_email",
-                    {
-                        "to": "alice@example.com",
-                        "subject": "S",
-                        "body": "<p>HTML</p>",
-                        "options": '{"body_type": "Text"}',
-                    },
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["body"]["contentType"] == "Text"
+        assert _sent_payload(route)["body"]["contentType"] == "Text"
 
     @respx.mock
     async def test_send_email_no_from_by_default(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            await _call(
+                mcp_server,
+                "send_email",
+                {"to": "alice@example.com", "subject": "Hi", "body": "Hello!"},
+            )
 
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "send_email",
-                    {"to": "alice@example.com", "subject": "Hi", "body": "Hello!"},
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert "from" not in payload["message"]
+        assert "from" not in _sent_payload(route)
 
     @respx.mock
     async def test_send_email_with_from_address(self, mcp_server):
-        route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(return_value=httpx.Response(202))
+        route = _mock_send_email()
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "send_email",
+                {
+                    "to": "alice@example.com",
+                    "subject": "Hi",
+                    "body": "Hello!",
+                    "options": '{"from_address": "mailbox@example.com"}',
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "send_email",
-                    {
-                        "to": "alice@example.com",
-                        "subject": "Hi",
-                        "body": "Hello!",
-                        "options": '{"from_address": "mailbox@example.com"}',
-                    },
-                )
-
-        payload = json.loads(route.calls[0].request.content)
-        assert payload["message"]["from"]["emailAddress"]["address"] == "mailbox@example.com"
+        assert _structured(result)["from"] == "mailbox@example.com"
+        assert _sent_payload(route)["from"]["emailAddress"]["address"] == "mailbox@example.com"
 
     @respx.mock
     async def test_graph_error_propagates_from_email_tool(self, mcp_server):
@@ -1102,17 +1131,11 @@ class TestMCPEmailTools:
 
     @respx.mock
     async def test_send_email_with_text_and_base64_attachments(self, mcp_server):
-        """Attachments switch the send to the draft path: create, attach, send."""
-        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
-        create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
-        )
+        """Attachments add an attach POST per file between create and send."""
+        create = _mock_send_email()
         attach = respx.post(f"{DRAFT_BASE}/attachments").mock(
             return_value=httpx.Response(201, json=SAMPLE_CREATED_ATTACHMENT)
         )
-        send = respx.post(f"{DRAFT_BASE}/send").mock(return_value=httpx.Response(202))
 
         specs = [
             {"name": "notes.txt", "text": "hello"},
@@ -1130,27 +1153,26 @@ class TestMCPEmailTools:
                 },
             )
 
-        assert create.called and send.called
-        assert not send_mail.called
-        assert attach.call_count == 2
+        assert create.called
         payloads = [json.loads(call.request.content) for call in attach.calls]
         assert [p["name"] for p in payloads] == ["notes.txt", "img.png"]
         assert all(p["@odata.type"] == "#microsoft.graph.fileAttachment" for p in payloads)
         assert base64.b64decode(payloads[0]["contentBytes"]) == b"hello"
 
-        text = _get_text(result)
-        assert "Email sent to alice@example.com with 2 attachment(s):" in text
-        assert "notes.txt (5 B)" in text
-        assert "img.png (4 B)" in text
+        data = _structured(result)
+        assert data["ok"] is True
+        assert data["attachments"] == "notes.txt (5 B), img.png (4 B)"
+        draft_path = f"/v1.0/me/messages/{SENT_DRAFT['id']}"
+        assert _graph_trail() == [
+            ("POST", "/v1.0/me/messages"),
+            ("POST", f"{draft_path}/attachments"),
+            ("POST", f"{draft_path}/attachments"),
+            ("POST", f"{draft_path}/send"),
+        ]
 
     @respx.mock
     async def test_send_email_bad_attachment_spec_sends_nothing(self, mcp_server):
-        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
-        create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
-        )
+        create = _mock_send_email()
         with _mock_token():
             result = await _call(
                 mcp_server,
@@ -1163,15 +1185,14 @@ class TestMCPEmailTools:
                 },
             )
 
-        assert "attachments[0]:" in _get_text(result)
-        assert not send_mail.called
+        data = _structured(result)
+        assert data["error"] == "invalid_attachments"
+        assert "attachments[0]:" in data["reason"]
         assert not create.called
 
     @respx.mock
     async def test_send_email_attachments_must_be_an_array(self, mcp_server):
-        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        create = _mock_send_email()
         with _mock_token():
             result = await _call(
                 mcp_server,
@@ -1184,17 +1205,17 @@ class TestMCPEmailTools:
                 },
             )
 
-        assert "attachments must be a JSON array" in _get_text(result)
-        assert not send_mail.called
+        data = _structured(result)
+        assert data["error"] == "invalid_attachments"
+        assert "attachments must be a JSON array" in data["reason"]
+        assert not create.called
 
     @respx.mock
-    async def test_send_email_empty_attachment_list_uses_send_mail(self, mcp_server):
-        """An empty list is not "attachments" — keep the cheap one-request path."""
-        send_mail = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
-        create = respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
-            return_value=httpx.Response(201, json=SAMPLE_DRAFT_MESSAGE)
+    async def test_send_email_empty_attachment_list_attaches_nothing(self, mcp_server):
+        """An empty list is not "attachments" — no attach request, no ack entry."""
+        create = _mock_send_email()
+        attach = respx.post(f"{DRAFT_BASE}/attachments").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CREATED_ATTACHMENT)
         )
         with _mock_token():
             result = await _call(
@@ -1208,9 +1229,9 @@ class TestMCPEmailTools:
                 },
             )
 
-        assert send_mail.called
-        assert not create.called
-        assert _get_text(result) == "Email sent to alice@example.com."
+        assert create.called
+        assert not attach.called
+        assert _structured(result)["attachments"] == ""
 
 
 class TestMCPGetEmailAttachment:
@@ -1598,6 +1619,431 @@ class TestMCPGetEmailAttachment:
 # ---------------------------------------------------------------------------
 # Teams
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Calendar
+# ---------------------------------------------------------------------------
+
+_CALENDAR_VIEW_URL = f"{GRAPH_BASE_URL}/me/calendarView"
+_EVENTS_URL = f"{GRAPH_BASE_URL}/me/events"
+_SCHEDULE_URL = f"{GRAPH_BASE_URL}/me/calendar/getSchedule"
+
+
+class TestMCPListCalendarEvents:
+    """list_calendar_events — one row per event."""
+
+    @respx.mock
+    async def test_lists_events(self, mcp_server):
+        respx.get(_CALENDAR_VIEW_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_CALENDAR_EVENTS_RESPONSE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "list_calendar_events",
+                {"start_date": "2026-05-08T00:00:00Z", "end_date": "2026-05-09T00:00:00Z"},
+            )
+
+        data = _structured(result)
+        assert data["count"] == 2
+        assert data["events"][0] == {
+            "subject": "Sprint Planning",
+            "start": "2026-05-08T10:00:00.0000000",
+            "end": "2026-05-08T11:00:00.0000000",
+            "timezone": "UTC",
+            "organizer": "Alice Smith",
+            "location": "Conference Room A",
+            "online_url": "https://teams.microsoft.com/meet/123",
+            "is_all_day": False,
+            "is_cancelled": False,
+            "id": "AAMkAGI2-event-001",
+        }
+        assert data["events"][1]["is_all_day"] is True
+        assert data["events"][1]["online_url"] == ""
+        assert _graph_trail() == [("GET", "/v1.0/me/calendarView")]
+
+    @respx.mock
+    async def test_empty_range(self, mcp_server):
+        respx.get(_CALENDAR_VIEW_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+        with _mock_token():
+            result = await _call(mcp_server, "list_calendar_events", {})
+
+        assert _structured(result) == {"events": [], "count": 0}
+
+    @respx.mock
+    async def test_default_range_is_the_next_seven_days(self, mcp_server):
+        """No dates given: start is now, end is start + 7 days."""
+        route = respx.get(_CALENDAR_VIEW_URL).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        with _mock_token():
+            await _call(mcp_server, "list_calendar_events", {})
+
+        params = route.calls[0].request.url.params
+        start = datetime.fromisoformat(params["startDateTime"])
+        end = datetime.fromisoformat(params["endDateTime"])
+        assert (end - start) == timedelta(days=7)
+
+    @respx.mock
+    async def test_unparseable_start_date_is_an_error_dict(self, mcp_server):
+        """The default end is computed from start_date, so a bad one fails here."""
+        route = respx.get(_CALENDAR_VIEW_URL).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "list_calendar_events", {"start_date": "next tuesday"})
+
+        assert _structured(result)["error"] == "invalid_date"
+        assert not route.called
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "list_calendar_events", {})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPGetCalendarEvent:
+    """get_calendar_event — the attendee table plus the event's own fields."""
+
+    @respx.mock
+    async def test_full_event(self, mcp_server):
+        event_id = SAMPLE_CALENDAR_EVENT["id"]
+        respx.get(f"{_EVENTS_URL}/{event_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CALENDAR_EVENT)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_calendar_event", {"event_id": event_id})
+
+        assert _structured(result) == {
+            "attendees": [
+                {"name": "Bob Jones", "address": "bob@example.com", "response": "accepted"}
+            ],
+            "subject": "Sprint Planning",
+            "start": "2026-05-08T10:00:00.0000000",
+            "end": "2026-05-08T11:00:00.0000000",
+            "timezone": "UTC",
+            "organizer_name": "Alice Smith",
+            "organizer_address": "alice@example.com",
+            "location": "Conference Room A",
+            "online_url": "https://teams.microsoft.com/meet/123",
+            "is_all_day": False,
+            "recurrence": "",
+            "id": event_id,
+            "body_type": "text",
+            "body_text": "Let's plan the sprint.\n\nAgenda:\n1. Review backlog",
+        }
+
+    @respx.mock
+    async def test_no_attendees(self, mcp_server):
+        event_id = SAMPLE_CALENDAR_EVENT_ALLDAY["id"]
+        respx.get(f"{_EVENTS_URL}/{event_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CALENDAR_EVENT_ALLDAY)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_calendar_event", {"event_id": event_id})
+
+        data = _structured(result)
+        assert data["attendees"] == []
+        assert data["is_all_day"] is True
+
+    @respx.mock
+    async def test_max_content_length_truncates_the_body(self, mcp_server):
+        event_id = SAMPLE_CALENDAR_EVENT["id"]
+        respx.get(f"{_EVENTS_URL}/{event_id}").mock(
+            return_value=httpx.Response(200, json=SAMPLE_CALENDAR_EVENT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "get_calendar_event",
+                {"event_id": event_id, "options": '{"max_content_length": 10}'},
+            )
+
+        assert _structured(result)["body_text"] == "Let's plan"
+
+    @respx.mock
+    async def test_html_body_is_labelled_not_prefixed(self, mcp_server):
+        """body_type carries the fact; the text stays exactly what Graph sent."""
+        event_id = SAMPLE_CALENDAR_EVENT["id"]
+        respx.get(f"{_EVENTS_URL}/{event_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    **SAMPLE_CALENDAR_EVENT,
+                    "body": {"contentType": "html", "content": "<p>Agenda</p>"},
+                },
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_calendar_event", {"event_id": event_id})
+
+        data = _structured(result)
+        assert data["body_type"] == "html"
+        assert data["body_text"] == "<p>Agenda</p>"
+
+    @respx.mock
+    async def test_recurrence_is_summarised(self, mcp_server):
+        event_id = SAMPLE_CALENDAR_EVENT["id"]
+        respx.get(f"{_EVENTS_URL}/{event_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    **SAMPLE_CALENDAR_EVENT,
+                    "recurrence": {"pattern": {"type": "weekly", "interval": 2}},
+                },
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_calendar_event", {"event_id": event_id})
+
+        assert _structured(result)["recurrence"] == "weekly (every 2)"
+
+    async def test_bad_options(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_calendar_event", {"event_id": "e1", "options": "not json"}
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "get_calendar_event", {"event_id": "e1"})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPCreateCalendarEvent:
+    """create_calendar_event — the ack a caller books against."""
+
+    @respx.mock
+    async def test_creates_and_acks(self, mcp_server):
+        route = respx.post(_EVENTS_URL).mock(
+            return_value=httpx.Response(201, json=SAMPLE_CREATED_EVENT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "create_calendar_event",
+                {
+                    "subject": "Design Review",
+                    "start_datetime": "2026-05-09T14:00:00",
+                    "end_datetime": "2026-05-09T15:00:00",
+                    "timezone": "America/Los_Angeles",
+                    "options": json.dumps(
+                        {"attendees": "bob@example.com", "is_online_meeting": True}
+                    ),
+                },
+            )
+
+        payload = json.loads(route.calls[0].request.content)
+        assert payload["attendees"][0]["emailAddress"]["address"] == "bob@example.com"
+        assert payload["isOnlineMeeting"] is True
+        assert _structured(result) == {
+            "ok": True,
+            "id": "AAMkAGI2-event-new-001",
+            "subject": "Design Review",
+            "start": "2026-05-09T14:00:00.0000000",
+            "end": "2026-05-09T15:00:00.0000000",
+            "timezone": "America/Los_Angeles",
+            "online_meeting_url": "https://teams.microsoft.com/meet/789",
+            "web_link": "",
+        }
+        assert _graph_trail() == [("POST", "/v1.0/me/events")]
+
+    async def test_bad_options(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "create_calendar_event",
+                {
+                    "subject": "S",
+                    "start_datetime": "2026-05-09T14:00:00",
+                    "end_datetime": "2026-05-09T15:00:00",
+                    "options": "not json",
+                },
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server,
+                "create_calendar_event",
+                {
+                    "subject": "S",
+                    "start_datetime": "2026-05-09T14:00:00",
+                    "end_datetime": "2026-05-09T15:00:00",
+                },
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPCheckAvailability:
+    """check_availability — every busy block, plus a per-person free summary."""
+
+    @respx.mock
+    async def test_busy_rows_and_summary(self, mcp_server):
+        respx.post(_SCHEDULE_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_SCHEDULE_RESPONSE)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "check_availability",
+                {
+                    "emails": "alice@example.com, bob@example.com",
+                    "start_datetime": "2026-05-08T09:00:00",
+                    "end_datetime": "2026-05-08T17:00:00",
+                },
+            )
+
+        assert _structured(result) == {
+            "busy": [
+                {
+                    "person": "alice@example.com",
+                    "start": "2026-05-08T10:00:00.0000000",
+                    "end": "2026-05-08T11:00:00.0000000",
+                    "subject": "Sprint Planning",
+                    "status": "busy",
+                }
+            ],
+            "summary": (
+                "alice@example.com: 75% free (12/16 slots); "
+                "bob@example.com: 100% free (16/16 slots)"
+            ),
+            "busy_count": 1,
+        }
+        assert _graph_trail() == [("POST", "/v1.0/me/calendar/getSchedule")]
+
+    @respx.mock
+    async def test_every_block_is_listed(self, mcp_server):
+        """The old renderer stopped at ten items; busy_count must be the truth."""
+        items = [
+            {
+                "subject": f"Block {i}",
+                "start": {"dateTime": f"2026-05-08T{i:02d}:00:00"},
+                "end": {"dateTime": f"2026-05-08T{i:02d}:30:00"},
+                "status": "busy",
+            }
+            for i in range(14)
+        ]
+        respx.post(_SCHEDULE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "scheduleId": "alice@example.com",
+                            "availabilityView": "22",
+                            "scheduleItems": items,
+                        }
+                    ]
+                },
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "check_availability",
+                {
+                    "emails": "alice@example.com",
+                    "start_datetime": "2026-05-08T09:00:00",
+                    "end_datetime": "2026-05-08T17:00:00",
+                },
+            )
+
+        data = _structured(result)
+        assert data["busy_count"] == 14
+        assert len(data["busy"]) == 14
+        assert data["busy"][13]["subject"] == "Block 13"
+
+    @respx.mock
+    async def test_private_block_keeps_a_placeholder_subject(self, mcp_server):
+        respx.post(_SCHEDULE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "scheduleId": "alice@example.com",
+                            "availabilityView": "",
+                            "scheduleItems": [
+                                {"start": {"dateTime": "x"}, "end": {"dateTime": "y"}}
+                            ],
+                        }
+                    ]
+                },
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "check_availability",
+                {
+                    "emails": "alice@example.com",
+                    "start_datetime": "2026-05-08T09:00:00",
+                    "end_datetime": "2026-05-08T17:00:00",
+                },
+            )
+
+        data = _structured(result)
+        assert data["busy"][0]["subject"] == "(private)"
+        assert data["summary"] == "alice@example.com: no slots"
+
+    async def test_no_emails(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "check_availability",
+                {
+                    "emails": " , ",
+                    "start_datetime": "2026-05-08T09:00:00",
+                    "end_datetime": "2026-05-08T17:00:00",
+                },
+            )
+
+        assert _structured(result) == {
+            "error": "invalid_arguments",
+            "reason": "No email addresses provided.",
+        }
+
+    @respx.mock
+    async def test_no_schedules_returned(self, mcp_server):
+        respx.post(_SCHEDULE_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "check_availability",
+                {
+                    "emails": "alice@example.com",
+                    "start_datetime": "2026-05-08T09:00:00",
+                    "end_datetime": "2026-05-08T17:00:00",
+                },
+            )
+
+        assert _structured(result) == {
+            "error": "no_data",
+            "reason": "No availability information returned.",
+        }
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server,
+                "check_availability",
+                {
+                    "emails": "alice@example.com",
+                    "start_datetime": "2026-05-08T09:00:00",
+                    "end_datetime": "2026-05-08T17:00:00",
+                },
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 class TestMCPTeamsTools:
@@ -4426,7 +4872,7 @@ class TestMCPAuth:
         ):
             async with Client(mcp_server) as client:
                 with pytest.raises(ToolError, match="Authorization required"):
-                    await client.call_tool("list_emails", {})
+                    await client.call_tool("list_teams", {})
 
     async def test_all_tools_require_auth(self, mcp_server):
         """Verify every tool rejects unauthenticated requests."""
@@ -4437,9 +4883,7 @@ class TestMCPAuth:
         # answer not_connected instead of raising, so they are covered by their
         # own not-connected tests rather than listed here.
         graph_tools = [
-            ("list_emails", {}),
             ("read_email", {"message_id": "fake-id"}),
-            ("send_email", {"to": "a@b.com", "subject": "S", "body": "B"}),
             ("list_teams", {}),
             ("list_chats", {}),
             ("read_teams_messages", {"chat_id": "c1"}),
@@ -6891,51 +7335,42 @@ class TestMCPInboxRuleTools:
             return_value=httpx.Response(200, json=SAMPLE_MESSAGE_RULES_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_inbox_rules", {})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_inbox_rules", {})
-
-        text = _get_text(result)
-        assert "2 rule(s)" in text
-        assert "id|displayName|sequence|isEnabled|conditions|actions" in text
-        assert "From partner" in text
-        assert SAMPLE_MESSAGE_RULE["id"] in text
-        # condition/action keys summarised
-        assert "senderContains" in text
-        assert "moveToFolder" in text
+        data = _structured(result)
+        assert data["count"] == 2
+        assert data["rules"][0] == {
+            "id": SAMPLE_MESSAGE_RULE["id"],
+            "display_name": "From partner",
+            "sequence": 2,
+            "is_enabled": True,
+            "conditions": "senderContains",
+            "actions": "moveToFolder, stopProcessingRules",
+        }
+        assert data["rules"][1]["display_name"] == "Newsletters to read later"
+        assert data["rules"][1]["is_enabled"] is False
 
     @respx.mock
     async def test_list_rules_empty(self, mcp_server):
         respx.get(_RULES_URL).mock(return_value=httpx.Response(200, json={"value": []}))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_inbox_rules", {"action": "list"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_inbox_rules", {"action": "list"})
-
-        assert "No inbox rules found." in _get_text(result)
+        assert _structured(result) == {"rules": [], "count": 0}
 
     @respx.mock
     async def test_get_rule(self, mcp_server):
+        """get returns the whole Graph rule — condition values, not just keys."""
         rule_id = SAMPLE_MESSAGE_RULE["id"]
         respx.get(f"{_RULES_URL}/{rule_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_MESSAGE_RULE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server, "manage_inbox_rules", {"action": "get", "rule_id": rule_id}
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_inbox_rules", {"action": "get", "rule_id": rule_id}
-                )
-
-        text = _get_text(result)
-        assert "From partner" in text
-        assert rule_id in text
-        # Full JSON includes condition values, not just keys
-        assert "adele" in text
-        assert "senderContains" in text
+        assert _structured(result) == {"rule": SAMPLE_MESSAGE_RULE}
 
     @respx.mock
     async def test_create_rule(self, mcp_server):
@@ -6948,20 +7383,18 @@ class TestMCPInboxRuleTools:
             return_value=httpx.Response(201, json=SAMPLE_MESSAGE_RULE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "create", "options": json.dumps(rule)},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_inbox_rules",
-                    {"action": "create", "options": json.dumps(rule)},
-                )
-
-        assert route.called
-        payload = json.loads(route.calls[0].request.content)
-        assert payload == rule
-        text = _get_text(result)
-        assert SAMPLE_MESSAGE_RULE["id"] in text
-        assert "created" in text.lower()
+        assert json.loads(route.calls[0].request.content) == rule
+        assert _structured(result) == {
+            "action": "created",
+            "id": SAMPLE_MESSAGE_RULE["id"],
+            "display_name": "From partner",
+        }
 
     @respx.mock
     async def test_update_rule(self, mcp_server):
@@ -6970,80 +7403,104 @@ class TestMCPInboxRuleTools:
             return_value=httpx.Response(200, json={**SAMPLE_MESSAGE_RULE, "isEnabled": False})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "update", "rule_id": rule_id, "options": '{"isEnabled": false}'},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_inbox_rules",
-                    {
-                        "action": "update",
-                        "rule_id": rule_id,
-                        "options": '{"isEnabled": false}',
-                    },
-                )
+        assert json.loads(route.calls[0].request.content) == {"isEnabled": False}
+        assert _structured(result) == {
+            "action": "updated",
+            "id": rule_id,
+            "display_name": "From partner",
+        }
 
-        assert route.called
-        payload = json.loads(route.calls[0].request.content)
-        assert payload == {"isEnabled": False}
-        text = _get_text(result)
-        assert rule_id in text
-        assert "updated" in text.lower()
+    @respx.mock
+    async def test_update_rule_minimal_graph_response_falls_back_to_the_id(self, mcp_server):
+        """An empty PATCH body must still name the rule the caller asked about."""
+        rule_id = SAMPLE_MESSAGE_RULE["id"]
+        respx.patch(f"{_RULES_URL}/{rule_id}").mock(return_value=httpx.Response(200, json={}))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "update", "rule_id": rule_id, "options": '{"isEnabled": false}'},
+            )
+
+        assert _structured(result) == {
+            "action": "updated",
+            "id": rule_id,
+            "display_name": None,
+        }
 
     @respx.mock
     async def test_delete_rule(self, mcp_server):
         rule_id = SAMPLE_MESSAGE_RULE["id"]
         route = respx.delete(f"{_RULES_URL}/{rule_id}").mock(return_value=httpx.Response(204))
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_inbox_rules", {"action": "delete", "rule_id": rule_id}
-                )
+            result = await _call(
+                mcp_server, "manage_inbox_rules", {"action": "delete", "rule_id": rule_id}
+            )
 
         assert route.called
-        text = _get_text(result)
-        assert rule_id in text
-        assert "deleted" in text.lower()
+        assert _structured(result) == {"action": "deleted", "id": rule_id}
 
-    async def test_unknown_action_returns_friendly_message(self, mcp_server):
+    async def test_unknown_action(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_inbox_rules", {"action": "frobnicate"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_inbox_rules", {"action": "frobnicate"})
+        data = _structured(result)
+        assert data["error"] == "invalid_action"
+        assert "Unknown action" in data["reason"]
 
-        assert "Unknown action" in _get_text(result)
-
-    async def test_missing_rule_id_returns_friendly_message(self, mcp_server):
+    async def test_missing_rule_id(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            for action in ("get", "update", "delete"):
+                result = await _call(mcp_server, "manage_inbox_rules", {"action": action})
+                data = _structured(result)
+                assert data["error"] == "missing_rule_id"
+                assert action in data["reason"]
 
-            async with Client(mcp_server) as client:
-                for action in ("get", "update", "delete"):
-                    result = await client.call_tool("manage_inbox_rules", {"action": action})
-                    assert "rule_id" in _get_text(result)
-
-    async def test_create_without_options_returns_friendly_message(self, mcp_server):
+    async def test_create_without_options(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_inbox_rules", {"action": "create"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_inbox_rules", {"action": "create"})
+        data = _structured(result)
+        assert data["error"] == "invalid_options"
+        assert "options" in data["reason"]
 
-        assert "options" in _get_text(result)
-
-    async def test_update_without_options_returns_friendly_message(self, mcp_server):
+    async def test_update_without_options(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "update", "rule_id": "some-id", "options": "{}"},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_inbox_rules",
-                    {"action": "update", "rule_id": "some-id", "options": "{}"},
-                )
+        data = _structured(result)
+        assert data["error"] == "invalid_options"
+        assert "non-empty options" in data["reason"]
 
-        assert "non-empty options" in _get_text(result)
+    async def test_create_missing_required_fields(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_inbox_rules",
+                {"action": "create", "options": '{"displayName": "x"}'},
+            )
+
+        data = _structured(result)
+        assert data["error"] == "invalid_options"
+        assert data["reason"] == "Action 'create' requires: actions, sequence."
+
+    async def test_create_with_unparseable_options(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server, "manage_inbox_rules", {"action": "create", "options": "not json"}
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
 
     @respx.mock
     async def test_create_missing_readwrite_surfaces_error(self, mcp_server):
@@ -7052,17 +7509,21 @@ class TestMCPInboxRuleTools:
 
         respx.post(_RULES_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
         with _mock_token():
-            from fastmcp import Client
+            with pytest.raises(ToolError, match="Authorization_RequestDenied"):
+                await _call(
+                    mcp_server,
+                    "manage_inbox_rules",
+                    {
+                        "action": "create",
+                        "options": '{"displayName": "x", "sequence": 1, "actions": {"markAsRead": true}}',
+                    },
+                )
 
-            async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="Authorization_RequestDenied"):
-                    await client.call_tool(
-                        "manage_inbox_rules",
-                        {
-                            "action": "create",
-                            "options": '{"displayName": "x", "sequence": 1, "actions": {"markAsRead": true}}',
-                        },
-                    )
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "manage_inbox_rules", {})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 _FOLDERS_URL = f"{GRAPH_BASE_URL}/me/mailFolders"
@@ -7077,27 +7538,26 @@ class TestMCPFolderTools:
             return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_mail_folders", {})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_mail_folders", {})
-
-        text = _get_text(result)
-        assert "2 folder(s)" in text
-        assert "id|displayName|childFolderCount|totalItemCount|unreadItemCount" in text
-        assert "Projects" in text
-        assert SAMPLE_MAIL_FOLDER["id"] in text
+        data = _structured(result)
+        assert data["count"] == 2
+        assert data["folders"][0] == {
+            "id": SAMPLE_MAIL_FOLDER["id"],
+            "display_name": "Projects",
+            "child_folder_count": 2,
+            "total_item_count": 42,
+            "unread_item_count": 3,
+        }
+        assert data["folders"][1]["display_name"] == "Receipts"
 
     @respx.mock
     async def test_list_folders_empty(self, mcp_server):
         respx.get(_FOLDERS_URL).mock(return_value=httpx.Response(200, json={"value": []}))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_mail_folders", {"action": "list"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_mail_folders", {"action": "list"})
-
-        assert "No folders found." in _get_text(result)
+        assert _structured(result) == {"folders": [], "count": 0}
 
     @respx.mock
     async def test_list_child_folders(self, mcp_server):
@@ -7106,35 +7566,28 @@ class TestMCPFolderTools:
             return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {"action": "list", "options": json.dumps({"parent_id": parent_id})},
-                )
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {"action": "list", "options": json.dumps({"parent_id": parent_id})},
+            )
 
         assert route.called
-        assert "2 folder(s)" in _get_text(result)
+        assert _structured(result)["count"] == 2
 
     @respx.mock
     async def test_get_folder(self, mcp_server):
+        """get returns the whole Graph folder, ID included."""
         folder_id = SAMPLE_MAIL_FOLDER["id"]
         respx.get(f"{_FOLDERS_URL}/{folder_id}").mock(
             return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDER)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server, "manage_mail_folders", {"action": "get", "folder_id": folder_id}
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders", {"action": "get", "folder_id": folder_id}
-                )
-
-        text = _get_text(result)
-        assert "Projects" in text
-        assert folder_id in text
-        assert "totalItemCount" in text
+        assert _structured(result) == {"folder": SAMPLE_MAIL_FOLDER}
 
     @respx.mock
     async def test_create_folder(self, mcp_server):
@@ -7142,20 +7595,18 @@ class TestMCPFolderTools:
             return_value=httpx.Response(201, json=SAMPLE_MAIL_FOLDER)
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {"action": "create", "options": json.dumps({"display_name": "Projects"})},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {"action": "create", "options": json.dumps({"display_name": "Projects"})},
-                )
-
-        assert route.called
-        payload = json.loads(route.calls[0].request.content)
-        assert payload == {"displayName": "Projects"}
-        text = _get_text(result)
-        assert SAMPLE_MAIL_FOLDER["id"] in text
-        assert "created" in text.lower()
+        assert json.loads(route.calls[0].request.content) == {"displayName": "Projects"}
+        assert _structured(result) == {
+            "action": "created",
+            "id": SAMPLE_MAIL_FOLDER["id"],
+            "display_name": "Projects",
+        }
 
     @respx.mock
     async def test_create_child_folder(self, mcp_server):
@@ -7164,20 +7615,17 @@ class TestMCPFolderTools:
             return_value=httpx.Response(201, json=SAMPLE_MAIL_FOLDER)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "manage_mail_folders",
-                    {
-                        "action": "create",
-                        "options": json.dumps({"display_name": "Sub", "parent_id": parent_id}),
-                    },
-                )
+            await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {
+                    "action": "create",
+                    "options": json.dumps({"display_name": "Sub", "parent_id": parent_id}),
+                },
+            )
 
         assert route.called
-        payload = json.loads(route.calls[0].request.content)
-        assert payload == {"displayName": "Sub"}
+        assert json.loads(route.calls[0].request.content) == {"displayName": "Sub"}
 
     @respx.mock
     async def test_rename_folder(self, mcp_server):
@@ -7186,89 +7634,88 @@ class TestMCPFolderTools:
             return_value=httpx.Response(200, json={**SAMPLE_MAIL_FOLDER, "displayName": "Renamed"})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {
+                    "action": "rename",
+                    "folder_id": folder_id,
+                    "options": json.dumps({"display_name": "Renamed"}),
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {
-                        "action": "rename",
-                        "folder_id": folder_id,
-                        "options": json.dumps({"display_name": "Renamed"}),
-                    },
-                )
-
-        assert route.called
-        payload = json.loads(route.calls[0].request.content)
-        assert payload == {"displayName": "Renamed"}
-        text = _get_text(result)
-        assert folder_id in text
-        assert "renamed" in text.lower()
+        assert json.loads(route.calls[0].request.content) == {"displayName": "Renamed"}
+        assert _structured(result) == {
+            "action": "renamed",
+            "id": folder_id,
+            "display_name": "Renamed",
+        }
 
     @respx.mock
-    async def test_rename_folder_minimal_graph_response_returns_friendly_message(self, mcp_server):
-        """Graph returns the updated folder; if it returns an empty dict the tool still succeeds."""
+    async def test_rename_folder_minimal_graph_response_falls_back_to_the_id(self, mcp_server):
+        """Graph returns the updated folder; an empty dict must not lose the id."""
         folder_id = SAMPLE_MAIL_FOLDER["id"]
         respx.patch(f"{_FOLDERS_URL}/{folder_id}").mock(return_value=httpx.Response(200, json={}))
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {
+                    "action": "rename",
+                    "folder_id": folder_id,
+                    "options": json.dumps({"display_name": "Renamed"}),
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {
-                        "action": "rename",
-                        "folder_id": folder_id,
-                        "options": json.dumps({"display_name": "Renamed"}),
-                    },
-                )
-
-        text = _get_text(result)
-        assert "renamed" in text.lower()
+        assert _structured(result) == {
+            "action": "renamed",
+            "id": folder_id,
+            "display_name": None,
+        }
 
     @respx.mock
     async def test_delete_folder(self, mcp_server):
         folder_id = SAMPLE_MAIL_FOLDER["id"]
         route = respx.delete(f"{_FOLDERS_URL}/{folder_id}").mock(return_value=httpx.Response(204))
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders", {"action": "delete", "folder_id": folder_id}
-                )
+            result = await _call(
+                mcp_server, "manage_mail_folders", {"action": "delete", "folder_id": folder_id}
+            )
 
         assert route.called
-        text = _get_text(result)
-        assert folder_id in text
-        assert "deleted" in text.lower()
+        assert _structured(result) == {"action": "deleted", "id": folder_id}
 
-    async def test_unknown_action_returns_friendly_message(self, mcp_server):
+    async def test_unknown_action(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_mail_folders", {"action": "frobnicate"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_mail_folders", {"action": "frobnicate"})
+        data = _structured(result)
+        assert data["error"] == "invalid_action"
+        assert "Unknown action" in data["reason"]
 
-        assert "Unknown action" in _get_text(result)
-
-    async def test_missing_folder_id_returns_friendly_message(self, mcp_server):
+    async def test_missing_folder_id(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            for action in ("get", "rename", "delete"):
+                result = await _call(mcp_server, "manage_mail_folders", {"action": action})
+                data = _structured(result)
+                assert data["error"] == "missing_folder_id"
+                assert action in data["reason"]
 
-            async with Client(mcp_server) as client:
-                for action in ("get", "rename", "delete"):
-                    result = await client.call_tool("manage_mail_folders", {"action": action})
-                    assert "folder_id" in _get_text(result)
-
-    async def test_create_without_display_name_returns_friendly_message(self, mcp_server):
+    async def test_create_without_display_name(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_mail_folders", {"action": "create"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_mail_folders", {"action": "create"})
+        data = _structured(result)
+        assert data["error"] == "invalid_options"
+        assert "display_name" in data["reason"]
 
-        assert "display_name" in _get_text(result)
+    async def test_unparseable_options(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server, "manage_mail_folders", {"action": "list", "options": "not json"}
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
 
     @respx.mock
     async def test_create_missing_readwrite_surfaces_error(self, mcp_server):
@@ -7277,14 +7724,12 @@ class TestMCPFolderTools:
 
         respx.post(_FOLDERS_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="Authorization_RequestDenied"):
-                    await client.call_tool(
-                        "manage_mail_folders",
-                        {"action": "create", "options": '{"display_name": "x"}'},
-                    )
+            with pytest.raises(ToolError, match="Authorization_RequestDenied"):
+                await _call(
+                    mcp_server,
+                    "manage_mail_folders",
+                    {"action": "create", "options": '{"display_name": "x"}'},
+                )
 
     @respx.mock
     async def test_move_folder(self, mcp_server):
@@ -7294,70 +7739,71 @@ class TestMCPFolderTools:
             return_value=httpx.Response(200, json={**SAMPLE_MAIL_FOLDER, "parentFolderId": dest_id})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {
+                    "action": "move",
+                    "folder_id": folder_id,
+                    "options": json.dumps({"destination_id": dest_id}),
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {
-                        "action": "move",
-                        "folder_id": folder_id,
-                        "options": json.dumps({"destination_id": dest_id}),
-                    },
-                )
-
-        assert route.called
-        payload = json.loads(route.calls[0].request.content)
-        assert payload == {"destinationId": dest_id}
-        text = _get_text(result)
-        assert folder_id in text
-        assert "moved" in text.lower()
+        assert json.loads(route.calls[0].request.content) == {"destinationId": dest_id}
+        assert _structured(result) == {
+            "action": "moved",
+            "id": folder_id,
+            "parent_id": dest_id,
+        }
 
     @respx.mock
-    async def test_move_folder_minimal_graph_response_returns_friendly_message(self, mcp_server):
-        """Graph returns the moved folder; if it returns an empty dict the tool falls back to dest_id."""
+    async def test_move_folder_minimal_graph_response_falls_back_to_the_destination(
+        self, mcp_server
+    ):
+        """Graph returns the moved folder; an empty dict falls back to dest_id."""
         folder_id = SAMPLE_MAIL_FOLDER["id"]
         dest_id = "drafts"
         respx.post(f"{_FOLDERS_URL}/{folder_id}/move").mock(
             return_value=httpx.Response(200, json={})
         )
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {
+                    "action": "move",
+                    "folder_id": folder_id,
+                    "options": json.dumps({"destination_id": dest_id}),
+                },
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {
-                        "action": "move",
-                        "folder_id": folder_id,
-                        "options": json.dumps({"destination_id": dest_id}),
-                    },
-                )
+        assert _structured(result) == {"action": "moved", "id": folder_id, "parent_id": dest_id}
 
-        text = _get_text(result)
-        assert "moved" in text.lower()
-        assert dest_id in text
-
-    async def test_move_missing_folder_id_returns_friendly_message(self, mcp_server):
+    async def test_move_missing_folder_id(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(mcp_server, "manage_mail_folders", {"action": "move"})
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("manage_mail_folders", {"action": "move"})
+        data = _structured(result)
+        assert data["error"] == "missing_folder_id"
+        assert "folder_id" in data["reason"]
 
-        assert "folder_id" in _get_text(result)
-
-    async def test_move_missing_destination_returns_friendly_message(self, mcp_server):
+    async def test_move_missing_destination(self, mcp_server):
         with _mock_token():
-            from fastmcp import Client
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {"action": "move", "folder_id": SAMPLE_MAIL_FOLDER["id"]},
+            )
 
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {"action": "move", "folder_id": SAMPLE_MAIL_FOLDER["id"]},
-                )
+        data = _structured(result)
+        assert data["error"] == "invalid_options"
+        assert "destination_id" in data["reason"]
 
-        assert "destination_id" in _get_text(result)
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "manage_mail_folders", {})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     # --- input coercion / hardening (commit 2) exercised through the tool -----
 
@@ -7368,16 +7814,14 @@ class TestMCPFolderTools:
             return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {"action": "list", "options": json.dumps({"parent_id": 123})},
-                )
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {"action": "list", "options": json.dumps({"parent_id": 123})},
+            )
 
         assert route.called
-        assert "2 folder(s)" in _get_text(result)
+        assert _structured(result)["count"] == 2
 
     @respx.mock
     async def test_create_non_string_parent_id_is_coerced_not_crashed(self, mcp_server):
@@ -7386,19 +7830,17 @@ class TestMCPFolderTools:
             return_value=httpx.Response(201, json=SAMPLE_MAIL_FOLDER)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "manage_mail_folders",
-                    {
-                        "action": "create",
-                        "options": json.dumps({"display_name": "Sub", "parent_id": 123}),
-                    },
-                )
+            result = await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {
+                    "action": "create",
+                    "options": json.dumps({"display_name": "Sub", "parent_id": 123}),
+                },
+            )
 
         assert route.called
-        assert "created" in _get_text(result).lower()
+        assert _structured(result)["action"] == "created"
 
     @respx.mock
     async def test_list_top_zero_is_clamped_to_at_least_one(self, mcp_server):
@@ -7407,13 +7849,11 @@ class TestMCPFolderTools:
             return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "manage_mail_folders",
-                    {"action": "list", "options": json.dumps({"top": 0})},
-                )
+            await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {"action": "list", "options": json.dumps({"top": 0})},
+            )
 
         assert route.called
         assert int(route.calls[0].request.url.params["$top"]) >= 1
@@ -7425,13 +7865,11 @@ class TestMCPFolderTools:
             return_value=httpx.Response(200, json=SAMPLE_MAIL_FOLDERS_RESPONSE)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                await client.call_tool(
-                    "manage_mail_folders",
-                    {"action": "list", "options": json.dumps({"include_hidden": True})},
-                )
+            await _call(
+                mcp_server,
+                "manage_mail_folders",
+                {"action": "list", "options": json.dumps({"include_hidden": True})},
+            )
 
         assert route.called
         assert route.calls[0].request.url.params["includeHiddenFolders"] == "true"
@@ -7443,11 +7881,8 @@ class TestMCPFolderTools:
 
         respx.get(_FOLDERS_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="Authorization_RequestDenied"):
-                    await client.call_tool("manage_mail_folders", {"action": "list"})
+            with pytest.raises(ToolError, match="Authorization_RequestDenied"):
+                await _call(mcp_server, "manage_mail_folders", {"action": "list"})
 
     @respx.mock
     async def test_move_surfaces_graph_error(self, mcp_server):
@@ -7459,18 +7894,16 @@ class TestMCPFolderTools:
             return_value=httpx.Response(404, json=GRAPH_ERROR_404)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="ResourceNotFound"):
-                    await client.call_tool(
-                        "manage_mail_folders",
-                        {
-                            "action": "move",
-                            "folder_id": folder_id,
-                            "options": json.dumps({"destination_id": "inbox"}),
-                        },
-                    )
+            with pytest.raises(ToolError, match="ResourceNotFound"):
+                await _call(
+                    mcp_server,
+                    "manage_mail_folders",
+                    {
+                        "action": "move",
+                        "folder_id": folder_id,
+                        "options": json.dumps({"destination_id": "inbox"}),
+                    },
+                )
 
     @respx.mock
     async def test_delete_surfaces_graph_error(self, mcp_server):
@@ -7481,13 +7914,10 @@ class TestMCPFolderTools:
             return_value=httpx.Response(404, json=GRAPH_ERROR_404)
         )
         with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="ResourceNotFound"):
-                    await client.call_tool(
-                        "manage_mail_folders", {"action": "delete", "folder_id": "bad-id"}
-                    )
+            with pytest.raises(ToolError, match="ResourceNotFound"):
+                await _call(
+                    mcp_server, "manage_mail_folders", {"action": "delete", "folder_id": "bad-id"}
+                )
 
 
 class TestConnectFlowScopes:
@@ -7651,12 +8081,12 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(mcp_server, "list_emails", {"top": 10})
 
-        text = _get_text(result)
-        assert "1 message(s) in inbox" in text
-        assert "alice@example.com" in text
-        assert text.endswith(mail_policy.POLICY_NOTICE)
+        data = _structured(result)
+        assert data["count"] == 1
+        assert data["messages"][0]["from_address"] == "alice@example.com"
+        assert data["notice"] == mail_policy.POLICY_NOTICE
         assert "sender" in _select_of(route.calls[0].request)
-        _assert_no_canary(text)
+        _assert_no_canary(json.dumps(data))
 
     @respx.mock
     async def test_list_emails_select_asks_for_sender_even_when_off(self, mcp_server):
@@ -7669,8 +8099,9 @@ class TestMailSenderPolicy:
 
         select = _select_of(route.calls[0].request)
         assert "from" in select and "sender" in select
-        assert mail_policy.POLICY_NOTICE not in _get_text(result)
-        _assert_no_canary(_get_text(result))
+        data = _structured(result)
+        assert data["notice"] == ""
+        _assert_no_canary(json.dumps(data))
 
     @respx.mock
     async def test_list_emails_search_hiding_everything_still_reports_no_results(
@@ -7683,9 +8114,11 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(mcp_server, "list_emails", {"query": "CANARY"})
 
-        text = _get_text(result)
-        assert text == f'No messages found matching "CANARY".\n{mail_policy.POLICY_NOTICE}'
-        _assert_no_canary(text)
+        data = _structured(result)
+        assert data["messages"] == []
+        assert data["count"] == 0
+        assert data["notice"] == mail_policy.POLICY_NOTICE
+        _assert_no_canary(json.dumps(data))
 
     @respx.mock
     async def test_search_notice_is_identical_for_zero_and_many_hidden(
@@ -7701,11 +8134,11 @@ class TestMailSenderPolicy:
             ]
         )
         with _mock_token():
-            one_hidden = _get_text(await _call(mcp_server, "list_emails", {"query": "CANARY"}))
-            many_hidden = _get_text(await _call(mcp_server, "list_emails", {"query": "CANARY"}))
+            one_hidden = _structured(await _call(mcp_server, "list_emails", {"query": "CANARY"}))
+            many_hidden = _structured(await _call(mcp_server, "list_emails", {"query": "CANARY"}))
 
         assert one_hidden == many_hidden
-        _assert_no_canary(one_hidden)
+        _assert_no_canary(json.dumps(one_hidden))
 
     @respx.mock
     async def test_list_emails_filters_a_shared_mailbox_too(self, mcp_server, monkeypatch):
@@ -7720,10 +8153,10 @@ class TestMailSenderPolicy:
                 mcp_server, "list_emails", {"mailbox": "support@example.com", "top": 10}
             )
 
-        text = _get_text(result)
-        assert "1 message(s) in inbox" in text
-        assert text.endswith(mail_policy.POLICY_NOTICE)
-        _assert_no_canary(text)
+        data = _structured(result)
+        assert data["count"] == 1
+        assert data["notice"] == mail_policy.POLICY_NOTICE
+        _assert_no_canary(json.dumps(data))
 
     # -- read_email ---------------------------------------------------------
 
@@ -7957,9 +8390,7 @@ class TestMailSenderPolicy:
         attachments_route = respx.get(url__startswith=ATT_BASE).mock(
             return_value=httpx.Response(200, json=SAMPLE_FILE_ATTACHMENT)
         )
-        send_route = respx.post(f"{GRAPH_BASE_URL}/me/sendMail").mock(
-            return_value=httpx.Response(202)
-        )
+        create_route = _mock_send_email()
         respx.get(SENDER_CHECK_URL).mock(
             return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
         )
@@ -7976,12 +8407,14 @@ class TestMailSenderPolicy:
                 },
             )
 
-        text = _get_text(result)
-        assert text == f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}"
+        assert _structured(result) == {
+            "error": "invalid_attachments",
+            "reason": f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}",
+        }
         assert not attachments_route.called
-        assert not send_route.called
+        assert not create_route.called
         assert all(method != "POST" for method, _ in _graph_trail())
-        _assert_no_canary(text)
+        _assert_no_canary(json.dumps(_structured(result)))
 
     @respx.mock
     async def test_forward_spec_mailbox_is_the_mailbox_that_is_checked(
@@ -8008,11 +8441,14 @@ class TestMailSenderPolicy:
                 },
             )
 
-        assert _get_text(result) == f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}"
+        assert _structured(result) == {
+            "error": "invalid_attachments",
+            "reason": f"attachments[0]: {mail_policy.EXTERNAL_SENDER_TEXT}",
+        }
         assert route.calls[0].request.url.path.startswith(
             "/v1.0/users/support@example.com/messages/"
         )
-        _assert_no_canary(_get_text(result))
+        _assert_no_canary(json.dumps(_structured(result)))
 
     @respx.mock
     async def test_send_teams_message_refuses_to_forward_an_external_attachment(
@@ -8218,10 +8654,12 @@ class TestMailSenderPolicy:
                 {"action": "create", "options": json.dumps(SAMPLE_FORWARDING_RULE)},
             )
 
-        text = _get_text(result)
-        assert text == mail_policy.FORWARDING_RULE_TEXT
+        assert _structured(result) == {
+            "error": "forwarding_rule",
+            "reason": mail_policy.FORWARDING_RULE_TEXT,
+        }
         assert _graph_trail() == []
-        _assert_no_canary(text)
+        _assert_no_canary(json.dumps(_structured(result)))
 
     @respx.mock
     async def test_updating_a_rule_to_redirect_is_refused(self, mcp_server, monkeypatch):
@@ -8238,10 +8676,12 @@ class TestMailSenderPolicy:
                 },
             )
 
-        text = _get_text(result)
-        assert text == mail_policy.FORWARDING_RULE_TEXT
+        assert _structured(result) == {
+            "error": "forwarding_rule",
+            "reason": mail_policy.FORWARDING_RULE_TEXT,
+        }
         assert _graph_trail() == []
-        _assert_no_canary(text)
+        _assert_no_canary(json.dumps(_structured(result)))
 
     @respx.mock
     async def test_non_forwarding_rules_still_work_while_the_policy_is_on(
@@ -8261,8 +8701,8 @@ class TestMailSenderPolicy:
             )
 
         assert route.called
-        assert "created" in _get_text(result).lower()
-        _assert_no_canary(_get_text(result))
+        assert _structured(result)["action"] == "created"
+        _assert_no_canary(json.dumps(_structured(result)))
 
     @respx.mock
     async def test_forwarding_rule_is_allowed_while_the_policy_is_off(self, mcp_server):
@@ -8278,8 +8718,8 @@ class TestMailSenderPolicy:
             )
 
         assert route.called
-        assert "created" in _get_text(result).lower()
-        _assert_no_canary(_get_text(result))
+        assert _structured(result)["action"] == "created"
+        _assert_no_canary(json.dumps(_structured(result)))
 
     # -- connection_status --------------------------------------------------
 
