@@ -39,6 +39,11 @@ _RULES_URL = f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messageRules"
 _DRAFT_URL = f"{GRAPH_BASE_URL}/me/messages/AAMkAGI2draft777%3D"
 
 
+def _select_of(request) -> str:
+    """The $select query parameter of a recorded request."""
+    return parse_qs(str(request.url).split("?", 1)[-1]).get("$select", [""])[0]
+
+
 def _mock_async_send():
     """The two requests asend_message always makes: create the draft, then send it.
 
@@ -1089,10 +1094,10 @@ class TestGetMessageDetailSync:
         assert data == SAMPLE_MESSAGE_DETAIL
         req = route.calls[0].request
         assert req.headers["prefer"] == 'outlook.body-content-type="text"'
-        assert (
-            "$select=id%2Cfrom%2Csender%2CisDraft%2CuniqueBody%2CinternetMessageHeaders%2ChasAttachments"
-            in str(req.url)
-        )
+        assert f"$select={quote(mail.DETAIL_SELECT)}" in str(req.url)
+        # The envelope the merged read_email flattens rides the same select.
+        for field in ("subject", "toRecipients", "receivedDateTime", "isRead"):
+            assert field in mail.DETAIL_SELECT
         # One round trip carries the attachment metadata, and never contentBytes.
         assert "$expand=attachments%28%24select%3D" in str(req.url)
         assert "contentId" in str(req.url)
@@ -1122,8 +1127,47 @@ class TestGetMessageDetailAsync:
 
         assert data == SAMPLE_MESSAGE_DETAIL
         assert route.calls[0].request.headers["prefer"] == 'outlook.body-content-type="text"'
+        assert f"$select={quote(mail.DETAIL_SELECT)}" in str(route.calls[0].request.url)
         assert "$expand=attachments%28%24select%3D" in str(route.calls[0].request.url)
         assert "contentBytes" not in str(route.calls[0].request.url)
+
+    @respx.mock
+    async def test_default_select_leaves_the_thread_body_out(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.aget_message_detail(client, SAMPLE_MESSAGE["id"])
+
+        assert "body" not in _select_of(route.calls[0].request).split(",")
+
+    @respx.mock
+    async def test_full_body_adds_body_to_the_select(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.aget_message_detail(client, SAMPLE_MESSAGE["id"], full_body=True)
+
+        select = _select_of(route.calls[0].request).split(",")
+        assert "body" in select
+        assert "uniqueBody" in select
+        # The Prefer header converts both bodies, so neither arrives as HTML.
+        assert route.calls[0].request.headers["prefer"] == 'outlook.body-content-type="text"'
+
+    @respx.mock
+    async def test_mailbox_routes_through_the_shared_mailbox(self):
+        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/users/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await mail.aget_message_detail(
+                client, SAMPLE_MESSAGE["id"], mailbox="support@example.com"
+            )
+
+        assert route.calls[0].request.url.path.startswith(
+            "/v1.0/users/support@example.com/messages"
+        )
 
 
 class TestCreateReplyDraftSync:

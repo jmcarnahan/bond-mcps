@@ -13,9 +13,10 @@ Run (standalone):
     make dev                                                                       # all 4 services
     poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 
-Tool summary (40 tools):
-  Email     : get_profile, list_emails, sync_mail, read_email*, get_mail_attachment,
-              send_email, mark_mail_read, manage_inbox_rules, manage_mail_folders
+Tool summary (35 tools):
+  Email     : get_profile, list_emails, sync_mail, read_email, get_mail_attachment,
+              send_email, manage_draft, mark_mail_read, manage_inbox_rules,
+              manage_mail_folders
   Calendar  : list_calendar_events, get_calendar_event, create_calendar_event, check_availability
   Teams     : list_teams, list_chats, read_teams_messages, search_teams_messages,
               get_teams_attachment, send_teams_message, get_teams_activity,
@@ -23,12 +24,9 @@ Tool summary (40 tools):
   Files     : list_sharepoint_sites, list_files, inspect_file, edit_document, manage_file
   Power BI  : list_powerbi, query_dataset, refresh_dataset, export_report
   Directory : search_people
-  Desktop JSON : get_mail_detail, create_reply_draft_json,
-                 create_draft_json, update_draft_body, add_draft_attachment_json, send_draft,
-                 connection_status
+  Status    : connection_status
 
-The 1 tool marked ``*`` returns a prose string an LLM reads directly; the
-other 39 return a ``dict`` and declare ``output_schema=None``, which opts them into the
+All 35 return a ``dict`` and declare ``output_schema=None``, which opts them into the
 FormatNegotiation middleware: a caller sending ``X-Bond-Client: desktop`` (the
 desktop mail app) gets the dict as structuredContent, while every other caller
 gets a compact text rendering of the same dict. Parameters stay ``str``/``int``
@@ -41,7 +39,9 @@ callable, but hidden from tools/list by HideDeprecatedAliases.
 
 import base64
 import binascii
+import csv
 import html as html_mod
+import io
 import json
 import logging
 import mimetypes
@@ -391,48 +391,15 @@ async def list_emails(
     }
 
 
-def _attachment_line(summary: dict, show_inline: bool) -> str:
-    """Render one attachment summary as a markdown bullet."""
-    name = summary["name"] or "(unnamed)"
-    suffix = " (inline)" if show_inline and summary["is_inline"] else ""
-    if summary["kind"] == "reference":
-        detail = f"link: {summary['source_url'] or '(no URL)'}"
-    elif summary["kind"] == "item":
-        detail = f"attached message, {_format_size(summary['size'])}"
-    else:
-        content_type = summary["content_type"] or "unknown type"
-        detail = f"{content_type}, {_format_size(summary['size'])}"
-    return f"- {name} — {detail}{suffix} — id: `{summary['id']}`"
-
-
-def _format_attachment_section(attachments: list[dict], include_inline: bool) -> str:
-    """Render the attachment block appended to a read email.
-
-    Inline images (embedded signatures, logos) are noise in a body an LLM is
-    reading, so they are counted and hidden unless explicitly asked for.
-    """
-    summaries = [attachment_ops.attachment_summary(att) for att in attachments]
-    hidden = 0 if include_inline else sum(1 for s in summaries if s["is_inline"])
-    shown = summaries if include_inline else [s for s in summaries if not s["is_inline"]]
-
-    lines = [f"\n\n**Attachments ({len(shown)}):**"]
-    lines.extend(_attachment_line(s, include_inline) for s in shown)
-    if hidden:
-        plural = "image" if hidden == 1 else "images"
-        lines.append(
-            f'(+{hidden} inline {plural} not shown; pass options {{"include_inline": true}})'
-        )
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def read_email(message_id: str, mailbox: str = "", options: str = "") -> str:
+@mcp.tool(output_schema=None)
+async def read_email(message_id: str, mailbox: str = "", options: str = "") -> dict:
     """
     Read a single email message by its ID.
 
-    When the message has attachments they are listed under the body with their
-    names, types, sizes, and IDs. Pass an ID to get_mail_attachment to read,
-    download, or save one.
+    One Graph request returns the body, the internet headers, and the
+    attachment metadata together: Exchange converts the body to text
+    server-side, so nothing here parses HTML, and the attachment list rides the
+    same $expand as the body rather than costing a second call.
 
     Args:
         message_id: The Graph API message ID (from list_emails output).
@@ -440,21 +407,48 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
             to access your own mailbox. Requires Mail.Read.Shared permission and Exchange
             Full Access delegation on the shared mailbox.
         options: JSON string with optional fields:
-            {"mark_as_read": true/false}  — mark the email read (or unread) after reading.
-            {"max_content_length": -1}  — max characters for the email body. Default -1
-                (no limit). Set a positive integer to truncate long emails.
-            {"include_inline": true}  — also list inline images (embedded logos and
-                signatures). Default false: they are counted, not listed.
+            {"mark_as_read": true/false}  — mark the email read (or unread) after
+                reading; the write is acknowledged by marked_as_read.
+            {"max_content_length": -1}  — max characters of body shown. Default -1
+                (no limit). Shaping only: body_text stays whole in the dict.
+            {"include_headers": true}  — show the internet headers. Default false;
+                they are always in the dict either way.
+            {"include_inline": true}  — also show inline images (embedded logos
+                and signatures). Default false: they are counted, not shown.
+            {"full_body": true}  — put the whole thread, quoted history included,
+                in body_text instead of just the reply-relevant part.
 
-    While the mail sender policy is on, a message from a sender outside the
-    allowed domains is refused instead of read.
+    Returns:
+        subject, from_name, from_address, to and cc (each {name, address}),
+        received, is_read, is_draft, then body_text (the reply-relevant part
+        only unless full_body is set), headers (lowercased name → value; where
+        a header repeats, the first occurrence wins), has_attachments,
+        attachments, and attachment_count.
+
+        attachments is metadata only — id, name, content_type, size (in bytes),
+        is_inline, content_id, kind (file | item | reference | unknown), and
+        source_url for link attachments. No bytes are fetched here; pass an id
+        to get_mail_attachment for content. At most 50 attachments are listed,
+        while attachment_count reports the true number. marked_as_read appears
+        only when the mark_as_read option was given.
+
+        Compactly: the subject/from/to/cc/received/is_read lines, a blank line,
+        the body, then a pipe-CSV of the attachments (inline rows counted
+        rather than listed) and, under include_headers, the headers.
+
+        While the mail sender policy is on, a message from a sender outside the
+        allowed domains returns {"error": "external_sender"} and nothing else.
+        A missing Microsoft connection returns not_connected; malformed options
+        return invalid_options. Everything else propagates as a tool error.
     """
     opts, err = parse_options(options)
     if err:
-        return err
+        return {"error": "invalid_options", "reason": err}
 
     max_content_length = opt_int(opts.get("max_content_length"), -1)
+    include_headers = opt_bool(opts.get("include_headers"), False)
     include_inline = opt_bool(opts.get("include_inline"), False)
+    full_body = opt_bool(opts.get("full_body"), False)
 
     # Resolved before the fetch so a malformed allowlist fails the call with no
     # Graph traffic at all; the message itself can only be judged after it is
@@ -462,55 +456,126 @@ async def read_email(message_id: str, mailbox: str = "", options: str = "") -> s
     policy_on = mail_policy.enabled()
 
     mb = mailbox or None
-    token = get_graph_token()
-    attachments: list[dict] = []
-    attachments_note = ""
-    async with AsyncGraphClient(token) as client:
-        msg = await mail_ops.aget_message(client, message_id, mailbox=mb)
-        if policy_on and not mail_policy.message_allowed(msg):
-            return mail_policy.EXTERNAL_SENDER_TEXT
-        has_attachments = bool(msg.get("hasAttachments"))
-        if has_attachments:
-            try:
-                attachments = await attachment_ops.alist_message_attachments(
-                    client, message_id, mailbox=mb
-                )
-            except GraphError as e:
-                attachments_note = f"*(could not list attachments: {e})*"
-        mark = opts.get("mark_as_read")
-        if mark is not None:
-            await mail_ops.amark_read(client, message_id, opt_bool(mark, True), mailbox=mb)
+    mark = opts.get("mark_as_read")
+    try:
+        token = get_graph_token()
+        async with AsyncGraphClient(token) as client:
+            msg = await mail_ops.aget_message_detail(
+                client, message_id, mailbox=mb, full_body=full_body
+            )
+            if policy_on and not mail_policy.message_allowed(msg):
+                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+            if mark is not None:
+                await mail_ops.amark_read(client, message_id, opt_bool(mark, True), mailbox=mb)
+    except PermissionError as e:
+        return _not_connected(e)
 
-    sender = msg.get("from", {}).get("emailAddress", {})
-    to_addrs = ", ".join(
-        r.get("emailAddress", {}).get("address", "?") for r in msg.get("toRecipients", [])
-    )
-    body = msg.get("body", {})
-    content = body.get("content", "")
-    if body.get("contentType") != "text":
-        body_text = content if max_content_length <= 0 else content[:max_content_length]
-        content = f"[HTML content, {len(content)} chars]\n{body_text}"
-    elif max_content_length > 0:
-        content = content[:max_content_length]
+    headers: dict[str, str] = {}
+    for header in msg.get("internetMessageHeaders") or []:
+        name = (header.get("name") or "").lower()
+        if name and name not in headers:
+            headers[name] = header.get("value")
 
-    result = (
-        f"**Subject:** {msg.get('subject', '(no subject)')}\n"
-        f"**From:** {sender.get('name', '?')} <{sender.get('address', '?')}>\n"
-        f"**To:** {to_addrs}\n"
-        f"**Date:** {msg.get('receivedDateTime', '?')}\n\n"
-        f"{content}"
-    )
-
-    if attachments_note:
-        result += f"\n\n{attachments_note}"
-    elif has_attachments:
-        result += _format_attachment_section(attachments, include_inline)
-
+    sender = (msg.get("from") or {}).get("emailAddress") or {}
+    # full_body swaps in the whole thread; uniqueBody is the reply-relevant part.
+    body_key = "body" if full_body else "uniqueBody"
+    raw = msg.get("attachments") or []
+    out = {
+        "subject": msg.get("subject"),
+        "from_name": sender.get("name"),
+        "from_address": sender.get("address"),
+        "to": _recipients_json(msg.get("toRecipients")),
+        "cc": _recipients_json(msg.get("ccRecipients")),
+        "received": msg.get("receivedDateTime"),
+        "is_read": bool(msg.get("isRead")),
+        "is_draft": bool(msg.get("isDraft")),
+        "body_text": (msg.get(body_key) or {}).get("content") or "",
+        "headers": headers,
+        "has_attachments": bool(msg.get("hasAttachments")),
+        "attachments": [
+            attachment_ops.attachment_summary(a)
+            for a in raw[: attachment_ops.MAX_LISTED_ATTACHMENTS]
+        ],
+        "attachment_count": len(raw),
+    }
     if mark is not None:
-        state = "read" if opt_bool(mark, True) else "unread"
-        result += f"\n\n---\n*Marked as {state}.*"
+        out["marked_as_read"] = opt_bool(mark, True)
+    # Rendering hints the compact renderer consumes and then drops. The desktop
+    # passes no options, so it never sees them.
+    if max_content_length > 0:
+        out["max_content_length"] = max_content_length
+    if include_headers:
+        out["include_headers"] = True
+    if include_inline:
+        out["include_inline"] = True
+    return out
 
-    return result
+
+def _render_read_email(payload: dict) -> str:
+    """One message as a model reads it: envelope lines, body, then the extras."""
+    if "error" in payload:
+        # An override preempts every rule in render_compact, the error envelope
+        # included, so an error payload has to be handed back to the shared one.
+        return render_compact(payload)
+
+    max_len = payload.get("max_content_length", -1)
+    include_headers = payload.get("include_headers", False)
+    include_inline = payload.get("include_inline", False)
+
+    from_name = payload.get("from_name")
+    from_address = payload.get("from_address") or ""
+    lines = [
+        f"subject: {payload.get('subject') or ''}",
+        f"from: {f'{from_name} <{from_address}>' if from_name else from_address}",
+    ]
+    for key in ("to", "cc"):
+        people = payload.get(key) or []
+        if people:
+            lines.append(
+                f"{key}: "
+                + ", ".join(
+                    f"{r['name']} <{r['address']}>" if r["name"] else r["address"] for r in people
+                )
+            )
+    lines.append(f"received: {payload.get('received') or ''}")
+    lines.append(f"is_read: {'true' if payload.get('is_read') else 'false'}")
+
+    body = payload.get("body_text") or ""
+    if max_len > 0 and len(body) > max_len:
+        body = body[:max_len] + "..."
+    lines.append("")
+    lines.append(body)
+
+    if payload.get("has_attachments"):
+        rows = payload.get("attachments") or []
+        shown = rows if include_inline else [r for r in rows if not r["is_inline"]]
+        hidden = len(rows) - len(shown)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, delimiter="|", quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+        writer.writerow(["name", "content_type", "size", "kind", "id"])
+        for row in shown:
+            writer.writerow([row["name"], row["content_type"], row["size"], row["kind"], row["id"]])
+        lines.append("")
+        lines.append(buffer.getvalue().rstrip("\n"))
+        if hidden:
+            # Embedded logos and signatures are noise in a body a model is
+            # reading, so they are counted rather than listed.
+            lines.append(f"inline: {hidden} not listed")
+        if payload.get("attachment_count", 0) > len(shown):
+            lines.append(f"attachment_count: {payload['attachment_count']}")
+
+    if include_headers:
+        lines.append("")
+        lines.append("headers:")
+        lines.extend(f"{name}: {value}" for name, value in (payload.get("headers") or {}).items())
+
+    if "marked_as_read" in payload:
+        lines.append(f"marked_as_read: {'true' if payload['marked_as_read'] else 'false'}")
+
+    return "\n".join(lines)
+
+
+RENDER_OVERRIDES["read_email"] = _render_read_email
 
 
 @mcp.tool(output_schema=None)
@@ -2333,7 +2398,7 @@ async def send_teams_message(
         }
 
     # "text", not "auto": a typed "<" must reach the chat as a "<" rather than
-    # being read as markup — the same rule update_draft_body holds for mail.
+    # being read as markup — the same rule manage_draft holds for mail bodies.
     content_type = opts.get("content_type", "text")
     raw_mentions = opts.get("mentions", [])
     mention_everyone = opts.get("mention_everyone", False)
@@ -3448,9 +3513,9 @@ async def export_report(
 
 
 # ---------------------------------------------------------------------------
-# Dict-returning tools
+# More dict-returning tools
 #
-# Unlike read_email, the one str-returning tool above, these return a canonical dict.
+# Every tool on this server returns a canonical dict, these included.
 # FormatNegotiation hands that dict to a programmatic caller (the desktop mail
 # app) as structuredContent and renders it compactly for everyone else.
 # Parameters remain str/int only.
@@ -3458,10 +3523,13 @@ async def export_report(
 # Error contract: a missing Microsoft connection returns the not_connected
 # payload (with a connect URL when one exists). The Teams write tools return
 # a structured "teams_unavailable" error for the no-license 403, which is
-# permanent and must not be retried. The mail attachment tools (
-# get_mail_attachment, add_draft_attachment_json) likewise return structured
-# permanent errors — invalid_mode, invalid_options, too_large, reference,
-# empty_name, invalid_base64 — which must not be retried either. The Teams
+# permanent and must not be retried. The mail attachment surfaces (
+# get_mail_attachment, manage_draft action="add_attachment") likewise return
+# structured permanent errors — invalid_mode, invalid_options, too_large,
+# reference, empty_name, invalid_base64 — which must not be retried either.
+# manage_draft also returns invalid_action for an unknown action word and
+# invalid_arguments for a missing draft_id/message_id, both before any
+# request. The Teams
 # attachment reader (get_teams_attachment) returns not_found (with the
 # available ids), access_denied, no_thumbnail, invalid_thumbnail, is_folder,
 # too_large, invalid_mode, invalid_options, invalid_arguments, and
@@ -3475,8 +3543,9 @@ async def export_report(
 # gap and resync when it flips. The three paging tools (sync_mail, list_chats,
 # read_teams_messages) return invalid_cursor when the
 # cursor is not a Graph URL — permanent; the Graph client refuses to send the
-# bearer token anywhere else. send_draft reads the draft's ids before sending
-# and returns them, so a client can store its own copy of the sent mail.
+# bearer token anywhere else. manage_draft action="send" reads the draft's ids
+# before sending and returns them, so a client can store its own copy of the
+# sent mail.
 # search_people returns directory_scope_missing when the connection lacks
 # User.ReadBasic.All; ensure_chat returns invalid_members (an id that is
 # not a Graph user id or UPN), no_identity (the caller cannot be read off the
@@ -3727,58 +3796,6 @@ async def sync_mail(folder: str = "inbox", cursor: str = "", min_received: str =
     }
 
 
-@mcp.tool(output_schema=None)
-async def get_mail_detail(message_id: str) -> dict:
-    """
-    Get a message's plain-text body, internet headers, and attachment list.
-
-    For programmatic clients. Exchange converts the body to text server-side,
-    so the client never parses HTML. Returns body_text (the reply-relevant
-    part only, without the quoted thread), headers (lowercased name → value;
-    where a header repeats, the first occurrence wins), and has_attachments.
-
-    Also returns attachments: metadata only — id, name, content_type, size (in
-    bytes), is_inline, content_id, kind (file | item | reference | unknown), and
-    source_url for link attachments. No bytes are fetched here; pass an id to
-    get_mail_attachment for content. At most 50 attachments are listed,
-    while attachment_count reports the true number.
-
-    While the mail sender policy is on, a message from a sender outside the
-    allowed domains returns {"error": "external_sender"} and nothing else.
-
-    Args:
-        message_id: The Graph message ID.
-    """
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            msg = await mail_ops.aget_message_detail(client, message_id)
-            if not mail_policy.message_allowed(msg):
-                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
-    except PermissionError as e:
-        return _not_connected(e)
-
-    headers: dict[str, str] = {}
-    for header in msg.get("internetMessageHeaders") or []:
-        name = (header.get("name") or "").lower()
-        if name and name not in headers:
-            headers[name] = header.get("value")
-
-    # aget_message_detail already $expands the attachments, so the list costs
-    # no extra round trip.
-    raw = msg.get("attachments") or []
-    return {
-        "body_text": (msg.get("uniqueBody") or {}).get("content") or "",
-        "headers": headers,
-        "has_attachments": bool(msg.get("hasAttachments")),
-        "attachments": [
-            attachment_ops.attachment_summary(a)
-            for a in raw[: attachment_ops.MAX_LISTED_ATTACHMENTS]
-        ],
-        "attachment_count": len(raw),
-    }
-
-
 async def _attachment_json_text(
     client: AsyncGraphClient,
     message_id: str,
@@ -3836,193 +3853,191 @@ def _attachment_item_fields(item: dict) -> dict:
 
 
 @mcp.tool(output_schema=None)
-async def create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
-    """
-    Create a reply draft for a message and return its ID as structured JSON.
-
-    For programmatic clients. Graph builds the draft with recipients and the
-    quoted original already filled in; use update_draft_body to set the reply
-    text, then send_draft. Returns the draft's id, web_link, conversation_id,
-    internet_message_id, subject, to, and cc — the same shape create_draft_json
-    returns.
-
-    Args:
-        message_id: The Graph message ID to reply to.
-        timezone: IANA or Windows timezone for the quoted original's
-            timestamps (e.g. "America/New_York"). Empty leaves them in UTC.
-
-    While the mail sender policy is on, replying to a message from a sender
-    outside the allowed domains returns {"error": "external_sender"} — Graph
-    would otherwise quote the original into a draft whose from is the user.
-    """
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            if not await mail_policy.acheck_message(client, message_id, None):
-                return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
-            draft = await mail_ops.acreate_reply_draft(client, message_id, timezone=timezone)
-    except PermissionError as e:
-        return _not_connected(e)
-    return _draft_json(draft)
-
-
-@mcp.tool(output_schema=None)
-async def create_draft_json(
-    to: str, subject: str, body: str = "", cc: str = "", bcc: str = ""
+async def manage_draft(
+    action: str,
+    draft_id: str = "",
+    message_id: str = "",
+    to: str = "",
+    cc: str = "",
+    bcc: str = "",
+    subject: str = "",
+    text: str = "",
+    name: str = "",
+    content_base64: str = "",
+    content_type: str = "",
+    timezone: str = "",
 ) -> dict:
     """
-    Create a new mail draft with recipients and a body. Returns structured JSON.
+    Compose, edit, attach to, and send mail drafts.
 
-    For programmatic clients composing a fresh message rather than a reply. The
-    body is written as plain text (contentType "text") — the same rule
-    update_draft_body holds, so a typed "<" stays a "<" instead of becoming
-    markup. An empty ``to`` is accepted, which lets a client save a skeleton
-    draft and let the user finish it in Outlook through web_link. The draft's id
-    then works unchanged with add_draft_attachment_json, update_draft_body, and
-    send_draft.
+    The whole draft lifecycle behind one action word. A typical flow is
+    create (or reply) → update_body → add_attachment → send, each call taking
+    the draft_id the previous one returned.
 
     Args:
-        to: Recipient addresses, comma-separated. Empty is allowed.
-        subject: The subject line.
-        body: Plain-text body. Empty leaves the draft body blank.
-        cc: Cc addresses, comma-separated.
-        bcc: Bcc addresses, comma-separated.
+        action: create | reply | update_body | add_attachment | send.
+        draft_id: The draft message ID. Required for update_body,
+            add_attachment, and send.
+        message_id: The message being answered. Required for reply.
+        to: action="create": recipient addresses, comma-separated. Empty is allowed.
+        cc: action="create": cc addresses, comma-separated.
+        bcc: action="create": bcc addresses, comma-separated.
+        subject: action="create": the subject line.
+        text: The plain-text body, for create and update_body.
+        name: action="add_attachment": the file name shown in the message
+            (e.g. "notes.txt"). Required.
+        content_base64: action="add_attachment": the file's bytes, base64-encoded.
+        content_type: action="add_attachment": MIME type. Empty guesses it from
+            the name's extension.
+        timezone: action="reply": IANA or Windows timezone for the quoted
+            original's timestamps (e.g. "America/New_York"). Empty leaves UTC.
 
     Returns:
-        The same shape create_reply_draft_json returns — id, web_link,
-        conversation_id, internet_message_id, subject, to, and cc.
+        create — a fresh outbound draft. The body is written as plain text
+        (contentType "text"), so a typed "<" stays a "<" instead of becoming
+        markup. An empty `to` is accepted, which lets a client save a skeleton
+        draft and let the user finish it in Outlook through web_link. Returns
+        id, web_link, conversation_id, internet_message_id, subject, to, and cc.
 
-        The mail sender policy does not gate this tool: it composes outbound
-        mail of the user's own, and reads no message that arrived from anyone.
-        not_connected (with connect_url when one exists) is returned when there
-        is no Microsoft connection; everything else propagates as a tool error.
-    """
-    to_list = [addr.strip() for addr in to.split(",") if addr.strip()]
-    cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()]
-    bcc_list = [addr.strip() for addr in bcc.split(",") if addr.strip()]
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            # None, not [] — the payload builder omits an absent cc/bcc and Graph
-            # treats an explicitly empty one differently.
-            draft = await mail_ops.acreate_draft(
-                client,
-                to=to_list,
-                subject=subject,
-                body=body,
-                cc=cc_list or None,
-                bcc=bcc_list or None,
-                body_type="Text",
-            )
-    except PermissionError as e:
-        return _not_connected(e)
-    return _draft_json(draft)
+        reply — the same shape, for a draft Graph builds with the recipients and
+        the quoted original already filled in. Set the reply text with
+        update_body, which overwrites the whole body including that quote.
 
+        update_body — {"ok": true}. Overwrites the whole body, including
+        anything Graph pre-filled; quote the original yourself to keep it.
 
-@mcp.tool(output_schema=None)
-async def update_draft_body(draft_id: str, text: str) -> dict:
-    """
-    Replace a draft's body with plain text. Returns structured JSON.
+        add_attachment — {"attachment_id": ...}. Attach before sending: a sent
+        message can no longer take attachments. The server has no file system,
+        so the bytes arrive base64-encoded. Files up to 150 MB are accepted —
+        anything at or above 3 MB goes through a chunked upload session
+        automatically, which takes longer. Permanent errors: empty_name,
+        invalid_base64 (not valid base64, or decoded to nothing), and too_large
+        (with size and limit).
 
-    For programmatic clients. Overwrites the whole body, including anything
-    Graph pre-filled — quote the original yourself if you want it kept.
-
-    Args:
-        draft_id: The draft message ID (from create_reply_draft_json).
-        text: The plain-text body to write.
-    """
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            await mail_ops.aupdate_draft_body(client, draft_id, text)
-    except PermissionError as e:
-        return _not_connected(e)
-    return {"ok": True}
-
-
-@mcp.tool(output_schema=None)
-async def add_draft_attachment_json(
-    draft_id: str, name: str, content_base64: str, content_type: str = ""
-) -> dict:
-    """
-    Attach a file to an existing draft. Returns structured JSON.
-
-    For programmatic clients. Call this on a draft from create_reply_draft_json,
-    after update_draft_body and before send_draft; a sent message can no longer
-    take attachments. The server has no file system, so the bytes arrive
-    base64-encoded. Files up to 150 MB are accepted — anything at or above 3 MB
-    goes through a chunked upload session automatically, which takes longer.
-
-    Args:
-        draft_id: The draft message ID (from create_reply_draft_json).
-        name: The file name shown in the message (e.g. "notes.txt"). Required.
-        content_base64: The file's bytes, base64-encoded.
-        content_type: MIME type. Empty guesses it from the name's extension.
-
-    Returns:
-        attachment_id — the new attachment's Graph ID.
-
-        Permanent errors, which must not be retried: empty_name, invalid_base64
-        (content_base64 was not valid base64, or decoded to nothing), too_large
-        (with size and limit), not_connected (with connect_url when one exists).
-        Everything else propagates as a tool error, signalling a retry.
-    """
-    name = name.strip()
-    if not name:
-        return {"error": "empty_name"}
-    try:
-        data = base64.b64decode(content_base64, validate=True)
-    except (binascii.Error, ValueError):
-        return {"error": "invalid_base64"}
-    if not data:
-        return {"error": "invalid_base64"}
-    if len(data) > attachment_ops.MAX_ATTACHMENT_BYTES:
-        return {
-            "error": "too_large",
-            "size": len(data),
-            "limit": attachment_ops.MAX_ATTACHMENT_BYTES,
-        }
-    ctype = content_type.strip() or attachment_ops.guess_content_type(name)
-
-    try:
-        token = get_graph_token()
-        async with AsyncGraphClient(token) as client:
-            attachment_id = await attachment_ops.aadd_file_attachment(
-                client, draft_id, name, data, ctype
-            )
-    except PermissionError as e:
-        return _not_connected(e)
-    return {"attachment_id": attachment_id}
-
-
-@mcp.tool(output_schema=None)
-async def send_draft(draft_id: str) -> dict:
-    """
-    Send an existing draft. Returns structured JSON.
-
-    For programmatic clients. Graph accepts the send asynchronously, so a
-    successful return means "queued", not "delivered".
-
-    The draft's ids and recipients are read first, then the draft is sent: once
-    Exchange moves the copy to Sent Items the draft id stops resolving, so this
-    is the only moment they can be learned. A failed read sends nothing and
-    propagates as a tool error, which is safe to retry.
-
-    Args:
-        draft_id: The draft message ID (from create_reply_draft_json or
-            create_draft_json).
-
-    Returns:
-        ok, plus the draft's id, conversation_id, internet_message_id, subject,
-        to, cc, and sent_at. The id is the draft's and stops resolving once the
-        copy lands in Sent Items, so it serves only as a client-side key;
-        internet_message_id and conversation_id carry over to the sent copy, so
-        a client can store its own copy of the mail immediately and later match
-        it to the real Sent Items copy by internet_message_id. sent_at is the
-        server's UTC clock when Graph queued the send; Exchange's own
+        send — ok, plus the draft's id, conversation_id, internet_message_id,
+        subject, to, cc, and sent_at. Graph accepts the send asynchronously, so
+        a successful return means "queued", not "delivered". The ids are read
+        first and then the draft is sent: once Exchange moves the copy to Sent
+        Items the draft id stops resolving, so this is the only moment they can
+        be learned, and a failed read sends nothing and propagates as a tool
+        error that is safe to retry. The id is the draft's and serves only as a
+        client-side key, while internet_message_id and conversation_id carry
+        over to the sent copy, so a client can store its own copy of the mail
+        immediately and match it to the real Sent Items copy later. sent_at is
+        the server's UTC clock when Graph queued the send; Exchange's own
         sentDateTime may differ from it by seconds. There is no web_link — the
         draft's deep link dies with the draft.
+
+        The draft payloads nest their to/cc lists, so they render as compact
+        JSON; {"ok": true} and {"attachment_id": ...} render as key: value lines.
+
+        An unknown action returns invalid_action and a missing id for the action
+        returns invalid_arguments, both before any request. not_connected (with
+        connect_url when one exists) is returned when there is no Microsoft
+        connection. All of these are permanent; everything else propagates as a
+        tool error, signalling a retry.
+
+        While the mail sender policy is on, replying to a message from a sender
+        outside the allowed domains returns {"error": "external_sender"} — Graph
+        would otherwise quote the original into a draft whose from is the user.
+        The other four actions are deliberately ungated: they touch only the
+        user's own outbound mail and read no message that arrived from anyone.
     """
+    if action not in ("create", "reply", "update_body", "add_attachment", "send"):
+        return {
+            "error": "invalid_action",
+            "reason": (
+                f"Unknown action {action!r}. Must be: create, reply, update_body, "
+                "add_attachment, or send."
+            ),
+        }
+    if action == "reply" and not message_id.strip():
+        return {
+            "error": "invalid_arguments",
+            "reason": "message_id is required for the 'reply' action.",
+        }
+    if action in ("update_body", "add_attachment", "send") and not draft_id.strip():
+        return {
+            "error": "invalid_arguments",
+            "reason": f"draft_id is required for the '{action}' action.",
+        }
+
+    if action == "create":
+        to_list = [addr.strip() for addr in to.split(",") if addr.strip()]
+        cc_list = [addr.strip() for addr in cc.split(",") if addr.strip()]
+        bcc_list = [addr.strip() for addr in bcc.split(",") if addr.strip()]
+        try:
+            token = get_graph_token()
+            async with AsyncGraphClient(token) as client:
+                # None, not [] — the payload builder omits an absent cc/bcc and Graph
+                # treats an explicitly empty one differently.
+                draft = await mail_ops.acreate_draft(
+                    client,
+                    to=to_list,
+                    subject=subject,
+                    body=text,
+                    cc=cc_list or None,
+                    bcc=bcc_list or None,
+                    body_type="Text",
+                )
+        except PermissionError as e:
+            return _not_connected(e)
+        return _draft_json(draft)
+
+    if action == "reply":
+        try:
+            token = get_graph_token()
+            async with AsyncGraphClient(token) as client:
+                # The one gated action: a reply quotes the hidden original into
+                # the draft. create/update_body/add_attachment/send touch only
+                # the user's own outbound mail, which is why they are ungated.
+                if not await mail_policy.acheck_message(client, message_id, None):
+                    return {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+                draft = await mail_ops.acreate_reply_draft(client, message_id, timezone=timezone)
+        except PermissionError as e:
+            return _not_connected(e)
+        return _draft_json(draft)
+
+    if action == "update_body":
+        try:
+            token = get_graph_token()
+            async with AsyncGraphClient(token) as client:
+                await mail_ops.aupdate_draft_body(client, draft_id, text)
+        except PermissionError as e:
+            return _not_connected(e)
+        return {"ok": True}
+
+    if action == "add_attachment":
+        name = name.strip()
+        if not name:
+            return {"error": "empty_name"}
+        try:
+            data = base64.b64decode(content_base64, validate=True)
+        except (binascii.Error, ValueError):
+            return {"error": "invalid_base64"}
+        if not data:
+            return {"error": "invalid_base64"}
+        if len(data) > attachment_ops.MAX_ATTACHMENT_BYTES:
+            return {
+                "error": "too_large",
+                "size": len(data),
+                "limit": attachment_ops.MAX_ATTACHMENT_BYTES,
+            }
+        ctype = content_type.strip() or attachment_ops.guess_content_type(name)
+
+        try:
+            token = get_graph_token()
+            async with AsyncGraphClient(token) as client:
+                attachment_id = await attachment_ops.aadd_file_attachment(
+                    client, draft_id, name, data, ctype
+                )
+        except PermissionError as e:
+            return _not_connected(e)
+        return {"attachment_id": attachment_id}
+
+    # Only "send" reaches here: the closed action set is validated above and
+    # every other branch returns. A sixth action must get its own branch, not
+    # fall into a send.
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
@@ -4587,6 +4602,54 @@ async def _alias_send_chat_message_json(chat_id: str, text: str, attachments: st
     if not text.strip() and not attachments.strip():
         return {"message": None, "error": "text must not be empty"}
     return await send_teams_message(message=text, chat_id=chat_id, attachments=attachments)
+
+
+@mcp.tool(name="get_mail_detail", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_get_mail_detail(message_id: str) -> dict:
+    """Deprecated alias for read_email."""
+    return await read_email(message_id=message_id)
+
+
+@mcp.tool(name="create_reply_draft_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
+    """Deprecated alias for manage_draft(action="reply")."""
+    return await manage_draft(action="reply", message_id=message_id, timezone=timezone)
+
+
+@mcp.tool(name="create_draft_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_create_draft_json(
+    to: str, subject: str, body: str = "", cc: str = "", bcc: str = ""
+) -> dict:
+    """Deprecated alias for manage_draft(action="create")."""
+    # The merged tool calls the body `text`, as update_body already did; the
+    # ancestor's `body` spelling lives only here.
+    return await manage_draft(action="create", to=to, subject=subject, text=body, cc=cc, bcc=bcc)
+
+
+@mcp.tool(name="update_draft_body", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_update_draft_body(draft_id: str, text: str) -> dict:
+    """Deprecated alias for manage_draft(action="update_body")."""
+    return await manage_draft(action="update_body", draft_id=draft_id, text=text)
+
+
+@mcp.tool(name="add_draft_attachment_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_add_draft_attachment_json(
+    draft_id: str, name: str, content_base64: str, content_type: str = ""
+) -> dict:
+    """Deprecated alias for manage_draft(action="add_attachment")."""
+    return await manage_draft(
+        action="add_attachment",
+        draft_id=draft_id,
+        name=name,
+        content_base64=content_base64,
+        content_type=content_type,
+    )
+
+
+@mcp.tool(name="send_draft", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
+async def _alias_send_draft(draft_id: str) -> dict:
+    """Deprecated alias for manage_draft(action="send")."""
+    return await manage_draft(action="send", draft_id=draft_id)
 
 
 if __name__ == "__main__":

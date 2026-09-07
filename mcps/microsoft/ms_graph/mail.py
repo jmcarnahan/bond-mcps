@@ -559,7 +559,10 @@ DELTA_SELECT = (
     "receivedDateTime,isRead,isDraft,hasAttachments,bodyPreview"
 )
 
-DETAIL_SELECT = "id,from,sender,isDraft,uniqueBody,internetMessageHeaders,hasAttachments"
+DETAIL_SELECT = (
+    "id,subject,from,sender,toRecipients,ccRecipients,receivedDateTime,isRead,isDraft,"
+    "uniqueBody,internetMessageHeaders,hasAttachments"
+)
 
 # Expanding attachments here means one round trip for body + attachment
 # metadata, and the inner $select keeps contentBytes out of the response.
@@ -657,11 +660,20 @@ async def adelta_page(
     return await client.get(_delta_path(folder, min_received))
 
 
-async def aget_message_detail(client: AsyncGraphClient, message_id: str) -> dict[str, Any]:
-    """Fetch a message's body, headers, attachment flag, and attachment list (async)."""
+async def aget_message_detail(
+    client: AsyncGraphClient, message_id: str, mailbox: str | None = None, full_body: bool = False
+) -> dict[str, Any]:
+    """Fetch a message's body, headers, attachment flag, and attachment list (async).
+
+    ``full_body`` adds the whole thread body alongside uniqueBody. It is asked
+    for only on demand because the quoted history it carries can dwarf the
+    reply-relevant part every caller actually wanted. The Prefer header
+    converts both bodies server-side, so neither is ever HTML.
+    """
+    select = f"{DETAIL_SELECT},body" if full_body else DETAIL_SELECT
     return await client.get(
-        f"/me/messages/{_safe_id(message_id)}"
-        f"?$select={quote(DETAIL_SELECT)}&$expand={quote(DETAIL_EXPAND)}",
+        f"{_base(mailbox)}/messages/{_safe_id(message_id)}"
+        f"?$select={quote(select)}&$expand={quote(DETAIL_EXPAND)}",
         headers={"Prefer": _PREFER_TEXT_BODY},
     )
 

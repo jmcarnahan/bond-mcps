@@ -25,7 +25,6 @@ from .conftest import (
     GRAPH_ERROR_403,
     GRAPH_ERROR_404,
     GRAPH_ERROR_410,
-    SAMPLE_ATTACHMENTS_RESPONSE,
     SAMPLE_CALENDAR_EVENT,
     SAMPLE_CALENDAR_EVENT_ALLDAY,
     SAMPLE_CALENDAR_EVENTS_RESPONSE,
@@ -75,19 +74,16 @@ from .conftest import (
     SAMPLE_FORWARDING_RULE,
     SAMPLE_HYDRATED_CHANNEL_MESSAGE,
     SAMPLE_HYDRATED_CHAT_MESSAGE,
-    SAMPLE_INLINE_ATTACHMENT,
     SAMPLE_INVITE_RESPONSE,
     SAMPLE_ITEM_ATTACHMENT,
     SAMPLE_MAIL_FOLDER,
     SAMPLE_MAIL_FOLDERS_RESPONSE,
     SAMPLE_MAILBOX_SETTINGS,
     SAMPLE_MESSAGE,
-    SAMPLE_MESSAGE_2,
     SAMPLE_MESSAGE_DETAIL,
     SAMPLE_MESSAGE_DETAIL_NO_BODY,
     SAMPLE_MESSAGE_RULE,
     SAMPLE_MESSAGE_RULES_RESPONSE,
-    SAMPLE_MESSAGE_WITH_ATTACHMENTS,
     SAMPLE_MESSAGES_PAGE1,
     SAMPLE_MESSAGES_PAGE2,
     SAMPLE_MESSAGES_RESPONSE,
@@ -100,6 +96,7 @@ from .conftest import (
     SAMPLE_PBI_EXPORT_SUCCEEDED,
     SAMPLE_PBI_REPORTS_RESPONSE,
     SAMPLE_PBI_WORKSPACES_RESPONSE,
+    SAMPLE_READ_DETAIL,
     SAMPLE_REFERENCE_ATTACHMENT,
     SAMPLE_REPLY_DRAFT,
     SAMPLE_SCHEDULE_RESPONSE,
@@ -117,6 +114,7 @@ from .conftest import (
     SAMPLE_TEAMS_UPLOAD_RESPONSE,
     SAMPLE_TEAMS_UPLOADED_ITEM,
     SAMPLE_UNSENT_DRAFT,
+    SAMPLE_UNSENT_DRAFT_DETAIL,
     SAMPLE_UPLOADED_FILE,
     SAMPLE_USER_PROFILE,
     SAMPLE_USERS_SEARCH_RESPONSE,
@@ -758,90 +756,6 @@ class TestMCPEmailTools:
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
     @respx.mock
-    async def test_read_email_plain_body(self, mcp_server):
-        msg_id = "AAMkAGI2TG93AAA="
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool("read_email", {"message_id": msg_id})
-
-        text = _get_text(result)
-        assert "Weekly Report" in text
-        assert "Alice Smith" in text
-        assert "Here is the weekly report" in text
-
-    @respx.mock
-    async def test_read_email_html_body(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{SAMPLE_MESSAGE_2['id']}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_2)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_email", {"message_id": SAMPLE_MESSAGE_2["id"]}
-                )
-
-        text = _get_text(result)
-        assert "HTML content" in text
-        assert "Charlie Brown" in text
-
-    @respx.mock
-    async def test_read_email_with_mark_as_read(self, mcp_server):
-        msg_id = "AAMkAGI2TG93AAA="
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
-        )
-        patch_route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
-            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": True})
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_email",
-                    {"message_id": msg_id, "options": '{"mark_as_read": true}'},
-                )
-
-        text = _get_text(result)
-        assert "Weekly Report" in text
-        assert patch_route.called
-        payload = json.loads(patch_route.calls[0].request.content)
-        assert payload == {"isRead": True}
-        assert "marked as read" in text.lower()
-
-    @respx.mock
-    async def test_read_email_mark_as_unread(self, mcp_server):
-        msg_id = "AAMkAGI2TG93AAA="
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
-        )
-        patch_route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
-            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": False})
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result = await client.call_tool(
-                    "read_email",
-                    {"message_id": msg_id, "options": '{"mark_as_read": false}'},
-                )
-
-        text = _get_text(result)
-        assert "Weekly Report" in text
-        assert patch_route.called
-        payload = json.loads(patch_route.calls[0].request.content)
-        assert payload == {"isRead": False}
-        assert "marked as unread" in text.lower()
-
-    @respx.mock
     async def test_send_email_returns_the_sent_ids(self, mcp_server):
         """The ack carries every id the caller can match Sent Items on."""
         route = _mock_send_email()
@@ -1047,92 +961,6 @@ class TestMCPEmailTools:
                     await client.call_tool("list_emails", {})
 
     @respx.mock
-    async def test_read_email_lists_attachments(self, mcp_server):
-        """A message with attachments gets a section under the body."""
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_WITH_ATTACHMENTS)
-        )
-        respx.get(ATT_BASE).mock(return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_RESPONSE))
-        with _mock_token():
-            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
-
-        text = _get_text(result)
-        assert "Here is the weekly report" in text
-        # The inline logo is counted, not listed.
-        assert "**Attachments (2):**" in text
-        assert "- report.pdf — application/pdf, 1.2 MB — id: `AAMkAttachFile001=`" in text
-        assert (
-            "- Q4 Plan.docx — link: https://contoso.sharepoint.com/:w:/s/team/Q4Plan"
-            " — id: `AAMkAttachRef004=`" in text
-        )
-        assert "logo.png" not in text
-        assert '(+1 inline image not shown; pass options {"include_inline": true})' in text
-
-    @respx.mock
-    async def test_read_email_include_inline_lists_them(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_WITH_ATTACHMENTS)
-        )
-        respx.get(ATT_BASE).mock(return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_RESPONSE))
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "read_email",
-                {"message_id": ATT_MSG_ID, "options": '{"include_inline": true}'},
-            )
-
-        text = _get_text(result)
-        assert "**Attachments (3):**" in text
-        assert "- logo.png — image/png, 4.0 KB (inline) — id: `AAMkAttachInline002=`" in text
-        assert "not shown" not in text
-
-    @respx.mock
-    async def test_read_email_attachment_listing_failure_is_a_note(self, mcp_server):
-        """A failed listing must not cost the caller the body they asked for."""
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_WITH_ATTACHMENTS)
-        )
-        respx.get(ATT_BASE).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
-        with _mock_token():
-            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
-
-        text = _get_text(result)
-        assert "Here is the weekly report" in text
-        assert "*(could not list attachments: Graph API error 403" in text
-        assert "**Attachments" not in text
-
-    @respx.mock
-    async def test_read_email_without_attachments_has_no_section(self, mcp_server):
-        """hasAttachments false means no attachment request at all."""
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
-            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "hasAttachments": False})
-        )
-        list_route = respx.get(ATT_BASE).mock(
-            return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_RESPONSE)
-        )
-        with _mock_token():
-            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
-
-        assert "**Attachments" not in _get_text(result)
-        assert not list_route.called
-
-    @respx.mock
-    async def test_read_email_all_inline_still_prints_the_header(self, mcp_server):
-        """Zero listed but attachments present — say so rather than staying silent."""
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_WITH_ATTACHMENTS)
-        )
-        respx.get(ATT_BASE).mock(
-            return_value=httpx.Response(200, json={"value": [SAMPLE_INLINE_ATTACHMENT]})
-        )
-        with _mock_token():
-            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
-
-        text = _get_text(result)
-        assert "**Attachments (0):**" in text
-        assert '(+1 inline image not shown; pass options {"include_inline": true})' in text
-
-    @respx.mock
     async def test_send_email_with_text_and_base64_attachments(self, mcp_server):
         """Attachments add an attach POST per file between create and send."""
         create = _mock_send_email()
@@ -1235,6 +1063,198 @@ class TestMCPEmailTools:
         assert create.called
         assert not attach.called
         assert _structured(result)["attachments"] == ""
+
+
+class TestMCPReadEmail:
+    """read_email — one detail fetch, one canonical dict."""
+
+    # Every read goes through the same percent-encoded detail URL; the body and
+    # the attachment metadata arrive together on its $expand.
+    DETAIL_URL = f"{GRAPH_BASE_URL}/me/messages/{quote(ATT_MSG_ID, safe='')}"
+    PLAIN = {**SAMPLE_READ_DETAIL, "hasAttachments": False, "attachments": []}
+    HEADERS = {
+        "message-id": "<abc123@example.com>",
+        "in-reply-to": "<parent@example.com>",
+        # "Received" appeared twice with different casing; the first one wins.
+        "received": "from mx1.example.com",
+    }
+
+    def _mock_detail(self, payload=None):
+        return respx.get(self.DETAIL_URL).mock(
+            return_value=httpx.Response(200, json=payload or self.PLAIN)
+        )
+
+    @respx.mock
+    async def test_plain_body_flattens_the_whole_envelope(self, mcp_server):
+        self._mock_detail()
+        with _mock_token():
+            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
+
+        assert _structured(result) == {
+            "subject": "Weekly Report",
+            "from_name": "Alice Smith",
+            "from_address": "alice@example.com",
+            "to": [{"name": "Bob Jones", "address": "bob@example.com"}],
+            "cc": [{"name": None, "address": "carol@example.com"}],
+            "received": "2025-12-15T10:30:00Z",
+            "is_read": False,
+            "is_draft": False,
+            "body_text": "Here is the weekly report.\n\nBest,\nAlice",
+            "headers": self.HEADERS,
+            "has_attachments": False,
+            "attachments": [],
+            "attachment_count": 0,
+        }
+
+    @respx.mock
+    async def test_attachments_ride_the_body_fetch(self, mcp_server):
+        """One request carries body and attachment metadata; there is no listing call."""
+        route = self._mock_detail(SAMPLE_READ_DETAIL)
+        with _mock_token():
+            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
+
+        data = _structured(result)
+        assert route.call_count == 1
+        assert _graph_trail() == [("GET", f"/v1.0/me/messages/{ATT_MSG_ID}")]
+        assert data["has_attachments"] is True
+        assert data["attachment_count"] == 3
+        assert [a["name"] for a in data["attachments"]] == [
+            "report.pdf",
+            "logo.png",
+            "Q4 Plan.docx",
+        ]
+        assert data["attachments"][1]["is_inline"] is True
+        assert data["attachments"][2]["kind"] == "reference"
+
+    @respx.mock
+    async def test_mark_as_read_patches_and_acknowledges(self, mcp_server):
+        self._mock_detail()
+        patch_route = respx.patch(self.DETAIL_URL).mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": True})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_email",
+                {"message_id": ATT_MSG_ID, "options": '{"mark_as_read": true}'},
+            )
+
+        assert _structured(result)["marked_as_read"] is True
+        assert json.loads(patch_route.calls[0].request.content) == {"isRead": True}
+        assert _graph_trail() == [
+            ("GET", f"/v1.0/me/messages/{ATT_MSG_ID}"),
+            ("PATCH", f"/v1.0/me/messages/{ATT_MSG_ID}"),
+        ]
+
+    @respx.mock
+    async def test_mark_as_unread_acknowledges_the_other_way(self, mcp_server):
+        self._mock_detail()
+        patch_route = respx.patch(self.DETAIL_URL).mock(
+            return_value=httpx.Response(200, json={**SAMPLE_MESSAGE, "isRead": False})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_email",
+                {"message_id": ATT_MSG_ID, "options": '{"mark_as_read": false}'},
+            )
+
+        assert _structured(result)["marked_as_read"] is False
+        assert json.loads(patch_route.calls[0].request.content) == {"isRead": False}
+
+    @respx.mock
+    async def test_no_mark_option_leaves_the_key_off(self, mcp_server):
+        self._mock_detail()
+        with _mock_token():
+            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
+
+        assert "marked_as_read" not in _structured(result)
+
+    @respx.mock
+    async def test_shaping_options_become_hints_and_leave_the_dict_whole(self, mcp_server):
+        """The canonical body and header map are unchanged; the options only
+        travel as hints for the compact renderer."""
+        self._mock_detail(SAMPLE_READ_DETAIL)
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_email",
+                {
+                    "message_id": ATT_MSG_ID,
+                    "options": json.dumps(
+                        {
+                            "max_content_length": 5,
+                            "include_headers": True,
+                            "include_inline": True,
+                        }
+                    ),
+                },
+            )
+
+        data = _structured(result)
+        assert data["body_text"] == "Here is the weekly report.\n\nBest,\nAlice"
+        assert data["headers"] == self.HEADERS
+        assert data["max_content_length"] == 5
+        assert data["include_headers"] is True
+        assert data["include_inline"] is True
+
+    @respx.mock
+    async def test_unset_shaping_options_leave_no_hint_keys(self, mcp_server):
+        self._mock_detail()
+        with _mock_token():
+            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
+
+        data = _structured(result)
+        for key in ("max_content_length", "include_headers", "include_inline"):
+            assert key not in data
+
+    @respx.mock
+    async def test_full_body_asks_for_the_thread_and_returns_it(self, mcp_server):
+        route = self._mock_detail(
+            {
+                **self.PLAIN,
+                "body": {"contentType": "text", "content": "Here is the weekly report.\n\n> older"},
+            }
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_email",
+                {"message_id": ATT_MSG_ID, "options": '{"full_body": true}'},
+            )
+
+        assert "body" in _select_of(route.calls[0].request).split(",")
+        assert _structured(result)["body_text"] == "Here is the weekly report.\n\n> older"
+
+    @respx.mock
+    async def test_mailbox_reads_the_shared_mailbox(self, mcp_server):
+        route = respx.get(
+            url__startswith=f"{GRAPH_BASE_URL}/users/support@example.com/messages"
+        ).mock(return_value=httpx.Response(200, json=self.PLAIN))
+        with _mock_token():
+            await _call(
+                mcp_server,
+                "read_email",
+                {"message_id": ATT_MSG_ID, "mailbox": "support@example.com"},
+            )
+
+        assert route.called
+
+    @respx.mock
+    async def test_invalid_options_returns_a_dict(self, mcp_server):
+        with _mock_token():
+            result = await _call(
+                mcp_server, "read_email", {"message_id": ATT_MSG_ID, "options": "not json"}
+            )
+
+        assert _structured(result)["error"] == "invalid_options"
+        assert _graph_trail() == []
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
 class TestMCPGetMailAttachment:
@@ -2429,35 +2449,6 @@ class TestMCPTeamsTools:
             result = await _call(mcp_server, "search_teams_messages", {"query": "#budget2026"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
-
-    @respx.mock
-    async def test_read_email_max_content_length(self, mcp_server):
-        """max_content_length option truncates email body."""
-        long_email = {
-            **SAMPLE_MESSAGE,
-            "id": "msg-long-email",
-            "body": {"contentType": "text", "content": "Report: " + "z" * 3000},
-        }
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{long_email['id']}").mock(
-            return_value=httpx.Response(200, json=long_email)
-        )
-        with _mock_token():
-            from fastmcp import Client
-
-            async with Client(mcp_server) as client:
-                result_full = await client.call_tool("read_email", {"message_id": long_email["id"]})
-                result_truncated = await client.call_tool(
-                    "read_email",
-                    {
-                        "message_id": long_email["id"],
-                        "options": '{"max_content_length": 100}',
-                    },
-                )
-
-        full_text = _get_text(result_full)
-        truncated_text = _get_text(result_truncated)
-        assert "z" * 200 in full_text
-        assert "z" * 200 not in truncated_text
 
     @respx.mock
     async def test_get_teams_activity_quiet_window(self, mcp_server):
@@ -5343,38 +5334,8 @@ class TestMCPPowerBITools:
 # ---------------------------------------------------------------------------
 
 
-class TestMCPAuth:
-    """Test authentication behavior."""
-
-    async def test_missing_token_raises_error(self, mcp_server):
-        from fastmcp import Client
-        from fastmcp.exceptions import ToolError
-
-        with patch(
-            "ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")
-        ):
-            async with Client(mcp_server) as client:
-                with pytest.raises(ToolError, match="Authorization required"):
-                    await client.call_tool("read_email", {"message_id": "x"})
-
-    async def test_all_tools_require_auth(self, mcp_server):
-        """Verify every tool rejects unauthenticated requests."""
-        from fastmcp import Client
-        from fastmcp.exceptions import ToolError
-
-        # Graph tools — blocked by get_graph_token failing. Dict-returning tools
-        # answer not_connected instead of raising, so they are covered by their
-        # own not-connected tests rather than listed here.
-        graph_tools = [
-            ("read_email", {"message_id": "fake-id"}),
-        ]
-        with patch(
-            "ms_graph_mcp.get_graph_token", side_effect=PermissionError("Authorization required.")
-        ):
-            async with Client(mcp_server) as client:
-                for tool_name, args in graph_tools:
-                    with pytest.raises(ToolError, match="Authorization required"):
-                        await client.call_tool(tool_name, args)
+# TestMCPAuth lived here. No tool raises on a missing token any more: every one
+# of them returns the not_connected dict, which each tool's own class pins.
 
 
 # ---------------------------------------------------------------------------
@@ -5640,8 +5601,13 @@ class TestMCPSyncMail:
         assert _structured(result) == {"error": "not_connected", "connect_url": None}
 
 
-class TestMCPGetMailDetail:
-    """get_mail_detail."""
+class TestMCPGetMailDetailContract:
+    """read_email — the five keys get_mail_detail froze.
+
+    The merged payload grew a flat envelope around them, so each frozen key is
+    pinned on its own rather than as a whole dict: adding keys is allowed,
+    changing these is not.
+    """
 
     @respx.mock
     async def test_lowercases_headers_and_keeps_first_occurrence(self, mcp_server):
@@ -5649,9 +5615,7 @@ class TestMCPGetMailDetail:
             return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
         )
         with _mock_token():
-            result = await _call(
-                mcp_server, "get_mail_detail", {"message_id": SAMPLE_MESSAGE["id"]}
-            )
+            result = await _call(mcp_server, "read_email", {"message_id": SAMPLE_MESSAGE["id"]})
 
         data = _structured(result)
         assert data["body_text"] == "Here is the weekly report.\n\nBest,\nAlice"
@@ -5687,9 +5651,7 @@ class TestMCPGetMailDetail:
             return_value=httpx.Response(200, json={**SAMPLE_MESSAGE_DETAIL, "attachments": many})
         )
         with _mock_token():
-            result = await _call(
-                mcp_server, "get_mail_detail", {"message_id": SAMPLE_MESSAGE["id"]}
-            )
+            result = await _call(mcp_server, "read_email", {"message_id": SAMPLE_MESSAGE["id"]})
 
         data = _structured(result)
         assert len(data["attachments"]) == 50
@@ -5702,21 +5664,18 @@ class TestMCPGetMailDetail:
             return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL_NO_BODY)
         )
         with _mock_token():
-            result = await _call(
-                mcp_server, "get_mail_detail", {"message_id": SAMPLE_MESSAGE["id"]}
-            )
+            result = await _call(mcp_server, "read_email", {"message_id": SAMPLE_MESSAGE["id"]})
 
-        assert _structured(result) == {
-            "body_text": "",
-            "headers": {},
-            "has_attachments": False,
-            "attachments": [],
-            "attachment_count": 0,
-        }
+        data = _structured(result)
+        assert data["body_text"] == ""
+        assert data["headers"] == {}
+        assert data["has_attachments"] is False
+        assert data["attachments"] == []
+        assert data["attachment_count"] == 0
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "get_mail_detail", {"message_id": "m"})
+            result = await _call(mcp_server, "read_email", {"message_id": "m"})
 
         assert _structured(result)["error"] == "not_connected"
 
@@ -6082,8 +6041,10 @@ class TestMCPGetMailAttachmentJsonContract:
                 )
 
 
-class TestMCPAddDraftAttachmentJson:
-    """add_draft_attachment_json — attach bytes to a draft before sending."""
+class TestMCPAddDraftAttachmentJsonContract:
+    """manage_draft action="add_attachment" — the dict add_draft_attachment_json froze."""
+
+    ACTION = {"action": "add_attachment"}
 
     @respx.mock
     async def test_attaches_and_returns_the_id(self, mcp_server):
@@ -6093,8 +6054,9 @@ class TestMCPAddDraftAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "add_draft_attachment_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
                     "name": "notes.txt",
                     "content_base64": base64.b64encode(b"hello world").decode("ascii"),
@@ -6116,8 +6078,9 @@ class TestMCPAddDraftAttachmentJson:
         with _mock_token():
             await _call(
                 mcp_server,
-                "add_draft_attachment_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
                     "name": "notes.txt",
                     "content_base64": base64.b64encode(b"hi").decode("ascii"),
@@ -6127,12 +6090,14 @@ class TestMCPAddDraftAttachmentJson:
 
         assert json.loads(route.calls[0].request.content)["contentType"] == "text/markdown"
 
+    @respx.mock
     async def test_empty_name_is_rejected(self, mcp_server):
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "add_draft_attachment_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
                     "name": "   ",
                     "content_base64": base64.b64encode(b"hi").decode("ascii"),
@@ -6140,13 +6105,16 @@ class TestMCPAddDraftAttachmentJson:
             )
 
         assert _structured(result) == {"error": "empty_name"}
+        assert _graph_trail() == []
 
+    @respx.mock
     async def test_invalid_base64_is_rejected(self, mcp_server):
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "add_draft_attachment_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
                     "name": "notes.txt",
                     "content_base64": "not base64!!",
@@ -6154,13 +6122,16 @@ class TestMCPAddDraftAttachmentJson:
             )
 
         assert _structured(result) == {"error": "invalid_base64"}
+        assert _graph_trail() == []
 
+    @respx.mock
     async def test_empty_content_is_rejected(self, mcp_server):
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "add_draft_attachment_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
                     "name": "notes.txt",
                     "content_base64": "",
@@ -6168,7 +6139,9 @@ class TestMCPAddDraftAttachmentJson:
             )
 
         assert _structured(result) == {"error": "invalid_base64"}
+        assert _graph_trail() == []
 
+    @respx.mock
     async def test_oversize_is_rejected_before_any_request(self, mcp_server, monkeypatch):
         from ms_graph import attachments as attachment_ops
 
@@ -6176,8 +6149,9 @@ class TestMCPAddDraftAttachmentJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "add_draft_attachment_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
                     "name": "notes.txt",
                     "content_base64": base64.b64encode(b"hello world").decode("ascii"),
@@ -6185,13 +6159,15 @@ class TestMCPAddDraftAttachmentJson:
             )
 
         assert _structured(result) == {"error": "too_large", "size": 11, "limit": 4}
+        assert _graph_trail() == []
 
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
             result = await _call(
                 mcp_server,
-                "add_draft_attachment_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
                     "name": "notes.txt",
                     "content_base64": base64.b64encode(b"hi").decode("ascii"),
@@ -6202,7 +6178,7 @@ class TestMCPAddDraftAttachmentJson:
 
 
 class TestMCPDraftFlow:
-    """create_reply_draft_json, update_draft_body, send_draft."""
+    """manage_draft: reply, then update_body, add_attachment, and send."""
 
     @respx.mock
     async def test_create_reply_draft_returns_id_and_link(self, mcp_server):
@@ -6212,8 +6188,12 @@ class TestMCPDraftFlow:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "create_reply_draft_json",
-                {"message_id": SAMPLE_MESSAGE["id"], "timezone": "America/New_York"},
+                "manage_draft",
+                {
+                    "action": "reply",
+                    "message_id": SAMPLE_MESSAGE["id"],
+                    "timezone": "America/New_York",
+                },
             )
 
         assert _structured(result) == {
@@ -6237,8 +6217,8 @@ class TestMCPDraftFlow:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "create_reply_draft_json",
-                {"message_id": SAMPLE_MESSAGE["id"], "timezone": "Bad/Zone"},
+                "manage_draft",
+                {"action": "reply", "message_id": SAMPLE_MESSAGE["id"], "timezone": "Bad/Zone"},
             )
 
         assert route.call_count == 2
@@ -6250,7 +6230,9 @@ class TestMCPDraftFlow:
             return_value=httpx.Response(201, json={"id": "d1"})
         )
         with _mock_token():
-            result = await _call(mcp_server, "create_reply_draft_json", {"message_id": "m1"})
+            result = await _call(
+                mcp_server, "manage_draft", {"action": "reply", "message_id": "m1"}
+            )
 
         assert _structured(result) == {
             "id": "d1",
@@ -6270,8 +6252,8 @@ class TestMCPDraftFlow:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "update_draft_body",
-                {"draft_id": "AAMkAGI2draft001=", "text": "On it."},
+                "manage_draft",
+                {"action": "update_body", "draft_id": "AAMkAGI2draft001=", "text": "On it."},
             )
 
         assert _structured(result) == {"ok": True}
@@ -6289,7 +6271,9 @@ class TestMCPDraftFlow:
             return_value=httpx.Response(202)
         )
         with _mock_token():
-            result = await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+            result = await _call(
+                mcp_server, "manage_draft", {"action": "send", "draft_id": "AAMkAGI2draft001="}
+            )
 
         data = _structured(result)
         assert data == {
@@ -6316,7 +6300,9 @@ class TestMCPDraftFlow:
             return_value=httpx.Response(202)
         )
         with _mock_token():
-            await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+            await _call(
+                mcp_server, "manage_draft", {"action": "send", "draft_id": "AAMkAGI2draft001="}
+            )
 
         methods_and_suffixes = [
             (method, path.split("/me/messages/")[-1]) for method, path in _graph_trail()
@@ -6339,22 +6325,30 @@ class TestMCPDraftFlow:
 
         with _mock_token():
             with pytest.raises(ToolError, match="404"):
-                await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+                await _call(
+                    mcp_server,
+                    "manage_draft",
+                    {"action": "send", "draft_id": "AAMkAGI2draft001="},
+                )
 
         assert not post_route.called
         assert not any(method == "POST" for method, _ in _graph_trail())
 
     async def test_send_draft_not_connected(self, mcp_server):
         with _mock_missing_connection():
-            result = await _call(mcp_server, "send_draft", {"draft_id": "d1"})
+            result = await _call(mcp_server, "manage_draft", {"action": "send", "draft_id": "d1"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPCreateDraftJson:
-    """create_draft_json — a fresh outbound draft, not a reply."""
+class TestMCPCreateDraftJsonContract:
+    """manage_draft action="create" — the dict create_draft_json froze.
+
+    A fresh outbound draft, not a reply.
+    """
 
     URL = f"{GRAPH_BASE_URL}/me/messages"
+    ACTION = {"action": "create"}
     EXPECTED = {
         "id": "AAMkAGI2draft888=",
         "web_link": "https://outlook.office.com/mail/deeplink/AAMkAGI2draft888",
@@ -6374,11 +6368,12 @@ class TestMCPCreateDraftJson:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "create_draft_json",
+                "manage_draft",
                 {
+                    **self.ACTION,
                     "to": "a@example.com, b@example.com",
                     "subject": "Lunch?",
-                    "body": "1 < 2, so noon works.",
+                    "text": "1 < 2, so noon works.",
                     "cc": "c@example.com",
                 },
             )
@@ -6401,7 +6396,9 @@ class TestMCPCreateDraftJson:
         """A skeleton the user finishes in Outlook through web_link."""
         route = respx.post(self.URL).mock(return_value=httpx.Response(201, json=SAMPLE_NEW_DRAFT))
         with _mock_token():
-            result = await _call(mcp_server, "create_draft_json", {"to": "", "subject": "Draft it"})
+            result = await _call(
+                mcp_server, "manage_draft", {**self.ACTION, "to": "", "subject": "Draft it"}
+            )
 
         assert _structured(result) == self.EXPECTED
         payload = json.loads(route.calls[0].request.content)
@@ -6415,8 +6412,8 @@ class TestMCPCreateDraftJson:
         with _mock_token():
             await _call(
                 mcp_server,
-                "create_draft_json",
-                {"to": "a@example.com", "subject": "s", "bcc": " x@example.com , "},
+                "manage_draft",
+                {**self.ACTION, "to": "a@example.com", "subject": "s", "bcc": " x@example.com , "},
             )
 
         payload = json.loads(route.calls[0].request.content)
@@ -6425,7 +6422,67 @@ class TestMCPCreateDraftJson:
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
             result = await _call(
-                mcp_server, "create_draft_json", {"to": "a@example.com", "subject": "s"}
+                mcp_server, "manage_draft", {**self.ACTION, "to": "a@example.com", "subject": "s"}
+            )
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+
+class TestMCPManageDraft:
+    """The dispatch itself: what the merged surface refuses before it acts."""
+
+    @respx.mock
+    async def test_unknown_action_is_refused(self, mcp_server):
+        with _mock_token():
+            result = await _call(mcp_server, "manage_draft", {"action": "discard"})
+
+        assert _structured(result) == {
+            "error": "invalid_action",
+            "reason": (
+                "Unknown action 'discard'. Must be: create, reply, update_body, "
+                "add_attachment, or send."
+            ),
+        }
+        assert _graph_trail() == []
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("args", "reason"),
+        [
+            ({"action": "reply"}, "message_id is required for the 'reply' action."),
+            (
+                {"action": "update_body", "text": "hi"},
+                "draft_id is required for the 'update_body' action.",
+            ),
+            (
+                {"action": "add_attachment", "name": "a.txt", "content_base64": "aGk="},
+                "draft_id is required for the 'add_attachment' action.",
+            ),
+            ({"action": "send"}, "draft_id is required for the 'send' action."),
+        ],
+    )
+    async def test_a_missing_id_is_refused_before_the_token(self, mcp_server, args, reason):
+        with _mock_token():
+            result = await _call(mcp_server, "manage_draft", args)
+
+        assert _structured(result) == {"error": "invalid_arguments", "reason": reason}
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_create_needs_nothing_but_the_action(self, mcp_server):
+        """An empty `to` is a legal skeleton draft, so create validates nothing."""
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_NEW_DRAFT)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "manage_draft", {"action": "create"})
+
+        assert _structured(result)["id"] == SAMPLE_NEW_DRAFT["id"]
+
+    async def test_not_connected(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(
+                mcp_server, "manage_draft", {"action": "update_body", "draft_id": "d", "text": "x"}
             )
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
@@ -8578,20 +8635,18 @@ GATED_MAIL_TOOLS = frozenset(
         "send_email",
         "manage_inbox_rules",
         "sync_mail",
-        "get_mail_detail",
-        "create_reply_draft_json",
     }
 )
 DELIBERATELY_UNGATED_MAIL_TOOLS = frozenset(
     {
         "mark_mail_read",
-        "update_draft_body",
-        "send_draft",
-        "add_draft_attachment_json",
-        "create_draft_json",
         "manage_mail_folders",
     }
 )
+# manage_draft gates per action — reply is gated, create/update_body/
+# add_attachment/send are deliberately not — so it belongs to neither list.
+# Its gating is pinned by the per-action tests in TestMailSenderPolicy.
+MIXED_GATING_MAIL_TOOLS = frozenset({"manage_draft"})
 MAIL_TOOL_WORDS = ("mail", "email", "draft", "inbox")
 
 
@@ -8725,19 +8780,14 @@ class TestMailSenderPolicy:
     # -- read_email ---------------------------------------------------------
 
     @respx.mock
-    async def test_read_email_refuses_external_before_marking_or_listing(
-        self, mcp_server, monkeypatch
-    ):
+    async def test_read_email_refuses_external_before_marking(self, mcp_server, monkeypatch):
         _policy_on(monkeypatch)
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{EXTERNAL_MSG_ID}").mock(
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE_DETAIL)
+        )
+        patch_route = respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
             return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE)
         )
-        patch_route = respx.patch(f"{GRAPH_BASE_URL}/me/messages/{EXTERNAL_MSG_ID}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE)
-        )
-        attachments_route = respx.get(
-            url__startswith=f"{GRAPH_BASE_URL}/me/messages/{EXTERNAL_MSG_ID}/attachments"
-        ).mock(return_value=httpx.Response(200, json=SAMPLE_ATTACHMENTS_RESPONSE))
 
         with _mock_token():
             result = await _call(
@@ -8746,12 +8796,11 @@ class TestMailSenderPolicy:
                 {"message_id": EXTERNAL_MSG_ID, "options": '{"mark_as_read": true}'},
             )
 
-        text = _get_text(result)
-        assert text == mail_policy.EXTERNAL_SENDER_TEXT
+        data = _structured(result)
+        assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
         assert not patch_route.called
-        assert not attachments_route.called
         assert _graph_trail() == [("GET", f"/v1.0/me/messages/{EXTERNAL_MSG_ID}")]
-        _assert_no_canary(text)
+        _assert_no_canary(data)
 
     @respx.mock
     async def test_read_email_refuses_mail_sent_on_behalf_of_an_insider(
@@ -8760,29 +8809,29 @@ class TestMailSenderPolicy:
         """from is internal, but an outside service pressed send."""
         _policy_on(monkeypatch)
         msg_id = SAMPLE_ONBEHALF_MESSAGE["id"]
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{msg_id}").mock(
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
             return_value=httpx.Response(200, json=SAMPLE_ONBEHALF_MESSAGE)
         )
         with _mock_token():
             result = await _call(mcp_server, "read_email", {"message_id": msg_id})
 
-        text = _get_text(result)
-        assert text == mail_policy.EXTERNAL_SENDER_TEXT
-        _assert_no_canary(text)
+        data = _structured(result)
+        assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
+        _assert_no_canary(data)
 
     @respx.mock
     async def test_read_email_internal_message_is_unchanged(self, mcp_server, monkeypatch):
         _policy_on(monkeypatch)
-        respx.get(f"{GRAPH_BASE_URL}/me/messages/{ATT_MSG_ID}").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE)
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_READ_DETAIL)
         )
         with _mock_token():
             result = await _call(mcp_server, "read_email", {"message_id": ATT_MSG_ID})
 
-        text = _get_text(result)
-        assert "Weekly Report" in text
-        assert "Here is the weekly report" in text
-        _assert_no_canary(text)
+        data = _structured(result)
+        assert data["subject"] == "Weekly Report"
+        assert "Here is the weekly report" in data["body_text"]
+        _assert_no_canary(data)
 
     # -- get_mail_attachment ------------------------------------------------
 
@@ -9012,14 +9061,17 @@ class TestMailSenderPolicy:
         _assert_no_canary(data)
 
     @respx.mock
-    async def test_get_mail_detail_returns_only_the_error(self, mcp_server, monkeypatch):
+    async def test_read_email_detail_select_carries_the_policy_fields(
+        self, mcp_server, monkeypatch
+    ):
+        """The one fetch must ask for what the refusal is decided on."""
         _policy_on(monkeypatch)
         route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
             return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE_DETAIL)
         )
         with _mock_token():
             result = await _call(
-                mcp_server, "get_mail_detail", {"message_id": SAMPLE_EXTERNAL_MESSAGE["id"]}
+                mcp_server, "read_email", {"message_id": SAMPLE_EXTERNAL_MESSAGE["id"]}
             )
 
         data = _structured(result)
@@ -9094,7 +9146,7 @@ class TestMailSenderPolicy:
         _assert_no_canary(data)
 
     @respx.mock
-    async def test_create_reply_draft_json_never_posts_create_reply(self, mcp_server, monkeypatch):
+    async def test_manage_draft_reply_never_posts_create_reply(self, mcp_server, monkeypatch):
         """Graph would build a draft quoting the original, from = the user."""
         _policy_on(monkeypatch)
         post_route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
@@ -9104,7 +9156,9 @@ class TestMailSenderPolicy:
             return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
         )
         with _mock_token():
-            result = await _call(mcp_server, "create_reply_draft_json", {"message_id": ATT_MSG_ID})
+            result = await _call(
+                mcp_server, "manage_draft", {"action": "reply", "message_id": ATT_MSG_ID}
+            )
 
         data = _structured(result)
         assert data == {"error": mail_policy.EXTERNAL_SENDER_ERROR}
@@ -9115,7 +9169,7 @@ class TestMailSenderPolicy:
     # -- outbound stays ungated --------------------------------------------
 
     @respx.mock
-    async def test_create_draft_json_is_not_gated(self, mcp_server, monkeypatch):
+    async def test_manage_draft_create_is_not_gated(self, mcp_server, monkeypatch):
         """Composing the user's own mail reads nothing that arrived from anyone."""
         _policy_on(monkeypatch)
         respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
@@ -9124,16 +9178,54 @@ class TestMailSenderPolicy:
         with _mock_token():
             result = await _call(
                 mcp_server,
-                "create_draft_json",
-                {"to": "a@example.com", "subject": "Lunch?", "body": "noon"},
+                "manage_draft",
+                {"action": "create", "to": "a@example.com", "subject": "Lunch?", "text": "noon"},
             )
 
         data = _structured(result)
         assert data["id"] == SAMPLE_NEW_DRAFT["id"]
         assert not _sender_checks()
+        assert SENDER_CHECK_PATH not in [path for _, path in _graph_trail()]
 
     @respx.mock
-    async def test_send_draft_is_not_gated(self, mcp_server, monkeypatch):
+    async def test_manage_draft_update_body_is_not_gated(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_REPLY_DRAFT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_draft",
+                {"action": "update_body", "draft_id": "AAMkAGI2draft001=", "text": "On it."},
+            )
+
+        assert _structured(result) == {"ok": True}
+        assert not _sender_checks()
+
+    @respx.mock
+    async def test_manage_draft_add_attachment_is_not_gated(self, mcp_server, monkeypatch):
+        _policy_on(monkeypatch)
+        respx.post(f"{DRAFT_BASE}/attachments").mock(
+            return_value=httpx.Response(201, json=SAMPLE_CREATED_ATTACHMENT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_draft",
+                {
+                    "action": "add_attachment",
+                    "draft_id": SAMPLE_DRAFT_MESSAGE["id"],
+                    "name": "notes.txt",
+                    "content_base64": base64.b64encode(b"hi").decode("ascii"),
+                },
+            )
+
+        assert _structured(result) == {"attachment_id": SAMPLE_CREATED_ATTACHMENT["id"]}
+        assert not _sender_checks()
+
+    @respx.mock
+    async def test_manage_draft_send_is_not_gated(self, mcp_server, monkeypatch):
         """The pre-send read selects no from/sender, so there is nothing to gate."""
         _policy_on(monkeypatch)
         respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
@@ -9143,10 +9235,13 @@ class TestMailSenderPolicy:
             return_value=httpx.Response(202)
         )
         with _mock_token():
-            result = await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+            result = await _call(
+                mcp_server, "manage_draft", {"action": "send", "draft_id": "AAMkAGI2draft001="}
+            )
 
         assert _structured(result)["ok"] is True
         assert not _sender_checks()
+        assert SENDER_CHECK_PATH not in [path for _, path in _graph_trail()]
 
     # -- forwarding inbox rules --------------------------------------------
 
@@ -9296,15 +9391,15 @@ class TestMailSenderPolicy:
 
     @respx.mock
     async def test_bad_config_is_not_mistaken_for_a_missing_connection(self, monkeypatch):
-        """A Desktop JSON tool raises on a bad allowlist instead of returning a dict."""
+        """A gated tool raises on a bad allowlist instead of returning a dict."""
         _policy_on(monkeypatch, "*")
         respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_EXTERNAL_MESSAGE_DETAIL)
+            return_value=httpx.Response(200, json=SAMPLE_SENDER_ONLY_EXTERNAL)
         )
-        from ms_graph_mcp import get_mail_detail
+        from ms_graph_mcp import manage_draft
 
         with _mock_token(), pytest.raises(mail_policy.MailPolicyConfigError):
-            await get_mail_detail(SAMPLE_EXTERNAL_MESSAGE["id"])
+            await manage_draft(action="reply", message_id=SAMPLE_EXTERNAL_MESSAGE["id"])
 
     async def test_lifespan_raises_on_bad_config(self, monkeypatch):
         """A pod that cannot parse its allowlist must never become ready."""
@@ -9333,7 +9428,7 @@ class TestMailSenderPolicy:
 
         classified = GATED_MAIL_TOOLS | DELIBERATELY_UNGATED_MAIL_TOOLS
         mail_tools = {n for n in names if any(word in n.lower() for word in MAIL_TOOL_WORDS)}
-        assert mail_tools - classified == set()
+        assert mail_tools - MIXED_GATING_MAIL_TOOLS - classified == set()
         # And every name we classified is still registered, so the lists cannot
         # rot into a false sense of coverage.
         assert classified - names == set()
@@ -9364,6 +9459,16 @@ RENAMED_TOOLS = [
     ("list_chats_page", "list_chats", {}),
     ("list_chat_messages_page", "read_teams_messages", {"chat_id": "c"}),
     ("send_chat_message_json", "send_teams_message", {"chat_id": "c", "text": "hi"}),
+    ("get_mail_detail", "read_email", {"message_id": "m"}),
+    ("create_reply_draft_json", "manage_draft", {"message_id": "m"}),
+    ("create_draft_json", "manage_draft", {"to": "", "subject": ""}),
+    ("update_draft_body", "manage_draft", {"draft_id": "d", "text": "x"}),
+    (
+        "add_draft_attachment_json",
+        "manage_draft",
+        {"draft_id": "d", "name": "a.txt", "content_base64": "aGk="},
+    ),
+    ("send_draft", "manage_draft", {"draft_id": "d"}),
 ]
 
 # The aliases whose target needs the Power BI connection rather than the Graph
@@ -9375,6 +9480,16 @@ PBI_ALIASES = {"list_powerbi_workspaces", "list_powerbi_content"}
 NEW_NAME_ARGS = {
     "upload_file": {"action": "upload", "filename": "x.txt", "content": "hi"},
     "send_chat_message_json": {"chat_id": "c", "message": "hi"},
+    "create_reply_draft_json": {"action": "reply", "message_id": "m"},
+    "create_draft_json": {"action": "create", "to": "", "subject": ""},
+    "update_draft_body": {"action": "update_body", "draft_id": "d", "text": "x"},
+    "add_draft_attachment_json": {
+        "action": "add_attachment",
+        "draft_id": "d",
+        "name": "a.txt",
+        "content_base64": "aGk=",
+    },
+    "send_draft": {"action": "send", "draft_id": "d"},
 }
 
 
@@ -9478,6 +9593,19 @@ class TestDeprecatedAliases:
                     "message": None,
                     "error": "invalid_attachments",
                     "reason": "attachments must be a JSON array",
+                },
+            ),
+            (
+                "add_draft_attachment_json",
+                {"draft_id": "d", "name": "  ", "content_base64": "aGk="},
+                {"error": "empty_name"},
+            ),
+            (
+                "update_draft_body",
+                {"draft_id": "", "text": "x"},
+                {
+                    "error": "invalid_arguments",
+                    "reason": "draft_id is required for the 'update_body' action.",
                 },
             ),
         ],
@@ -9661,6 +9789,37 @@ class TestDeprecatedAliases:
         assert len(_structured(result)["messages"]) == 3
 
     @respx.mock
+    async def test_the_mail_detail_alias_still_returns_the_frozen_keys(self, mcp_server):
+        """One GET, and the five keys the json name promised come back off it."""
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_mail_detail", {"message_id": SAMPLE_MESSAGE["id"]}
+            )
+
+        data = _structured(result)
+        assert data["body_text"] == "Here is the weekly report.\n\nBest,\nAlice"
+        assert data["headers"]["message-id"] == "<abc123@example.com>"
+        assert data["has_attachments"] is True
+        assert data["attachment_count"] == 3
+
+    @respx.mock
+    async def test_the_send_draft_alias_reads_then_sends(self, mcp_server):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DRAFT_FOR_SEND)
+        )
+        respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(202)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
+
+        assert _structured(result)["ok"] is True
+        assert [method for method, _ in _graph_trail()] == ["GET", "POST"]
+
+    @respx.mock
     async def test_the_merged_profile_alias_returns_the_merged_dict(self, mcp_server):
         respx.get(f"{GRAPH_BASE_URL}/me").mock(
             return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
@@ -9736,15 +9895,16 @@ class TestDraftsUnderPolicy:
     async def test_read_email_shows_a_draft(self, mcp_server, monkeypatch):
         _policy_on(monkeypatch)
         with _mock_token():
-            respx.get(f"{GRAPH_BASE_URL}/me/messages/{SAMPLE_UNSENT_DRAFT['id']}").mock(
-                return_value=httpx.Response(200, json=SAMPLE_UNSENT_DRAFT)
+            respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+                return_value=httpx.Response(200, json=SAMPLE_UNSENT_DRAFT_DETAIL)
             )
             result = await _call(
                 mcp_server, "read_email", {"message_id": SAMPLE_UNSENT_DRAFT["id"]}
             )
-            text = _get_text(result)
-            assert "DRAFT-BODY" in text
-            assert mail_policy.EXTERNAL_SENDER_TEXT not in text
+            data = _structured(result)
+            assert data["body_text"] == "DRAFT-BODY"
+            assert data["is_draft"] is True
+            assert "error" not in data
 
     @respx.mock
     async def test_attachment_check_admits_a_draft(self, mcp_server, monkeypatch):

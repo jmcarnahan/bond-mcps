@@ -26,6 +26,8 @@ from .conftest import (
     SAMPLE_EXTERNAL_MESSAGE,
     SAMPLE_MESSAGE,
     SAMPLE_MESSAGES_RESPONSE,
+    SAMPLE_NEW_DRAFT,
+    SAMPLE_READ_DETAIL,
     TEAMS_FILE_ATTACHMENT_ID,
 )
 
@@ -82,6 +84,26 @@ def mcp_server():
     return mcp
 
 
+@pytest.fixture
+def str_specimen_server(mcp_server):
+    """A str-returning tool to stand in for the ones production no longer has.
+
+    Every production tool now returns a dict, but the middleware still has to
+    leave a schema-advertising tool alone — fastmcp wraps a str result as
+    {"result": ...} and a client rejects a result that drops it. The fixture is
+    function-scoped, so the registration cannot leak into another test.
+    """
+
+    @mcp_server.tool(name="str_specimen")
+    async def str_specimen() -> str:
+        return "plain prose"
+
+    yield mcp_server
+    # mcp_server hands back the module-level singleton, so the registration has
+    # to be undone by hand rather than by fixture scope.
+    mcp_server.local_provider.remove_tool("str_specimen")
+
+
 class TestCompactPath:
     """No desktop header — the model-facing rendering."""
 
@@ -110,13 +132,13 @@ class TestCompactPath:
         assert text.startswith("error: not_connected")
         assert CONNECT_URL in text
 
-    async def test_str_tool_is_left_alone(self, mcp_server):
-        """Markdown tools advertise a generated output schema and must keep
-        their structured content, or the client rejects the result."""
-        result = await _call(mcp_server, "read_email", {"message_id": "x", "options": "not json"})
+    async def test_str_tool_is_left_alone(self, str_specimen_server):
+        """A tool that advertises an output schema must keep its structured
+        content, or the client rejects the result."""
+        result = await _call(str_specimen_server, "str_specimen")
 
-        assert result.structured_content == {"result": _get_text(result)}
-        assert _get_text(result).startswith("Parameter 'options' must be valid JSON")
+        assert _get_text(result) == "plain prose"
+        assert result.structured_content == {"result": "plain prose"}
 
     @respx.mock
     async def test_list_emails_renders_as_pipe_csv(self, mcp_server):
@@ -276,6 +298,90 @@ class TestCompactPath:
         )
 
     @respx.mock
+    async def test_read_email_renders_the_envelope_body_and_attachments(self, mcp_server):
+        """The inline logo is counted, not listed, and no headers show by default."""
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_READ_DETAIL)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "read_email", {"message_id": SAMPLE_MESSAGE["id"]})
+
+        assert result.structured_content is None
+        text = _get_text(result)
+        lines = text.split("\n")
+        assert lines[0] == "subject: Weekly Report"
+        assert lines[1] == "from: Alice Smith <alice@example.com>"
+        assert lines[2] == "to: Bob Jones <bob@example.com>"
+        # The cc entry has no name, so it renders as the bare address.
+        assert lines[3] == "cc: carol@example.com"
+        assert lines[4] == "received: 2025-12-15T10:30:00Z"
+        assert lines[5] == "is_read: false"
+        assert "Here is the weekly report." in text
+        assert "name|content_type|size|kind|id" in text
+        assert "report.pdf|application/pdf|1258291|file|AAMkAttachFile001=" in text
+        assert "logo.png" not in text
+        assert "inline: 1 not listed" in text
+        assert "headers:" not in text
+        assert "message-id" not in text
+
+    @respx.mock
+    async def test_read_email_include_headers_prints_them_without_the_hint(self, mcp_server):
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json=SAMPLE_READ_DETAIL)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "read_email",
+                {"message_id": SAMPLE_MESSAGE["id"], "options": '{"include_headers": true}'},
+            )
+
+        text = _get_text(result)
+        assert "headers:" in text
+        assert "message-id: <abc123@example.com>" in text
+        # The hint is consumed by the renderer, never printed.
+        assert "include_headers" not in text
+
+    async def test_read_email_error_still_leads_with_the_code(self, mcp_server):
+        """An override preempts the error rule, so it must delegate back to it."""
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "read_email", {"message_id": "m"})
+
+        assert result.structured_content is None
+        assert _get_text(result).split("\n")[0] == "error: not_connected"
+
+    @respx.mock
+    async def test_manage_draft_update_body_renders_as_one_line(self, mcp_server):
+        respx.patch(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
+            return_value=httpx.Response(200, json={"id": "d1"})
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "manage_draft",
+                {"action": "update_body", "draft_id": "d1", "text": "On it."},
+            )
+
+        assert result.structured_content is None
+        assert _get_text(result) == "ok: true"
+
+    @respx.mock
+    async def test_manage_draft_create_falls_back_to_compact_json(self, mcp_server):
+        """A draft nests its to/cc lists, so the hierarchical fallback applies."""
+        respx.post(f"{GRAPH_BASE_URL}/me/messages").mock(
+            return_value=httpx.Response(201, json=SAMPLE_NEW_DRAFT)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "manage_draft", {"action": "create", "to": "", "subject": "Lunch?"}
+            )
+
+        assert result.structured_content is None
+        data = json.loads(_get_text(result))
+        assert data["id"] == SAMPLE_NEW_DRAFT["id"]
+        assert data["web_link"] == SAMPLE_NEW_DRAFT["webLink"]
+
+    @respx.mock
     async def test_list_emails_notice_line_is_verbatim_under_the_policy(
         self, mcp_server, monkeypatch
     ):
@@ -311,14 +417,13 @@ class TestDesktopPath:
             "connect_url": CONNECT_URL,
         }
 
-    async def test_str_tool_is_identical_under_both_paths(self, mcp_server):
-        args: dict = {"message_id": "x", "options": "not json"}
-        compact = await _call(mcp_server, "read_email", args)
+    async def test_str_tool_is_identical_under_both_paths(self, str_specimen_server):
+        compact = await _call(str_specimen_server, "str_specimen")
         with _desktop_headers():
-            desktop = await _call(mcp_server, "read_email", args)
+            desktop = await _call(str_specimen_server, "str_specimen")
 
-        assert _get_text(compact) == _get_text(desktop)
-        assert desktop.structured_content == compact.structured_content
+        assert _get_text(compact) == _get_text(desktop) == "plain prose"
+        assert desktop.structured_content == compact.structured_content == {"result": "plain prose"}
 
 
 class TestOutputSchemas:
@@ -341,13 +446,9 @@ class TestOutputSchemas:
             "check_availability",
             "search_people",
             "sync_mail",
-            "get_mail_detail",
+            "read_email",
             "get_mail_attachment",
-            "create_reply_draft_json",
-            "create_draft_json",
-            "update_draft_body",
-            "add_draft_attachment_json",
-            "send_draft",
+            "manage_draft",
             "mark_mail_read",
             "list_chats",
             "get_chat_members",
