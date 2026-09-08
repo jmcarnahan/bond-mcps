@@ -13,12 +13,20 @@ from ms_graph.people import (
     DirectoryScopeMissingError,
     _search_clause,
     _search_path,
+    _user_path,
 )
 
-from .conftest import GRAPH_ERROR_403, SAMPLE_USERS_SEARCH_RESPONSE
+from .conftest import (
+    GRAPH_ERROR_403,
+    GRAPH_ERROR_404,
+    SAMPLE_DIRECTORY_USER,
+    SAMPLE_USERS_SEARCH_RESPONSE,
+)
 
 USERS_PREFIX = f"{GRAPH_BASE_URL}/users?"
+USER_PREFIX = f"{GRAPH_BASE_URL}/users/"
 GRAPH_ERROR_429 = {"error": {"code": "TooManyRequests", "message": "throttled"}}
+GUEST_UPN = "x_gmail.com#EXT#@t.onmicrosoft.com"
 
 
 def _query_of(request) -> dict:
@@ -199,3 +207,137 @@ class TestAsearchUsers:
             result = await people.asearch_users(client, "smi")
 
         assert result == []
+
+
+class TestUserPath:
+    def test_a_plain_id_is_one_segment(self):
+        assert _user_path("user-id-002") == "/users/user-id-002"
+
+    def test_an_at_sign_stays_bare_so_a_upn_reads_normally(self):
+        assert _user_path("ada@example.com") == "/users/ada@example.com"
+
+    def test_a_guest_upn_has_its_hashes_quoted(self):
+        """'#' would start a fragment, so a guest UPN must arrive percent-encoded."""
+        assert _user_path(GUEST_UPN) == "/users/x_gmail.com%23EXT%23@t.onmicrosoft.com"
+
+    def test_a_slash_cannot_splice_a_second_segment(self):
+        assert _user_path("a/b") == "/users/a%2Fb"
+
+    def test_a_question_mark_cannot_start_a_query(self):
+        assert _user_path("a?$select=x") == "/users/a%3F%24select%3Dx"
+
+
+class TestGetUser:
+    @respx.mock
+    def test_the_path_and_select(self):
+        route = respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        with GraphClient("tok") as client:
+            assert people.get_user(client, "user-id-002") == SAMPLE_DIRECTORY_USER
+
+        request = route.calls[0].request
+        assert request.url.path == "/v1.0/users/user-id-002"
+        assert _query_of(request)["$select"] == [DIRECTORY_SELECT]
+
+    @respx.mock
+    def test_a_guest_upn_is_quoted_on_the_wire(self):
+        route = respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        with GraphClient("tok") as client:
+            people.get_user(client, GUEST_UPN)
+
+        sent = str(route.calls[0].request.url)
+        assert "%23EXT%23" in sent
+        assert "@t.onmicrosoft.com" in sent
+
+    @respx.mock
+    def test_a_slash_in_the_user_cannot_add_a_segment(self):
+        route = respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        with GraphClient("tok") as client:
+            people.get_user(client, "a/b")
+
+        sent = str(route.calls[0].request.url)
+        assert "%2Fb" in sent
+        assert sent.count("/users/") == 1
+
+    @respx.mock
+    def test_403_is_the_missing_directory_scope(self):
+        respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with GraphClient("tok") as client:
+            with pytest.raises(DirectoryScopeMissingError):
+                people.get_user(client, "user-id-002")
+
+    @respx.mock
+    def test_404_propagates_so_the_caller_can_say_user_not_found(self):
+        respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with GraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                people.get_user(client, "nobody@example.com")
+
+        assert exc_info.value.status_code == 404
+
+
+class TestAgetUser:
+    @respx.mock
+    async def test_the_path_and_select(self):
+        route = respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        async with AsyncGraphClient("tok") as client:
+            assert await people.aget_user(client, "user-id-002") == SAMPLE_DIRECTORY_USER
+
+        request = route.calls[0].request
+        assert request.url.path == "/v1.0/users/user-id-002"
+        assert _query_of(request)["$select"] == [DIRECTORY_SELECT]
+
+    @respx.mock
+    async def test_a_guest_upn_is_quoted_on_the_wire(self):
+        route = respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await people.aget_user(client, GUEST_UPN)
+
+        sent = str(route.calls[0].request.url)
+        assert "%23EXT%23" in sent
+        assert "@t.onmicrosoft.com" in sent
+
+    @respx.mock
+    async def test_a_slash_in_the_user_cannot_add_a_segment(self):
+        route = respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        async with AsyncGraphClient("tok") as client:
+            await people.aget_user(client, "a/b")
+
+        sent = str(route.calls[0].request.url)
+        assert "%2Fb" in sent
+        assert sent.count("/users/") == 1
+
+    @respx.mock
+    async def test_403_is_the_missing_directory_scope(self):
+        respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(DirectoryScopeMissingError):
+                await people.aget_user(client, "user-id-002")
+
+    @respx.mock
+    async def test_404_propagates_so_the_caller_can_say_user_not_found(self):
+        respx.get(url__startswith=USER_PREFIX).mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc_info:
+                await people.aget_user(client, "nobody@example.com")
+
+        assert exc_info.value.status_code == 404

@@ -57,6 +57,7 @@ from .conftest import (
     SAMPLE_DELTA_PAGE_FINAL,
     SAMPLE_DELTA_PAGE_NEXT,
     SAMPLE_DELTA_TOMBSTONE,
+    SAMPLE_DIRECTORY_USER,
     SAMPLE_DRAFT_FOR_SEND,
     SAMPLE_DRAFT_MESSAGE,
     SAMPLE_DRIVE_CHILDREN_RESPONSE,
@@ -96,6 +97,7 @@ from .conftest import (
     SAMPLE_PBI_EXPORT_SUCCEEDED,
     SAMPLE_PBI_REPORTS_RESPONSE,
     SAMPLE_PBI_WORKSPACES_RESPONSE,
+    SAMPLE_PHOTO_METADATA,
     SAMPLE_READ_DETAIL,
     SAMPLE_REFERENCE_ATTACHMENT,
     SAMPLE_REPLY_DRAFT,
@@ -389,6 +391,39 @@ def mcp_server():
 # ---------------------------------------------------------------------------
 
 
+DIRECTORY_USER_ID = "user-id-002"
+USER_URL_PREFIX = f"{GRAPH_BASE_URL}/users/{DIRECTORY_USER_ID}"
+USER_PHOTO_URL = f"{USER_URL_PREFIX}/photo"
+USER_PHOTO_240_URL = f"{USER_URL_PREFIX}/photos/240x240/$value"
+ME_PHOTO_URL = f"{GRAPH_BASE_URL}/me/photo"
+ME_PHOTO_240_URL = f"{GRAPH_BASE_URL}/me/photos/240x240/$value"
+ME_PHOTO_ORIGINAL_URL = f"{GRAPH_BASE_URL}/me/photo/$value"
+PHOTO_BYTES = b"\x89PNGfake"
+# The one dict every "deployed without User.ReadBasic.All" test pins.
+SCOPE_MISSING = {
+    "error": "directory_scope_missing",
+    "reason": (
+        "Could not retrieve the profile: this connection lacks the User.ReadBasic.All permission."
+    ),
+}
+
+
+def _mock_me_with_photo(metadata):
+    """Route /me, /me/mailboxSettings and /me/photo; metadata None means no
+    photo is set (Graph answers 404 ImageNotFound)."""
+    respx.get(f"{GRAPH_BASE_URL}/me").mock(
+        return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+    )
+    respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+        return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
+    )
+    respx.get(ME_PHOTO_URL).mock(
+        return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        if metadata is None
+        else httpx.Response(200, json=metadata)
+    )
+
+
 class TestMCPProfileTools:
     """Test user profile MCP tools via in-process FastMCP client."""
 
@@ -439,6 +474,398 @@ class TestMCPProfileTools:
     async def test_not_connected(self, mcp_server):
         with _mock_missing_connection():
             result = await _call(mcp_server, "get_profile")
+
+        assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
+
+    # -- another directory user -------------------------------------------
+
+    @respx.mock
+    async def test_no_arguments_keep_todays_request_trail_and_keys(self, mcp_server):
+        """The contract pin: extra params must not change the default call."""
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile")
+
+        assert _graph_trail() == [("GET", "/v1.0/me"), ("GET", "/v1.0/me/mailboxSettings")]
+        assert set(_structured(result)) == {
+            "id",
+            "display_name",
+            "mail",
+            "user_principal_name",
+            "mailbox_address",
+            "job_title",
+        }
+
+    @respx.mock
+    async def test_a_user_is_read_from_the_directory(self, mcp_server):
+        """No mailboxSettings call for someone else, so mailbox_address is null."""
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"user": DIRECTORY_USER_ID})
+
+        assert _structured(result) == {
+            "id": "user-id-002",
+            "display_name": "Ada Lovelace",
+            "mail": "ada@example.com",
+            "user_principal_name": "ada@example.com",
+            "mailbox_address": None,
+            "job_title": "Engineer",
+        }
+        assert _graph_trail() == [("GET", f"/v1.0/users/{DIRECTORY_USER_ID}")]
+
+    @respx.mock
+    async def test_an_unknown_user_is_user_not_found(self, mcp_server):
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(404, json=GRAPH_ERROR_404)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"user": DIRECTORY_USER_ID})
+
+        assert _structured(result) == {"error": "user_not_found"}
+
+    @respx.mock
+    async def test_a_user_graph_cannot_parse_is_invalid_arguments(self, mcp_server):
+        """A 400 is permanent, so it is an error dict rather than a tool error."""
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(
+                400, json={"error": {"code": "Request_BadRequest", "message": "bad id"}}
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"user": DIRECTORY_USER_ID})
+
+        data = _structured(result)
+        assert data["error"] == "invalid_arguments"
+        assert DIRECTORY_USER_ID in data["reason"]
+
+    @respx.mock
+    async def test_a_blank_user_is_the_signed_in_user(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"user": "   "})
+
+        assert _structured(result)["id"] == "user-id-001"
+        assert _graph_trail() == [("GET", "/v1.0/me"), ("GET", "/v1.0/me/mailboxSettings")]
+
+    # -- deployed without User.ReadBasic.All -------------------------------
+    #
+    # Every one of these must return the scope error ALONE: no profile data,
+    # no photo keys, no exception, whichever request 403s.
+
+    @respx.mock
+    async def test_a_403_on_the_user_lookup_is_the_scope_error_alone(self, mcp_server):
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"user": DIRECTORY_USER_ID})
+
+        assert _structured(result) == SCOPE_MISSING
+
+    @respx.mock
+    async def test_a_403_on_the_lookup_never_reaches_the_photo(self, mcp_server):
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(403, json=GRAPH_ERROR_403)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_profile", {"user": DIRECTORY_USER_ID, "photo": "bytes"}
+            )
+
+        assert _structured(result) == SCOPE_MISSING
+        assert _graph_trail() == [("GET", f"/v1.0/users/{DIRECTORY_USER_ID}")]
+
+    @respx.mock
+    async def test_a_403_on_a_users_photo_metadata_drops_the_fetched_profile(self, mcp_server):
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        respx.get(USER_PHOTO_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_profile", {"user": DIRECTORY_USER_ID, "photo": "metadata"}
+            )
+
+        assert _structured(result) == SCOPE_MISSING
+
+    @respx.mock
+    async def test_a_403_on_a_users_photo_bytes_drops_the_fetched_profile(self, mcp_server):
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        respx.get(USER_PHOTO_URL).mock(return_value=httpx.Response(200, json=SAMPLE_PHOTO_METADATA))
+        respx.get(USER_PHOTO_240_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_profile", {"user": DIRECTORY_USER_ID, "photo": "bytes"}
+            )
+
+        assert _structured(result) == SCOPE_MISSING
+
+    @respx.mock
+    async def test_a_403_on_my_own_photo_metadata_is_the_scope_error_alone(self, mcp_server):
+        """A tenant policy can deny even /me/photo; the profile is dropped."""
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
+        )
+        respx.get(ME_PHOTO_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "metadata"})
+
+        assert _structured(result) == SCOPE_MISSING
+
+    @respx.mock
+    async def test_a_403_on_my_own_photo_bytes_is_the_scope_error_alone(self, mcp_server):
+        respx.get(f"{GRAPH_BASE_URL}/me").mock(
+            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
+        )
+        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
+            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
+        )
+        respx.get(ME_PHOTO_URL).mock(return_value=httpx.Response(200, json=SAMPLE_PHOTO_METADATA))
+        respx.get(ME_PHOTO_240_URL).mock(return_value=httpx.Response(403, json=GRAPH_ERROR_403))
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "bytes"})
+
+        assert _structured(result) == SCOPE_MISSING
+
+    # -- photo metadata ----------------------------------------------------
+
+    @respx.mock
+    async def test_photo_metadata_adds_the_four_photo_keys(self, mcp_server):
+        _mock_me_with_photo(SAMPLE_PHOTO_METADATA)
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "metadata"})
+
+        assert _structured(result) == {
+            "id": "user-id-001",
+            "display_name": "Test User",
+            "mail": "user@example.com",
+            "user_principal_name": "user@example.com",
+            "mailbox_address": "mailbox@example.com",
+            "job_title": None,
+            "has_photo": True,
+            "photo_width": 256,
+            "photo_height": 256,
+            "photo_content_type": "image/jpeg",
+        }
+
+    @respx.mock
+    async def test_no_photo_set_is_a_clean_result_not_an_error(self, mcp_server):
+        _mock_me_with_photo(None)
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "metadata"})
+
+        data = _structured(result)
+        assert data["has_photo"] is False
+        assert data["photo_width"] is None
+        assert data["photo_height"] is None
+        assert data["photo_content_type"] is None
+        assert _graph_trail()[-1] == ("GET", "/v1.0/me/photo")
+
+    # -- photo bytes -------------------------------------------------------
+
+    @respx.mock
+    async def test_photo_bytes_default_to_the_240_variant(self, mcp_server):
+        _mock_me_with_photo(SAMPLE_PHOTO_METADATA)
+        respx.get(ME_PHOTO_240_URL).mock(
+            return_value=httpx.Response(
+                200, content=PHOTO_BYTES, headers={"Content-Type": "image/png"}
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "bytes"})
+
+        data = _structured(result)
+        assert _graph_trail() == [
+            ("GET", "/v1.0/me"),
+            ("GET", "/v1.0/me/mailboxSettings"),
+            ("GET", "/v1.0/me/photo"),
+            ("GET", "/v1.0/me/photos/240x240/$value"),
+        ]
+        assert base64.b64decode(data["content_base64"]) == PHOTO_BYTES
+        assert data["content_type"] == "image/png"
+        assert data["size"] == len(PHOTO_BYTES)
+        assert data["photo_size"] == "240x240"
+        assert set(data) == {
+            "id",
+            "display_name",
+            "mail",
+            "user_principal_name",
+            "mailbox_address",
+            "job_title",
+            "has_photo",
+            "photo_width",
+            "photo_height",
+            "photo_content_type",
+            "content_base64",
+            "content_type",
+            "size",
+            "photo_size",
+        }
+
+    @respx.mock
+    async def test_photo_size_original_reads_the_stored_image(self, mcp_server):
+        _mock_me_with_photo(SAMPLE_PHOTO_METADATA)
+        respx.get(ME_PHOTO_ORIGINAL_URL).mock(
+            return_value=httpx.Response(
+                200, content=PHOTO_BYTES, headers={"Content-Type": "image/png"}
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_profile", {"photo": "bytes", "photo_size": "original"}
+            )
+
+        assert _graph_trail()[-1] == ("GET", "/v1.0/me/photo/$value")
+        assert _structured(result)["photo_size"] == "original"
+
+    @respx.mock
+    async def test_a_missing_content_type_falls_back_to_the_metadata_mime(self, mcp_server):
+        _mock_me_with_photo(SAMPLE_PHOTO_METADATA)
+        respx.get(ME_PHOTO_240_URL).mock(return_value=httpx.Response(200, content=PHOTO_BYTES))
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "bytes"})
+
+        assert _structured(result)["content_type"] == "image/jpeg"
+
+    @respx.mock
+    async def test_photo_bytes_with_no_photo_leaves_every_added_key_null(self, mcp_server):
+        _mock_me_with_photo(None)
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "bytes"})
+
+        data = _structured(result)
+        assert data["has_photo"] is False
+        assert data["content_base64"] is None
+        assert data["content_type"] is None
+        assert data["size"] is None
+        assert data["photo_size"] is None
+        assert not [path for _, path in _graph_trail() if path.endswith("$value")]
+
+    @respx.mock
+    async def test_a_photo_that_vanishes_between_requests_is_reported_absent(self, mcp_server):
+        """Metadata said yes, $value said 404: every photo key agrees on "none"."""
+        _mock_me_with_photo(SAMPLE_PHOTO_METADATA)
+        respx.get(ME_PHOTO_240_URL).mock(return_value=httpx.Response(404, json=GRAPH_ERROR_404))
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "bytes"})
+
+        data = _structured(result)
+        assert data["has_photo"] is False
+        assert data["photo_width"] is None
+        assert data["photo_content_type"] is None
+        assert data["content_base64"] is None
+        assert data["photo_size"] is None
+
+    @respx.mock
+    async def test_a_users_photo_bytes_walk_the_users_paths(self, mcp_server):
+        respx.get(url__startswith=f"{USER_URL_PREFIX}?").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DIRECTORY_USER)
+        )
+        respx.get(USER_PHOTO_URL).mock(return_value=httpx.Response(200, json=SAMPLE_PHOTO_METADATA))
+        respx.get(USER_PHOTO_240_URL).mock(
+            return_value=httpx.Response(
+                200, content=PHOTO_BYTES, headers={"Content-Type": "image/png"}
+            )
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "get_profile", {"user": DIRECTORY_USER_ID, "photo": "bytes"}
+            )
+
+        assert _graph_trail() == [
+            ("GET", f"/v1.0/users/{DIRECTORY_USER_ID}"),
+            ("GET", f"/v1.0/users/{DIRECTORY_USER_ID}/photo"),
+            ("GET", f"/v1.0/users/{DIRECTORY_USER_ID}/photos/240x240/$value"),
+        ]
+        assert base64.b64decode(_structured(result)["content_base64"]) == PHOTO_BYTES
+
+    @respx.mock
+    async def test_the_photo_mode_word_tolerates_case_and_space(self, mcp_server):
+        _mock_me_with_photo(SAMPLE_PHOTO_METADATA)
+        respx.get(ME_PHOTO_240_URL).mock(
+            return_value=httpx.Response(
+                200, content=PHOTO_BYTES, headers={"Content-Type": "image/png"}
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "Bytes "})
+
+        assert _structured(result)["photo_size"] == "240x240"
+
+    # -- rejected before the token -----------------------------------------
+
+    @respx.mock
+    async def test_an_unknown_photo_mode_is_rejected_without_a_token(self, mcp_server):
+        result = await _call(mcp_server, "get_profile", {"photo": "thumbnail"})
+
+        data = _structured(result)
+        assert data["error"] == "invalid_photo"
+        assert "metadata, bytes" in data["reason"]
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_a_size_graph_does_not_serve_is_rejected_without_a_token(self, mcp_server):
+        result = await _call(mcp_server, "get_profile", {"photo": "bytes", "photo_size": "100x100"})
+
+        data = _structured(result)
+        assert data["error"] == "invalid_photo_size"
+        assert "48x48" in data["reason"]
+        assert _graph_trail() == []
+
+    @respx.mock
+    async def test_a_size_without_the_bytes_mode_is_rejected(self, mcp_server):
+        result = await _call(
+            mcp_server, "get_profile", {"photo": "metadata", "photo_size": "96x96"}
+        )
+
+        assert _structured(result) == {
+            "error": "invalid_photo_size",
+            "reason": "photo_size only applies to photo='bytes'",
+        }
+        assert _graph_trail() == []
+
+    # -- caps and connection ------------------------------------------------
+
+    @respx.mock
+    async def test_a_photo_over_the_json_cap_is_refused(self, mcp_server, monkeypatch):
+        from ms_graph import attachments as attachment_ops
+
+        monkeypatch.setattr(attachment_ops, "MAX_JSON_ATTACHMENT_BYTES", 4)
+        _mock_me_with_photo(SAMPLE_PHOTO_METADATA)
+        respx.get(ME_PHOTO_240_URL).mock(
+            return_value=httpx.Response(
+                200, content=PHOTO_BYTES, headers={"Content-Type": "image/png"}
+            )
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "get_profile", {"photo": "bytes"})
+
+        assert _structured(result) == {
+            "error": "too_large",
+            "size": len(PHOTO_BYTES),
+            "limit": 4,
+        }
+
+    async def test_not_connected_with_a_photo_request(self, mcp_server):
+        with _mock_missing_connection():
+            result = await _call(mcp_server, "get_profile", {"photo": "bytes"})
 
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 

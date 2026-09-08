@@ -45,6 +45,21 @@ SAMPLE_USER_PROFILE = {
     "jobTitle": None,
 }
 
+SAMPLE_DIRECTORY_USER = {
+    "id": "user-id-002",
+    "displayName": "Ada Lovelace",
+    "mail": "ada@example.com",
+    "userPrincipalName": "ada@example.com",
+    "jobTitle": "Engineer",
+}
+
+SAMPLE_PHOTO_METADATA = {
+    "id": "default",
+    "width": 256,
+    "height": 256,
+    "@odata.mediaContentType": "image/jpeg",
+}
+
 SAMPLE_MAILBOX_SETTINGS = {
     "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('mailbox%40example.com')/mailboxSettings",
     "timeZone": "Pacific Standard Time",
