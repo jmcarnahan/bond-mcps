@@ -435,41 +435,6 @@ Five sets of tools merged outright:
   is the user. The other four touch only the user's own outbound mail and are
   deliberately ungated.
 
-#### Hidden aliases
-
-Every old name still answers, but is tagged `deprecated-alias` and hidden from
-`tools/list`, so a model never sees two names for one tool. They exist for the
-desktop client, which migrates on its own schedule; they come out in a later
-round once it has. Where an alias preserves a quirk that does not survive at the
-new name, the quirk is named here and nowhere else.
-
-| Old name (hidden) | Answers as | Quirk it preserves |
-|---|---|---|
-| `get_user_profile` | `get_profile` | |
-| `get_profile_json` | `get_profile` | |
-| `search_people_json` | `search_people` | |
-| `list_mail_delta` | `sync_mail` | |
-| `mark_mail_read_json` | `mark_mail_read` | |
-| `get_chat_members_json` | `get_chat_members` | |
-| `ensure_chat_json` | `ensure_chat` | |
-| `mark_chat_read_json` | `mark_chat_read` | |
-| `inspect_file_json` | `inspect_file` | |
-| `list_powerbi_workspaces` | `list_powerbi` | no `workspace_id` parameter |
-| `list_powerbi_content` | `list_powerbi` | |
-| `upload_file` | `manage_file` | pins `action="upload"`; `folder_path` / `site_id` stay flat parameters |
-| `get_email_attachment` | `get_mail_attachment` | `mode="base64"` still means `bytes` |
-| `get_mail_attachment_json` | `get_mail_attachment` | `mode` still defaults to `bytes`, not `text` |
-| `get_chat_attachment_json` | `get_teams_attachment` | `thumbnail` is still a flat parameter |
-| `list_chats_page` | `list_chats` | |
-| `list_chat_messages_page` | `read_teams_messages` | pins page mode (`{"page": true}`) |
-| `send_chat_message_json` | `send_teams_message` | the prose errors `"chat_id must not be empty"` and `"text must not be empty"`, where the new name answers `invalid_arguments` |
-| `get_mail_detail` | `read_email` | |
-| `create_reply_draft_json` | `manage_draft` | pins `action="reply"` |
-| `create_draft_json` | `manage_draft` | pins `action="create"`; its `body` parameter, renamed `text` at the new name |
-| `update_draft_body` | `manage_draft` | pins `action="update_body"` |
-| `add_draft_attachment_json` | `manage_draft` | pins `action="add_attachment"` |
-| `send_draft` | `manage_draft` | pins `action="send"` |
-
 #### Permanent errors
 
 A missing Microsoft connection returns `{"error": "not_connected", "connect_url": ...}` rather than raising, so a client can render a connect prompt. `connect_url` is null in laptop (MSAL) mode, which has no per-user connect endpoint. Argument-validation failures come back as error dicts rather than prose — `invalid_options`, `invalid_action`, `invalid_arguments`, `invalid_attachments`, `invalid_date`, `missing_rule_id`, `missing_folder_id`, `no_data`, and `folder_not_found`. The Teams write tools (`mark_chat_read`, `send_teams_message`) return a structured `"teams_unavailable"` error (with a `reason` on `send_teams_message`, `list_chats`, and `read_teams_messages`) for the permanent no-Teams-license 403, which a client must not retry; `list_teams`, `get_teams_activity`, and `search_teams_messages` spell that same 403 `teams_not_available`, and `search_teams_messages` adds `search_unsupported` for the consumer accounts Microsoft Search does not index. The mail attachment surfaces (`get_mail_attachment`, `manage_draft` with `action="add_attachment"`) likewise return structured permanent errors — `invalid_mode`, `invalid_options`, `too_large`, `reference`, `empty_name`, `invalid_base64` — which a client must not retry either; `manage_draft` adds `invalid_action` for an unknown action word and `invalid_arguments` for a missing `draft_id` or `message_id`, both answered before any request; `get_mail_attachment` in `bytes` mode caps content at 10 MB and reports `too_large` above it, decided from the metadata so nothing is downloaded. The Teams attachment reader (`get_teams_attachment`) returns `not_found` (whose `available` list names the ids the message does carry), `access_denied`, `no_thumbnail`, `invalid_thumbnail`, `is_folder`, `invalid_arguments`, `teams_unavailable`, and `too_large` — it shares the same 10 MB cap, decided from the driveItem size before a file is downloaded — `send_teams_message` returns `invalid_attachments` (bad JSON or an entry missing `name`/`content_base64`) and `files_scope_missing` (the connection lacks `Files.ReadWrite`), `list_chats` and `read_teams_messages` return `no_identity` when a mark-as-read option cannot name the signed-in user and `read_teams_messages` adds `invalid_date` for a malformed `since`, and `inspect_file` returns `missing_target`, `invalid_options`, `invalid_mode`, `invalid_thumbnail`, `is_folder`, `no_thumbnail`, `too_large` (its `bytes` and `thumbnail` modes share the same 10 MB cap, decided from the driveItem size before anything is downloaded and re-checked on what arrived), `access_denied`, `not_found`, and `invalid_link`; all of these are permanent too. `list_files` maps an unusable sharing link to `access_denied`, `not_found`, or `invalid_link`; `manage_file` returns `not_found` for a missing item and `too_large` (with the byte `limit`) for upload content over the 4 MB simple-upload cap; `edit_document` returns `edit_failed` when a document rejects an edit operation. `search_people` returns `directory_scope_missing` when the connection lacks `User.ReadBasic.All`, and `get_profile` returns the same code — carrying a `reason` and returned alone, with no profile data and no photo keys — whenever a `user` lookup or a photo request meets that 403; `get_profile` also returns `user_not_found` for an id or UPN the directory does not know, `invalid_arguments` for a `user` value Graph cannot parse as either, and `invalid_photo` (a mode word other than `metadata` or `bytes`), `invalid_photo_size` (a size Graph does not serve, or any size without `photo="bytes"`), and `too_large` for an image over the 10 MB JSON cap. Meanwhile `ensure_chat` returns `invalid_members` (an id that is not a Graph user id or UPN), `no_identity` (the signed-in user cannot be read off the token), and `no_members` (nobody left after dropping blanks and the caller), as well as `teams_unavailable`; these are permanent as well. `manage_draft` with `action="send"` reads the draft's `conversation_id` and `internet_message_id` before it sends and returns them, so a client can store its own copy of the sent mail at once and match it to the Sent Items copy by `internet_message_id`. The three paging tools (`sync_mail`, `list_chats`, `read_teams_messages`) return `invalid_cursor` when the cursor they were given is not a Graph URL: cursors only ever come from those tools, and the server refuses to send the bearer token anywhere but Graph. `read_email`, `get_mail_attachment`, and `manage_draft` with `action="reply"` return `external_sender` as a dict when the mail sender policy hides the message, which is permanent as well, and `connection_status` reports the policy's state under `mail_policy` so a client can explain the refusal. Every other failure — throttling, Graph 5xx — propagates as a tool error, which the client reads as "transient, retry later".

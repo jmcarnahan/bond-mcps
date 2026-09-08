@@ -1923,8 +1923,8 @@ class TestMCPGetMailAttachment:
         }
 
     @respx.mock
-    async def test_base64_is_not_a_mode_at_this_name(self, mcp_server):
-        """The synonym lives on the get_email_attachment alias, not here."""
+    async def test_base64_is_not_a_mode(self, mcp_server):
+        """base64 is not one of this tool's modes; the four valid ones are."""
         with _mock_token():
             result = await _call(
                 mcp_server,
@@ -5145,24 +5145,6 @@ class TestMCPInspectFileModes:
         assert "text" not in _structured(result)
         assert _graph_trail() == [("GET", "/v1.0/me/drive/items/file-id-001")]
 
-    @respx.mock
-    async def test_the_json_alias_still_answers_the_legacy_shape(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me/drive/items/file-id-001").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRIVE_ITEM_FILE)
-        )
-        with _mock_token():
-            result = await _call(mcp_server, "inspect_file_json", {"item_id": "file-id-001"})
-
-        assert _structured(result) == {
-            "item_id": "file-id-001",
-            "name": "report.csv",
-            "size": 1024,
-            "content_type": "text/csv",
-            "web_url": SAMPLE_DRIVE_ITEM_FILE["webUrl"],
-            "modified": "2025-12-15T10:30:00Z",
-            "is_folder": False,
-        }
-
 
 class TestMCPUploadTool:
     """manage_file(action="upload") — the create-or-overwrite branch."""
@@ -7605,12 +7587,12 @@ class TestMCPMarkChatRead:
         assert _structured(result) == {"error": "not_connected", "connect_url": CONNECT_URL}
 
 
-class TestMCPSendChatMessageJsonContract:
-    """The send contract send_chat_message_json froze, at the new name.
+class TestMCPSendTeamsMessageFrozenContract:
+    """The send payload shape the desktop parses, pinned at send_teams_message.
 
-    The merged tool takes the body as `message` and adds `sent_to`; the two
-    prose errors the json name answers with survive only on the alias, so the
-    two tests that pin them call the alias deliberately.
+    The body travels as `message`; the created message comes back flattened
+    with `sent_to`, and an attachment is uploaded and shared before the card
+    is posted. Empty-input refusals are covered in TestMCPSendTeamsMessage.
     """
 
     @respx.mock
@@ -7662,36 +7644,6 @@ class TestMCPSendChatMessageJsonContract:
         assert json.loads(route.calls[0].request.content) == {
             "body": {"contentType": "text", "content": "a < b"}
         }
-
-    @respx.mock
-    async def test_empty_text_makes_no_graph_calls(self, mcp_server):
-        """Through the alias: the merged tool answers invalid_arguments here."""
-        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "send_chat_message_json",
-                {"chat_id": "chat-1on1-001", "text": "   "},
-            )
-
-        assert _structured(result) == {"message": None, "error": "text must not be empty"}
-        assert route.call_count == 0
-
-    @respx.mock
-    async def test_empty_chat_id_makes_no_graph_calls(self, mcp_server):
-        """Through the alias, for the same reason."""
-        route = respx.post(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
-            return_value=httpx.Response(201, json=SAMPLE_CHAT_MESSAGE_CREATED)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server, "send_chat_message_json", {"chat_id": "", "text": "hello"}
-            )
-
-        assert _structured(result) == {"message": None, "error": "chat_id must not be empty"}
-        assert route.call_count == 0
 
     @respx.mock
     async def test_an_attachment_is_uploaded_shared_and_comes_back_on_the_message(self, mcp_server):
@@ -10159,410 +10111,59 @@ class TestMailSenderPolicy:
         assert classified - names == set()
 
 
-# (old name, new name, minimal args) for every tool renamed in the round that
-# introduced the alias forwarders.
-RENAMED_TOOLS = [
-    ("get_user_profile", "get_profile", {}),
-    ("get_profile_json", "get_profile", {}),
-    ("search_people_json", "search_people", {"query": "x"}),
-    ("list_mail_delta", "sync_mail", {}),
-    ("mark_mail_read_json", "mark_mail_read", {"message_ids": "[]"}),
-    ("get_chat_members_json", "get_chat_members", {"chat_id": "c"}),
-    ("ensure_chat_json", "ensure_chat", {"user_ids": "u"}),
-    ("mark_chat_read_json", "mark_chat_read", {"chat_id": "c"}),
-    ("inspect_file_json", "inspect_file", {"item_id": "x"}),
-    ("list_powerbi_workspaces", "list_powerbi", {}),
-    ("list_powerbi_content", "list_powerbi", {"workspace_id": "ws-1"}),
-    ("upload_file", "manage_file", {"filename": "x.txt", "content": "hi"}),
-    ("get_email_attachment", "get_mail_attachment", {"message_id": "m", "attachment_id": "a"}),
-    ("get_mail_attachment_json", "get_mail_attachment", {"message_id": "m", "attachment_id": "a"}),
-    (
-        "get_chat_attachment_json",
-        "get_teams_attachment",
-        {"chat_id": "c", "message_id": "m", "attachment_id": "a"},
-    ),
-    ("list_chats_page", "list_chats", {}),
-    ("list_chat_messages_page", "read_teams_messages", {"chat_id": "c"}),
-    ("send_chat_message_json", "send_teams_message", {"chat_id": "c", "text": "hi"}),
-    ("get_mail_detail", "read_email", {"message_id": "m"}),
-    ("create_reply_draft_json", "manage_draft", {"message_id": "m"}),
-    ("create_draft_json", "manage_draft", {"to": "", "subject": ""}),
-    ("update_draft_body", "manage_draft", {"draft_id": "d", "text": "x"}),
-    (
-        "add_draft_attachment_json",
-        "manage_draft",
-        {"draft_id": "d", "name": "a.txt", "content_base64": "aGk="},
-    ),
-    ("send_draft", "manage_draft", {"draft_id": "d"}),
+# The 24 tool names that were retired when the server collapsed to its
+# canonical dict tools. They must stay gone: no registration, no tag, no call.
+DEPRECATED_TOOL_NAMES = [
+    "get_user_profile",
+    "get_profile_json",
+    "search_people_json",
+    "list_mail_delta",
+    "mark_mail_read_json",
+    "get_chat_members_json",
+    "ensure_chat_json",
+    "mark_chat_read_json",
+    "inspect_file_json",
+    "upload_file",
+    "list_powerbi_workspaces",
+    "list_powerbi_content",
+    "get_email_attachment",
+    "get_mail_attachment_json",
+    "get_chat_attachment_json",
+    "list_chats_page",
+    "list_chat_messages_page",
+    "send_chat_message_json",
+    "get_mail_detail",
+    "create_reply_draft_json",
+    "create_draft_json",
+    "update_draft_body",
+    "add_draft_attachment_json",
+    "send_draft",
 ]
 
-# The aliases whose target needs the Power BI connection rather than the Graph
-# one — test_the_alias_answers_exactly_as_the_new_name mocks the right getter.
-PBI_ALIASES = {"list_powerbi_workspaces", "list_powerbi_content"}
 
-# Where a merge changed the signature, the new name needs its own arguments to
-# reach the same place the old name reaches with its ancestor's arguments.
-NEW_NAME_ARGS = {
-    "upload_file": {"action": "upload", "filename": "x.txt", "content": "hi"},
-    "send_chat_message_json": {"chat_id": "c", "message": "hi"},
-    "create_reply_draft_json": {"action": "reply", "message_id": "m"},
-    "create_draft_json": {"action": "create", "to": "", "subject": ""},
-    "update_draft_body": {"action": "update_body", "draft_id": "d", "text": "x"},
-    "add_draft_attachment_json": {
-        "action": "add_attachment",
-        "draft_id": "d",
-        "name": "a.txt",
-        "content_base64": "aGk=",
-    },
-    "send_draft": {"action": "send", "draft_id": "d"},
-}
+class TestNoDeprecatedAliases:
+    """The 24 old names are gone: not registered, not tagged, not callable."""
 
-
-class TestDeprecatedAliases:
-    """Old tool names stay callable, but out of sight."""
-
-    async def test_only_the_new_names_are_discoverable(self, mcp_server):
+    async def test_no_old_name_is_registered(self, mcp_server):
         from fastmcp import Client
 
+        # run_middleware=False bypasses HideDeprecatedAliases, so this sees
+        # every registered tool, not just the ones a model is shown.
+        registered = await mcp_server.list_tools(run_middleware=False)
+        names = {tool.name for tool in registered}
+        assert names & set(DEPRECATED_TOOL_NAMES) == set()
+        assert [t.name for t in registered if "deprecated-alias" in (t.tags or set())] == []
+
+        # Nothing is hidden any more: what is registered is what is offered.
         async with Client(mcp_server) as client:
-            names = {t.name for t in await client.list_tools()}
+            visible = {t.name for t in await client.list_tools()}
+        assert visible == names
 
-        assert {old for old, _, _ in RENAMED_TOOLS} & names == set()
-        assert {new for _, new, _ in RENAMED_TOOLS} <= names
+    async def test_an_old_name_is_not_callable(self, mcp_server):
+        from fastmcp.exceptions import ToolError
 
-    @pytest.mark.parametrize(("old", "new", "args"), RENAMED_TOOLS)
-    async def test_the_alias_answers_exactly_as_the_new_name(self, mcp_server, old, new, args):
-        """Same conditions, same payload — the alias only forwards.
-
-        A missing connection is the one condition every pair reaches without a
-        Graph request; the pairs that validate their arguments first short-
-        circuit before the token and still answer identically.
-        """
-        missing = (
-            _mock_missing_pbi_connection() if old in PBI_ALIASES else _mock_missing_connection()
-        )
-        with missing:
-            aliased = await _call(mcp_server, old, args)
-            renamed = await _call(mcp_server, new, NEW_NAME_ARGS.get(old, args))
-
-        assert _structured(aliased) == _structured(renamed)
-
-    @pytest.mark.parametrize(
-        ("old", "args", "expected"),
-        [
-            ("search_people_json", {"query": "   "}, {"people": []}),
-            (
-                "mark_mail_read_json",
-                {"message_ids": "not json"},
-                {
-                    "updated": 0,
-                    "failed": [],
-                    "error": "message_ids must be a JSON array of strings",
-                },
-            ),
-            ("ensure_chat_json", {"user_ids": "x'y"}, {"error": "invalid_members"}),
-            (
-                "mark_chat_read_json",
-                {"chat_id": "   "},
-                {"ok": False, "error": "chat_id must not be empty"},
-            ),
-            ("inspect_file_json", {}, {"error": "missing_target"}),
-            (
-                "list_powerbi_content",
-                {"workspace_id": "ws-1", "content_type": "tiles"},
-                {
-                    "error": "invalid_arguments",
-                    "reason": (
-                        "Invalid content_type 'tiles'. "
-                        "Must be: datasets, reports, dashboards, or all."
-                    ),
-                },
-            ),
-            (
-                "upload_file",
-                {"filename": "", "content": "hi"},
-                {
-                    "error": "invalid_arguments",
-                    "reason": "filename is required for the 'upload' action.",
-                },
-            ),
-            (
-                # The alias maps "base64" only; anything else it passes through.
-                "get_email_attachment",
-                {"message_id": "m", "attachment_id": "a", "mode": "weird"},
-                {
-                    "error": "invalid_mode",
-                    "reason": "mode must be one of: metadata, text, bytes, onedrive; got 'weird'",
-                },
-            ),
-            (
-                "get_chat_attachment_json",
-                {"chat_id": "c", "message_id": "m", "attachment_id": "a", "thumbnail": "huge"},
-                {
-                    "error": "invalid_thumbnail",
-                    "reason": "thumbnail must be one of: small, medium, large; got 'huge'",
-                },
-            ),
-            (
-                "list_chat_messages_page",
-                {"chat_id": "c", "since": "garbage"},
-                {
-                    "error": "invalid_date",
-                    "reason": "Invalid since format: 'garbage'. Use YYYY-MM-DD or ISO datetime.",
-                },
-            ),
-            (
-                "send_chat_message_json",
-                {"chat_id": "c", "text": "hi", "attachments": "not json"},
-                {
-                    "message": None,
-                    "error": "invalid_attachments",
-                    "reason": "attachments must be a JSON array",
-                },
-            ),
-            (
-                "add_draft_attachment_json",
-                {"draft_id": "d", "name": "  ", "content_base64": "aGk="},
-                {"error": "empty_name"},
-            ),
-            (
-                "update_draft_body",
-                {"draft_id": "", "text": "x"},
-                {
-                    "error": "invalid_arguments",
-                    "reason": "draft_id is required for the 'update_body' action.",
-                },
-            ),
-        ],
-    )
-    @respx.mock
-    async def test_the_alias_reaches_its_own_target(self, mcp_server, old, args, expected):
-        """Each payload here is unique to one tool, so a miswired forwarder shows.
-
-        These arguments are all refused before a token is needed, which is why
-        no connection is mocked and no Graph request may be made.
-        """
-        result = await _call(mcp_server, old, args)
-
-        assert _structured(result) == expected
-        assert _graph_trail() == []
-
-    @respx.mock
-    async def test_the_workspaces_alias_lists_workspaces(self, mcp_server):
-        """list_powerbi_workspaces has no arguments to get wrong, so it is
-        pinned on the one shape only the workspace branch produces."""
-        respx.get(f"{POWERBI_BASE_URL}/groups").mock(
-            return_value=httpx.Response(200, json={"value": []})
-        )
-        with _mock_pbi_token():
-            result = await _call(mcp_server, "list_powerbi_workspaces")
-
-        assert _structured(result) == {
-            "workspaces": [{"name": "My workspace", "id": "me", "premium": False}],
-            "count": 1,
-        }
-
-    @respx.mock
-    async def test_the_upload_alias_carries_folder_and_site(self, mcp_server):
-        """folder_path and site_id were flat parameters; they now ride the
-        options JSON, so the forwarder has to rebuild them."""
-        site_id = "site-id-001"
-        route = respx.put(
-            f"{GRAPH_BASE_URL}/sites/{site_id}/drive/root:/Contracts/notes.md:/content"
-        ).mock(return_value=httpx.Response(201, json=SAMPLE_UPLOADED_FILE))
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "upload_file",
-                {
-                    "filename": "notes.md",
-                    "content": "# Hello",
-                    "folder_path": "Contracts",
-                    "site_id": site_id,
-                },
-            )
-
-        assert route.called
-        assert _structured(result) == {
-            "action": "upload",
-            "id": SAMPLE_UPLOADED_FILE["id"],
-            "name": "notes.md",
-            "size": SAMPLE_UPLOADED_FILE["size"],
-            "web_url": SAMPLE_UPLOADED_FILE["webUrl"],
-        }
-
-    @respx.mock
-    async def test_the_email_attachment_alias_still_reads_base64_as_bytes(self, mcp_server):
-        """ "base64" was that name's word for raw bytes; the new name refuses it."""
-        payload = b"\x89PNG\r\n\x1a\n"
-        respx.get(f"{ATT_FILE_URL}/$value").mock(
-            return_value=httpx.Response(200, content=payload, headers={"Content-Type": "image/png"})
-        )
-        respx.get(ATT_FILE_URL).mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    **SAMPLE_FILE_ATTACHMENT,
-                    "name": "logo.png",
-                    "contentType": "image/png",
-                    "size": len(payload),
-                },
-            )
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_email_attachment",
-                {
-                    "message_id": ATT_MSG_ID,
-                    "attachment_id": SAMPLE_FILE_ATTACHMENT["id"],
-                    "mode": "base64",
-                },
-            )
-
-        data = _structured(result)
-        assert base64.b64decode(data["content_base64"]) == payload
-
-    @respx.mock
-    async def test_the_chat_attachment_alias_carries_the_thumbnail_size(self, mcp_server):
-        """thumbnail was a flat parameter; it now rides the options JSON."""
-        respx.get(TEAMS_FILE_MSG_URL).mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGE_WITH_FILE)
-        )
-        thumb = respx.get(TEAMS_SHARE_THUMB_URL).mock(
-            return_value=httpx.Response(
-                200, content=b"THUMB", headers={"Content-Type": "image/jpeg"}
-            )
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server,
-                "get_chat_attachment_json",
-                {
-                    "chat_id": TEAMS_CHAT_ID,
-                    "message_id": "chat-msg-file-001",
-                    "attachment_id": TEAMS_FILE_ATTACHMENT_ID,
-                    "thumbnail": "medium",
-                },
-            )
-
-        assert thumb.called
-        assert _structured(result) == {
-            "kind": "file",
-            "name": "roadmap.pptx",
-            "content_type": "image/jpeg",
-            "size": 5,
-            "content_base64": base64.b64encode(b"THUMB").decode("ascii"),
-        }
-
-    @respx.mock
-    async def test_the_chats_page_alias_returns_rows_and_a_cursor(self, mcp_server):
-        """list_chats_page has only paging arguments, so it is pinned on the
-        one shape the /me/chats listing produces."""
-        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/chats").mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHATS_PAGE)
-        )
-        with _mock_token():
-            result = await _call(mcp_server, "list_chats_page", {"top": 3})
-
-        data = _structured(result)
-        assert data["next_cursor"] == SAMPLE_CHATS_PAGE_NEXT_LINK
-        assert [row["id"] for row in data["chats"]] == [
-            "chat-1on1-001",
-            "chat-group-001",
-            "chat-empty-001",
-        ]
-
-    @respx.mock
-    @pytest.mark.parametrize(
-        ("args", "expected"),
-        [
-            (
-                {"chat_id": "   ", "text": "hi"},
-                {"message": None, "error": "chat_id must not be empty"},
-            ),
-            (
-                {"chat_id": "c", "text": ""},
-                {"message": None, "error": "text must not be empty"},
-            ),
-        ],
-    )
-    async def test_the_send_alias_keeps_its_own_two_prose_errors(self, mcp_server, args, expected):
-        """These two strings live only on the alias — the merged tool answers
-        invalid_arguments instead, so a miswired forwarder would show here."""
-        with _mock_token():
-            result = await _call(mcp_server, "send_chat_message_json", args)
-
-        assert _structured(result) == expected
-        assert _graph_trail() == []
-
-    @respx.mock
-    async def test_the_messages_page_alias_lands_in_page_mode(self, mcp_server):
-        """One request, ordered on lastModifiedDateTime — not the paginate-all
-        path, which orders on createdDateTime."""
-        route = respx.get(url__startswith=f"{GRAPH_BASE_URL}/chats/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_CHAT_MESSAGES_PAGE)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server, "list_chat_messages_page", {"chat_id": "chat-1on1-001"}
-            )
-
-        assert route.call_count == 1
-        query = parse_qs(urlparse(str(route.calls[0].request.url)).query)
-        assert query["$orderby"][0].split(" ")[0] == "lastModifiedDateTime"
-        assert len(_structured(result)["messages"]) == 3
-
-    @respx.mock
-    async def test_the_mail_detail_alias_still_returns_the_frozen_keys(self, mcp_server):
-        """One GET, and the five keys the json name promised come back off it."""
-        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MESSAGE_DETAIL)
-        )
-        with _mock_token():
-            result = await _call(
-                mcp_server, "get_mail_detail", {"message_id": SAMPLE_MESSAGE["id"]}
-            )
-
-        data = _structured(result)
-        assert data["body_text"] == "Here is the weekly report.\n\nBest,\nAlice"
-        assert data["headers"]["message-id"] == "<abc123@example.com>"
-        assert data["has_attachments"] is True
-        assert data["attachment_count"] == 3
-
-    @respx.mock
-    async def test_the_send_draft_alias_reads_then_sends(self, mcp_server):
-        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
-            return_value=httpx.Response(200, json=SAMPLE_DRAFT_FOR_SEND)
-        )
-        respx.post(url__startswith=f"{GRAPH_BASE_URL}/me/messages/").mock(
-            return_value=httpx.Response(202)
-        )
-        with _mock_token():
-            result = await _call(mcp_server, "send_draft", {"draft_id": "AAMkAGI2draft001="})
-
-        assert _structured(result)["ok"] is True
-        assert [method for method, _ in _graph_trail()] == ["GET", "POST"]
-
-    @respx.mock
-    async def test_the_merged_profile_alias_returns_the_merged_dict(self, mcp_server):
-        respx.get(f"{GRAPH_BASE_URL}/me").mock(
-            return_value=httpx.Response(200, json=SAMPLE_USER_PROFILE)
-        )
-        respx.get(f"{GRAPH_BASE_URL}/me/mailboxSettings").mock(
-            return_value=httpx.Response(200, json=SAMPLE_MAILBOX_SETTINGS)
-        )
-        with _mock_token():
-            result = await _call(mcp_server, "get_user_profile")
-
-        assert _structured(result) == {
-            "id": "user-id-001",
-            "display_name": "Test User",
-            "mail": "user@example.com",
-            "user_principal_name": "user@example.com",
-            "mailbox_address": "mailbox@example.com",
-            "job_title": None,
-        }
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await _call(mcp_server, "get_profile_json")
 
 
 class TestCursorGuard:

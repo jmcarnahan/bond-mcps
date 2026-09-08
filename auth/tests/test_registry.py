@@ -65,7 +65,7 @@ class TestRegistryEndpoint:
                     "internal_url_base": "http://ms-graph.test-ns.svc.cluster.local:8000/ms-graph",
                     "jwt_audience": "ms-graph",
                     "pass_jwt": True,
-                    "allowed_tools": ["get_user_profile", "list_emails"],
+                    "allowed_tools": ["get_profile", "list_emails"],
                 },
                 "grafana": {
                     "url": "http://grafana.test-ns.svc.cluster.local:8000/grafana/mcp",
@@ -83,7 +83,7 @@ class TestRegistryEndpoint:
             resp = client.get("/registry")
         data = resp.json()
         ms = data["mcpServers"]["microsoft"]
-        assert ms["allowed_tools"] == ["get_user_profile", "list_emails"]
+        assert ms["allowed_tools"] == ["get_profile", "list_emails"]
         assert ms["connect_provider"] == "microsoft"
         grafana = data["mcpServers"]["grafana"]
         assert "connect_provider" not in grafana

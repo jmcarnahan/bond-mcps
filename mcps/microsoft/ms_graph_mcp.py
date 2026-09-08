@@ -32,9 +32,6 @@ desktop mail app) gets the dict as structuredContent, while every other caller
 gets a compact text rendering of the same dict. Parameters stay ``str``/``int``
 only (empty string = absent) for Bedrock compatibility, as everywhere else in
 this server.
-
-Tools that have been renamed keep their old names as deprecated aliases: still
-callable, but hidden from tools/list by HideDeprecatedAliases.
 """
 
 import base64
@@ -42,7 +39,6 @@ import binascii
 import csv
 import html as html_mod
 import io
-import json
 import logging
 import mimetypes
 import os
@@ -52,7 +48,6 @@ from pathlib import Path
 from typing import Any
 
 from bond_common import (
-    DEPRECATED_ALIAS_TAG,
     FormatNegotiation,
     HideDeprecatedAliases,
     render_compact,
@@ -2135,9 +2130,8 @@ async def get_teams_attachment(
         }
 
     thumb = opt_str(opts.get("thumbnail")) or "medium"
-    # Judged before the token so the get_chat_attachment_json alias, which
-    # forwards its thumbnail parameter through options, still refuses a bad
-    # size with no request — the way its own ancestor did.
+    # Judged before the token so a bad size is refused with no request at all,
+    # the way this tool's json ancestor did.
     if mode == "thumbnail" and thumb not in _THUMBNAIL_WORDS:
         return {
             "error": "invalid_thumbnail",
@@ -4668,222 +4662,6 @@ async def connection_status() -> dict:
         "account": account,
         "mail_policy": policy,
     }
-
-
-# ---------------------------------------------------------------------------
-# Deprecated aliases
-#
-# Every renamed tool answers to its old name here. HideDeprecatedAliases keeps
-# these out of tools/list, so a model never sees two names for one tool, but a
-# call still works — bond-desktop's call sites move over on its own release
-# schedule, and these come out once it has. Each forwarder keeps its ancestor's
-# exact signature and declares output_schema=None, without which the alias
-# advertises a generated schema and FormatNegotiation has to pass it through
-# uncompacted.
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool(name="get_user_profile", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_get_user_profile() -> dict:
-    """Deprecated alias for get_profile."""
-    return await get_profile()
-
-
-@mcp.tool(name="get_profile_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_get_profile_json() -> dict:
-    """Deprecated alias for get_profile."""
-    return await get_profile()
-
-
-@mcp.tool(name="search_people_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_search_people_json(query: str, top: int = 10) -> dict:
-    """Deprecated alias for search_people."""
-    return await search_people(query, top=top)
-
-
-@mcp.tool(name="list_mail_delta", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_list_mail_delta(
-    folder: str = "inbox", cursor: str = "", min_received: str = ""
-) -> dict:
-    """Deprecated alias for sync_mail."""
-    return await sync_mail(folder=folder, cursor=cursor, min_received=min_received)
-
-
-@mcp.tool(name="mark_mail_read_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_mark_mail_read_json(message_ids: str, is_read: str = "true") -> dict:
-    """Deprecated alias for mark_mail_read."""
-    return await mark_mail_read(message_ids, is_read=is_read)
-
-
-@mcp.tool(name="get_chat_members_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_get_chat_members_json(chat_id: str) -> dict:
-    """Deprecated alias for get_chat_members."""
-    return await get_chat_members(chat_id)
-
-
-@mcp.tool(name="ensure_chat_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_ensure_chat_json(user_ids: str, topic: str = "") -> dict:
-    """Deprecated alias for ensure_chat."""
-    return await ensure_chat(user_ids, topic=topic)
-
-
-@mcp.tool(name="mark_chat_read_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_mark_chat_read_json(chat_id: str) -> dict:
-    """Deprecated alias for mark_chat_read."""
-    return await mark_chat_read(chat_id)
-
-
-@mcp.tool(name="inspect_file_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_inspect_file_json(
-    item_id: str = "", url: str = "", read_content: str = "false", site_id: str = ""
-) -> dict:
-    """Deprecated alias for inspect_file."""
-    return await inspect_file(item_id=item_id, url=url, read_content=read_content, site_id=site_id)
-
-
-@mcp.tool(name="upload_file", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_upload_file(
-    filename: str,
-    content: str,
-    folder_path: str = "",
-    site_id: str = "",
-    content_encoding: str = "",
-) -> dict:
-    """Deprecated alias for manage_file(action="upload")."""
-    opts = {}
-    if folder_path:
-        opts["folder_path"] = folder_path
-    if site_id:
-        opts["site_id"] = site_id
-    return await manage_file(
-        action="upload",
-        filename=filename,
-        content=content,
-        content_encoding=content_encoding,
-        options=json.dumps(opts) if opts else "",
-    )
-
-
-@mcp.tool(name="list_powerbi_workspaces", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_list_powerbi_workspaces() -> dict:
-    """Deprecated alias for list_powerbi."""
-    return await list_powerbi()
-
-
-@mcp.tool(name="list_powerbi_content", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_list_powerbi_content(workspace_id: str, content_type: str = "all") -> dict:
-    """Deprecated alias for list_powerbi."""
-    return await list_powerbi(workspace_id=workspace_id, content_type=content_type)
-
-
-@mcp.tool(name="get_email_attachment", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_get_email_attachment(
-    message_id: str, attachment_id: str, mode: str = "text", mailbox: str = "", options: str = ""
-) -> dict:
-    """Deprecated alias for get_mail_attachment."""
-    # "base64" was this name's word for raw bytes; the synonym lives only here.
-    if mode.strip().lower() == "base64":
-        mode = "bytes"
-    return await get_mail_attachment(message_id, attachment_id, mode, mailbox, options)
-
-
-@mcp.tool(name="get_mail_attachment_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_get_mail_attachment_json(
-    message_id: str, attachment_id: str, mode: str = "bytes"
-) -> dict:
-    """Deprecated alias for get_mail_attachment."""
-    return await get_mail_attachment(message_id, attachment_id, mode)
-
-
-@mcp.tool(name="get_chat_attachment_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_get_chat_attachment_json(
-    chat_id: str, message_id: str, attachment_id: str, thumbnail: str = ""
-) -> dict:
-    """Deprecated alias for get_teams_attachment."""
-    # thumbnail was a flat parameter; it now rides the options JSON, and an
-    # empty one means the full bytes rather than a size word.
-    thumb = thumbnail.strip().lower()
-    mode = "thumbnail" if thumb else "bytes"
-    options = json.dumps({"thumbnail": thumb}) if thumb else ""
-    return await get_teams_attachment(
-        message_id, attachment_id, chat_id=chat_id, mode=mode, options=options
-    )
-
-
-@mcp.tool(name="list_chats_page", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_list_chats_page(cursor: str = "", top: int = 50) -> dict:
-    """Deprecated alias for list_chats."""
-    return await list_chats(cursor=cursor, top=top)
-
-
-@mcp.tool(name="list_chat_messages_page", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_list_chat_messages_page(chat_id: str, since: str = "", cursor: str = "") -> dict:
-    """Deprecated alias for read_teams_messages."""
-    # The page option pins the json ancestor's semantics: one page, newest
-    # first, `since` filtering last-modified rather than creation time.
-    return await read_teams_messages(
-        chat_id=chat_id, since=since, cursor=cursor, options='{"page": true}'
-    )
-
-
-@mcp.tool(name="send_chat_message_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_send_chat_message_json(chat_id: str, text: str, attachments: str = "") -> dict:
-    """Deprecated alias for send_teams_message."""
-    # These two error strings are part of the frozen json contract; the merged
-    # tool speaks invalid_arguments instead, so they live only here.
-    if not chat_id.strip():
-        return {"message": None, "error": "chat_id must not be empty"}
-    if not text.strip() and not attachments.strip():
-        return {"message": None, "error": "text must not be empty"}
-    return await send_teams_message(message=text, chat_id=chat_id, attachments=attachments)
-
-
-@mcp.tool(name="get_mail_detail", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_get_mail_detail(message_id: str) -> dict:
-    """Deprecated alias for read_email."""
-    return await read_email(message_id=message_id)
-
-
-@mcp.tool(name="create_reply_draft_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_create_reply_draft_json(message_id: str, timezone: str = "") -> dict:
-    """Deprecated alias for manage_draft(action="reply")."""
-    return await manage_draft(action="reply", message_id=message_id, timezone=timezone)
-
-
-@mcp.tool(name="create_draft_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_create_draft_json(
-    to: str, subject: str, body: str = "", cc: str = "", bcc: str = ""
-) -> dict:
-    """Deprecated alias for manage_draft(action="create")."""
-    # The merged tool calls the body `text`, as update_body already did; the
-    # ancestor's `body` spelling lives only here.
-    return await manage_draft(action="create", to=to, subject=subject, text=body, cc=cc, bcc=bcc)
-
-
-@mcp.tool(name="update_draft_body", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_update_draft_body(draft_id: str, text: str) -> dict:
-    """Deprecated alias for manage_draft(action="update_body")."""
-    return await manage_draft(action="update_body", draft_id=draft_id, text=text)
-
-
-@mcp.tool(name="add_draft_attachment_json", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_add_draft_attachment_json(
-    draft_id: str, name: str, content_base64: str, content_type: str = ""
-) -> dict:
-    """Deprecated alias for manage_draft(action="add_attachment")."""
-    return await manage_draft(
-        action="add_attachment",
-        draft_id=draft_id,
-        name=name,
-        content_base64=content_base64,
-        content_type=content_type,
-    )
-
-
-@mcp.tool(name="send_draft", tags={DEPRECATED_ALIAS_TAG}, output_schema=None)
-async def _alias_send_draft(draft_id: str) -> dict:
-    """Deprecated alias for manage_draft(action="send")."""
-    return await manage_draft(action="send", draft_id=draft_id)
 
 
 if __name__ == "__main__":
