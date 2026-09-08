@@ -953,7 +953,7 @@ SAMPLE_DRAFT_FOR_SEND = {
     ],
 }
 
-# POST /me/messages answering create_draft_json: a brand-new draft, which Graph
+# POST /me/messages answering manage_draft(action="create"): a brand-new draft, which Graph
 # stamps with both ids at creation.
 SAMPLE_NEW_DRAFT = {
     "id": "AAMkAGI2draft888=",
@@ -1250,7 +1250,7 @@ SAMPLE_ATTACHMENTS_RESPONSE = {
     "value": [SAMPLE_FILE_ATTACHMENT, SAMPLE_INLINE_ATTACHMENT, SAMPLE_REFERENCE_ATTACHMENT]
 }
 
-# get_mail_detail $expands attachments, so one request returns body, headers,
+# read_email $expands attachments, so one request returns body, headers,
 # and this list together.
 SAMPLE_MESSAGE_DETAIL = {
     "id": SAMPLE_MESSAGE["id"],
@@ -1400,7 +1400,7 @@ SAMPLE_EXTERNAL_REFERENCE_ATTACHMENT = {
     "sourceUrl": "https://canary.example.net/CANARY-URL",
 }
 
-# The DETAIL_SELECT + $expand=attachments shape get_mail_detail receives.
+# The DETAIL_SELECT + $expand=attachments shape read_email receives.
 SAMPLE_EXTERNAL_MESSAGE_DETAIL = {
     "id": SAMPLE_EXTERNAL_MESSAGE["id"],
     "from": {"emailAddress": {"name": "CANARY-NAME", "address": EXTERNAL_SENDER_ADDRESS}},
