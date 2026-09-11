@@ -19,9 +19,11 @@ from .conftest import (
     SAMPLE_AWKWARD_MESSAGE_ID,
     SAMPLE_CREATED_ATTACHMENT,
     SAMPLE_DELTA_LINK,
+    SAMPLE_DELTA_MESSAGE,
     SAMPLE_DELTA_NEXT_LINK,
     SAMPLE_DELTA_PAGE_FINAL,
     SAMPLE_DELTA_PAGE_NEXT,
+    SAMPLE_DELTA_TOMBSTONE,
     SAMPLE_DRAFT_FOR_SEND,
     SAMPLE_DRAFT_MESSAGE,
     SAMPLE_MAILBOX_SETTINGS,
@@ -1114,6 +1116,121 @@ class TestDeltaPageAsync:
         async with AsyncGraphClient("tok") as client:
             with pytest.raises(GraphError) as exc:
                 await mail.adelta_page(client, cursor=SAMPLE_DELTA_LINK)
+
+        assert exc.value.status_code == 410
+
+
+class TestNormalizeReceivedFloor:
+    """normalize_received_floor: strict parse + UTC canonicalization of the floor."""
+
+    def test_empty_returns_empty(self):
+        assert mail.normalize_received_floor("") == ""
+
+    def test_bare_date_becomes_midnight_utc(self):
+        assert mail.normalize_received_floor("2026-01-01") == "2026-01-01T00:00:00Z"
+
+    def test_zulu_datetime_passes_through(self):
+        assert mail.normalize_received_floor("2026-01-05T09:00:00Z") == "2026-01-05T09:00:00Z"
+
+    def test_offset_is_converted_to_utc(self):
+        assert mail.normalize_received_floor("2026-01-05T09:00:00+05:00") == "2026-01-05T04:00:00Z"
+
+    def test_naive_datetime_is_treated_as_utc(self):
+        assert mail.normalize_received_floor("2026-01-05T09:00:00") == "2026-01-05T09:00:00Z"
+
+    def test_fractional_seconds_dropped(self):
+        assert mail.normalize_received_floor("2026-01-05T09:00:00.500Z") == "2026-01-05T09:00:00Z"
+
+    @pytest.mark.parametrize(
+        "bad", ["2026-13-01", "2026-02-30T00:00:00Z", "garbage", "last tuesday"]
+    )
+    def test_semantically_invalid_raises(self, bad):
+        """A bad month/day is rejected here, not silently dropped in after_floor."""
+        with pytest.raises(ValueError):
+            mail.normalize_received_floor(bad)
+
+
+class TestAfterFloor:
+    """after_floor: the hard receivedDateTime floor re-applied to every page."""
+
+    def test_drops_messages_older_than_floor(self):
+        old = {**SAMPLE_DELTA_MESSAGE, "id": "old=", "receivedDateTime": "2025-12-31T23:59:59Z"}
+        kept = mail.after_floor([SAMPLE_DELTA_MESSAGE, old], "2026-01-01T00:00:00Z")
+        assert kept == [SAMPLE_DELTA_MESSAGE]
+
+    def test_keeps_messages_at_or_after_floor(self):
+        exact = {**SAMPLE_DELTA_MESSAGE, "receivedDateTime": "2026-01-01T00:00:00Z"}
+        assert mail.after_floor([exact], "2026-01-01T00:00:00Z") == [exact]
+
+    def test_tombstones_always_pass_through(self):
+        """A tombstone has no receivedDateTime and must survive any floor."""
+        kept = mail.after_floor([SAMPLE_DELTA_TOMBSTONE], "2030-01-01T00:00:00Z")
+        assert kept == [SAMPLE_DELTA_TOMBSTONE]
+
+    def test_empty_floor_is_identity(self):
+        msgs = [SAMPLE_DELTA_MESSAGE, SAMPLE_DELTA_TOMBSTONE]
+        assert mail.after_floor(msgs, "") is msgs
+
+    def test_non_dict_entries_are_dropped_when_floor_set(self):
+        """Defensive parity with filter_messages: a non-dict entry can't be a
+        message and is dropped once a floor is in force."""
+        kept = mail.after_floor([SAMPLE_DELTA_MESSAGE, "not-a-dict", None], "2026-01-01T00:00:00Z")
+        assert kept == [SAMPLE_DELTA_MESSAGE]
+
+    def test_millisecond_and_zone_suffix_do_not_skew_compare(self):
+        msg = {**SAMPLE_DELTA_MESSAGE, "receivedDateTime": "2026-01-01T00:00:00.500Z"}
+        # Same second as the floor: normalized to second precision, it is kept.
+        assert mail.after_floor([msg], "2026-01-01T00:00:00Z") == [msg]
+
+
+class TestDeltaDrain:
+    """adelta_drain: multi-page draining with a page cap."""
+
+    @respx.mock
+    async def test_follows_next_link_until_delta_link(self):
+        page2 = {"@odata.deltaLink": SAMPLE_DELTA_LINK, "value": [SAMPLE_DELTA_TOMBSTONE]}
+        respx.get(SAMPLE_DELTA_NEXT_LINK).mock(return_value=httpx.Response(200, json=page2))
+        respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.adelta_drain(client, folder="inbox")
+
+        assert data["value"] == [SAMPLE_DELTA_MESSAGE, SAMPLE_DELTA_TOMBSTONE]
+        assert data["delta_cursor"] == SAMPLE_DELTA_LINK
+        assert data["next_cursor"] == ""
+
+    @respx.mock
+    async def test_stops_at_page_cap_and_surfaces_next_link(self):
+        # A self-referential nextLink would page forever; the cap stops it.
+        respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.adelta_drain(client, folder="inbox", max_pages=3)
+
+        assert len(data["value"]) == 3
+        assert data["next_cursor"] == SAMPLE_DELTA_NEXT_LINK
+        assert data["delta_cursor"] == ""
+
+    @respx.mock
+    async def test_single_terminal_page(self):
+        respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.adelta_drain(client, folder="inbox")
+
+        assert data["value"] == [SAMPLE_DELTA_TOMBSTONE]
+        assert data["delta_cursor"] == SAMPLE_DELTA_LINK
+        assert data["next_cursor"] == ""
+
+    @respx.mock
+    async def test_410_propagates(self):
+        respx.get(SAMPLE_DELTA_LINK).mock(return_value=httpx.Response(410, json=GRAPH_ERROR_410))
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await mail.adelta_drain(client, cursor=SAMPLE_DELTA_LINK)
 
         assert exc.value.status_code == 410
 

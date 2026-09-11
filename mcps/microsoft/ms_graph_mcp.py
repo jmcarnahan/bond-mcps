@@ -3854,11 +3854,12 @@ async def search_people(query: str, top: int = 10) -> dict:
 @mcp.tool(output_schema=None)
 async def sync_mail(folder: str = "inbox", cursor: str = "", min_received: str = "") -> dict:
     """
-    Fetch ONE page of a mail folder's delta feed, for incremental sync.
+    Drain a mail folder's delta feed (up to a page cap), for incremental sync.
 
     Returns messages (raw Graph message objects, including `@removed`
-    tombstones for deletions), next_cursor (more pages in this run),
-    delta_cursor (this run is done — save it and pass it back next time), and
+    tombstones for deletions), next_cursor (the page cap stopped this run early —
+    more pages remain, call again with it), delta_cursor (this run is done — save
+    it and pass it back next time), has_more (True when next_cursor is set), and
     resync. The rows keep Graph's own nested camelCase shape, so they render as
     compact JSON rather than CSV; use list_emails for a readable listing.
 
@@ -3866,24 +3867,51 @@ async def sync_mail(folder: str = "inbox", cursor: str = "", min_received: str =
         folder: Mail folder to sync (default: inbox).
         cursor: A next_cursor or delta_cursor from a previous call. Empty
             starts a fresh enumeration.
-        min_received: ISO 8601 timestamp bounding a fresh enumeration
-            (e.g. "2026-01-01T00:00:00Z"). Ignored when cursor is set.
+        min_received: ISO 8601 timestamp (e.g. "2026-01-01T00:00:00Z") or bare
+            date (YYYY-MM-DD); an offset is honored and normalized to UTC. A HARD
+            floor on the messages RETURNED: any received before it are dropped
+            from EVERY page, not just the first. Send it on every call —
+            including continuations that pass a cursor — so the floor holds across
+            the whole run. On a fresh enumeration (empty cursor) an empty
+            min_received defaults to the last 7 days rather than the whole mailbox.
+
+    The floor bounds what is returned (and therefore how many messages a client
+    reads), not how many delta pages Graph emits: a run still pages through the
+    feed to its deltaLink, up to a per-call page cap, so a first sync of a large
+    mailbox can take several calls even though each returns only in-window rows.
 
     A resync of true means the saved cursor has expired: discard local state
     for the folder and call again with an empty cursor. A cursor that is not a
     Graph URL returns {"error": "invalid_cursor"} without any request: cursors
-    only ever come from this tool, and the token must not follow one elsewhere.
+    only ever come from this tool, and the token must not follow one elsewhere. A
+    malformed min_received returns {"error": "invalid_date"}.
 
     While the mail sender policy is on, messages from senders outside the
     allowed domains are omitted from messages; `@removed` tombstones always
     pass through. A policy change needs a full resync to take effect on
     already-synced rows.
     """
+    from datetime import datetime, timedelta, timezone
+
+    if min_received:
+        try:
+            floor = mail_ops.normalize_received_floor(min_received)
+        except ValueError as e:
+            return {"error": "invalid_date", "reason": str(e)}
+    elif not cursor:
+        # Trigger A: a fresh enumeration with no floor must not walk the whole
+        # mailbox — default to the last 7 days.
+        floor = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        # Continuation without a floor: rely on the page cap. The delta token is
+        # not trusted to carry a filter, so nothing is post-filtered here.
+        floor = ""
+
     try:
         token = get_graph_token()
         async with AsyncGraphClient(token) as client:
-            data = await mail_ops.adelta_page(
-                client, folder=folder, cursor=cursor, min_received=min_received
+            data = await mail_ops.adelta_drain(
+                client, folder=folder, cursor=cursor, min_received=floor
             )
     except PermissionError as e:
         return _not_connected(e)
@@ -3892,13 +3920,22 @@ async def sync_mail(folder: str = "inbox", cursor: str = "", min_received: str =
         return {"error": "invalid_cursor"}
     except GraphError as e:
         if e.status_code == 410:
-            return {"messages": [], "next_cursor": "", "delta_cursor": "", "resync": True}
+            return {
+                "messages": [],
+                "next_cursor": "",
+                "delta_cursor": "",
+                "has_more": False,
+                "resync": True,
+            }
         raise
 
+    next_cursor = data["next_cursor"]
+    messages = mail_policy.filter_messages(mail_ops.after_floor(data["value"], floor))
     return {
-        "messages": mail_policy.filter_messages(data.get("value", [])),
-        "next_cursor": data.get("@odata.nextLink", ""),
-        "delta_cursor": data.get("@odata.deltaLink", ""),
+        "messages": messages,
+        "next_cursor": next_cursor,
+        "delta_cursor": data["delta_cursor"],
+        "has_more": bool(next_cursor),
         "resync": False,
     }
 

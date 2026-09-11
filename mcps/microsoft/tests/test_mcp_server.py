@@ -6229,18 +6229,124 @@ class TestMCPSyncMail:
     """sync_mail."""
 
     @respx.mock
-    async def test_maps_next_link_and_passes_messages_through_raw(self, mcp_server):
+    async def test_terminal_run_passes_messages_through_raw(self, mcp_server):
+        """A run that reaches a deltaLink returns the message raw, no next_cursor."""
+        page = {"@odata.deltaLink": SAMPLE_DELTA_LINK, "value": [SAMPLE_DELTA_MESSAGE]}
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
+            return_value=httpx.Response(200, json=page)
+        )
+        with _mock_token():
+            result = await _call(
+                mcp_server, "sync_mail", {"folder": "inbox", "min_received": "2026-01-01T00:00:00Z"}
+            )
+
+        data = _structured(result)
+        assert data["messages"] == [SAMPLE_DELTA_MESSAGE]
+        assert data["next_cursor"] == ""
+        assert data["delta_cursor"] == SAMPLE_DELTA_LINK
+        assert data["has_more"] is False
+        assert data["resync"] is False
+
+    @respx.mock
+    async def test_page_cap_surfaces_next_cursor_and_has_more(self, mcp_server):
+        """A self-referential nextLink is drained only up to the page cap; the
+        surviving cursor comes back as next_cursor with has_more=True."""
         respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
             return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
         )
         with _mock_token():
-            result = await _call(mcp_server, "sync_mail", {"folder": "inbox"})
+            result = await _call(mcp_server, "sync_mail", {"min_received": "2026-01-01T00:00:00Z"})
 
         data = _structured(result)
-        assert data["messages"] == [SAMPLE_DELTA_MESSAGE]
         assert data["next_cursor"] == SAMPLE_DELTA_NEXT_LINK
+        assert data["has_more"] is True
         assert data["delta_cursor"] == ""
+        # One SAMPLE_DELTA_MESSAGE per page, capped at mail._MAX_PAGES pages.
+        assert len(data["messages"]) == mail._MAX_PAGES
         assert data["resync"] is False
+
+    @respx.mock
+    async def test_fresh_sync_defaults_to_seven_day_floor(self, mcp_server):
+        """Trigger A: a cursorless call with no min_received must not enumerate
+        the whole mailbox — it applies a ~7-day receivedDateTime floor."""
+        route = respx.get(
+            url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta"
+        ).mock(return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL))
+        with _mock_token():
+            await _call(mcp_server, "sync_mail", {})
+
+        url = str(route.calls[0].request.url)
+        assert "$filter=receivedDateTime%20ge%20" in url
+
+    @pytest.mark.parametrize("bad", ["last tuesday", "2026-13-01", "2026-02-30T00:00:00Z"])
+    async def test_invalid_min_received_returns_invalid_date(self, mcp_server, bad):
+        """A semantically bad date is rejected up front, not silently dropped."""
+        with _mock_token():
+            result = await _call(mcp_server, "sync_mail", {"min_received": bad})
+
+        assert _structured(result)["error"] == "invalid_date"
+
+    @respx.mock
+    async def test_floor_applies_to_a_client_supplied_cursor(self, mcp_server):
+        """The core contract: min_received on a continuation call drops older
+        mail from the cursor-fetched page, keeping recent mail and tombstones."""
+        old_message = {
+            **SAMPLE_DELTA_MESSAGE,
+            "id": "old002=",
+            "receivedDateTime": "2025-11-15T09:00:00Z",
+        }
+        page = {
+            "@odata.deltaLink": SAMPLE_DELTA_LINK,
+            "value": [SAMPLE_DELTA_MESSAGE, old_message, SAMPLE_DELTA_TOMBSTONE],
+        }
+        route = respx.get(SAMPLE_DELTA_NEXT_LINK).mock(return_value=httpx.Response(200, json=page))
+        with _mock_token():
+            result = await _call(
+                mcp_server,
+                "sync_mail",
+                {"cursor": SAMPLE_DELTA_NEXT_LINK, "min_received": "2026-01-01T00:00:00Z"},
+            )
+
+        # Cursor fetched verbatim (the floor is applied client-side, not rebuilt
+        # into the opaque cursor URL).
+        assert str(route.calls[0].request.url) == SAMPLE_DELTA_NEXT_LINK
+        data = _structured(result)
+        assert data["messages"] == [SAMPLE_DELTA_MESSAGE, SAMPLE_DELTA_TOMBSTONE]
+        assert data["delta_cursor"] == SAMPLE_DELTA_LINK
+        assert data["has_more"] is False
+
+    @respx.mock
+    async def test_floor_is_reapplied_to_every_drained_page(self, mcp_server, monkeypatch):
+        """Trigger B: an older message surfacing on page 2 is dropped, tombstones
+        and recent mail survive, and external senders stay hidden."""
+        _policy_on(monkeypatch)
+        old_message = {
+            **SAMPLE_DELTA_MESSAGE,
+            "id": "old001=",
+            "receivedDateTime": "2025-12-01T09:00:00Z",
+        }
+        page2 = {
+            "@odata.deltaLink": SAMPLE_DELTA_LINK,
+            "value": [old_message, SAMPLE_DELTA_TOMBSTONE],
+        }
+        page1 = {
+            "@odata.nextLink": SAMPLE_DELTA_NEXT_LINK,
+            "value": [SAMPLE_DELTA_MESSAGE, SAMPLE_EXTERNAL_DELTA_MESSAGE],
+        }
+        # Register the exact nextLink route first so the page-2 fetch matches it
+        # rather than the broad fresh-start route.
+        respx.get(SAMPLE_DELTA_NEXT_LINK).mock(return_value=httpx.Response(200, json=page2))
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
+            return_value=httpx.Response(200, json=page1)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "sync_mail", {"min_received": "2026-01-01T00:00:00Z"})
+
+        data = _structured(result)
+        assert data["messages"] == [SAMPLE_DELTA_MESSAGE, SAMPLE_DELTA_TOMBSTONE]
+        assert data["delta_cursor"] == SAMPLE_DELTA_LINK
+        assert data["has_more"] is False
+        _assert_no_canary(data)
 
     @respx.mock
     async def test_tombstones_pass_through_untouched(self, mcp_server):
@@ -6279,6 +6385,7 @@ class TestMCPSyncMail:
             "messages": [],
             "next_cursor": "",
             "delta_cursor": "",
+            "has_more": False,
             "resync": True,
         }
 
@@ -9715,8 +9822,11 @@ class TestMailSenderPolicy:
     @respx.mock
     async def test_sync_mail_hides_external_and_keeps_tombstones(self, mcp_server, monkeypatch):
         _policy_on(monkeypatch)
+        # A terminal page (deltaLink, no nextLink) ends the drain after one page.
+        # An explicit floor older than the sample messages keeps them, so this
+        # test isolates the external-sender/tombstone behavior from date filtering.
         page = {
-            "@odata.nextLink": SAMPLE_DELTA_NEXT_LINK,
+            "@odata.deltaLink": SAMPLE_DELTA_LINK,
             "value": [
                 SAMPLE_DELTA_MESSAGE,
                 SAMPLE_EXTERNAL_DELTA_MESSAGE,
@@ -9727,13 +9837,14 @@ class TestMailSenderPolicy:
             return_value=httpx.Response(200, json=page)
         )
         with _mock_token():
-            result = await _call(mcp_server, "sync_mail", {})
+            result = await _call(mcp_server, "sync_mail", {"min_received": "2026-01-01T00:00:00Z"})
 
         data = _structured(result)
         assert data["messages"] == [SAMPLE_DELTA_MESSAGE, SAMPLE_DELTA_TOMBSTONE]
-        assert set(data) == {"messages", "next_cursor", "delta_cursor", "resync"}
-        assert data["next_cursor"] == SAMPLE_DELTA_NEXT_LINK
-        assert data["delta_cursor"] == ""
+        assert set(data) == {"messages", "next_cursor", "delta_cursor", "has_more", "resync"}
+        assert data["next_cursor"] == ""
+        assert data["delta_cursor"] == SAMPLE_DELTA_LINK
+        assert data["has_more"] is False
         assert data["resync"] is False
         _assert_no_canary(data)
 
