@@ -8,7 +8,7 @@ import base64
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import httpx
 import pytest
@@ -6267,8 +6267,8 @@ class TestMCPSyncMail:
 
     @respx.mock
     async def test_fresh_sync_defaults_to_seven_day_floor(self, mcp_server):
-        """Trigger A: a cursorless call with no min_received must not enumerate
-        the whole mailbox — it applies a ~7-day receivedDateTime floor."""
+        """A cursorless call with no min_received must not enumerate the whole
+        mailbox — it applies a receivedDateTime floor of 7 days ago."""
         route = respx.get(
             url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta"
         ).mock(return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_FINAL))
@@ -6277,6 +6277,10 @@ class TestMCPSyncMail:
 
         url = str(route.calls[0].request.url)
         assert "$filter=receivedDateTime%20ge%20" in url
+        floor = unquote(url.split("$filter=receivedDateTime%20ge%20", 1)[1].split("&", 1)[0])
+        floor_dt = datetime.fromisoformat(floor.replace("Z", "+00:00"))
+        expected = datetime.now(timezone.utc) - timedelta(days=7)
+        assert abs((floor_dt - expected).total_seconds()) < 120
 
     @pytest.mark.parametrize("bad", ["last tuesday", "2026-13-01", "2026-02-30T00:00:00Z"])
     async def test_invalid_min_received_returns_invalid_date(self, mcp_server, bad):
@@ -6316,9 +6320,28 @@ class TestMCPSyncMail:
         assert data["has_more"] is False
 
     @respx.mock
+    async def test_continuation_without_floor_is_not_post_filtered(self, mcp_server):
+        """A cursor call with no min_received neither injects the 7-day default
+        nor post-filters: the page cap is the only bound, so old mail survives."""
+        old_message = {
+            **SAMPLE_DELTA_MESSAGE,
+            "id": "old003=",
+            "receivedDateTime": "2019-01-01T00:00:00Z",
+        }
+        page = {"@odata.deltaLink": SAMPLE_DELTA_LINK, "value": [old_message]}
+        route = respx.get(SAMPLE_DELTA_NEXT_LINK).mock(return_value=httpx.Response(200, json=page))
+        with _mock_token():
+            result = await _call(mcp_server, "sync_mail", {"cursor": SAMPLE_DELTA_NEXT_LINK})
+
+        assert str(route.calls[0].request.url) == SAMPLE_DELTA_NEXT_LINK
+        data = _structured(result)
+        assert data["messages"] == [old_message]
+        assert data["has_more"] is False
+
+    @respx.mock
     async def test_floor_is_reapplied_to_every_drained_page(self, mcp_server, monkeypatch):
-        """Trigger B: an older message surfacing on page 2 is dropped, tombstones
-        and recent mail survive, and external senders stay hidden."""
+        """An older message surfacing on page 2 is dropped, tombstones and
+        recent mail survive, and external senders stay hidden."""
         _policy_on(monkeypatch)
         old_message = {
             **SAMPLE_DELTA_MESSAGE,

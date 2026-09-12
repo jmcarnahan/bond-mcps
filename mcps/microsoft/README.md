@@ -315,7 +315,7 @@ poetry run fastmcp run ms_graph_mcp.py --transport streamable-http --port 18001
 | `export_report` | Export a Power BI report to PDF, PNG, or PPTX and save it to OneDrive; returns the file's size, `item_id`, and link |
 | `get_profile` | Get the signed-in user's identity, or another directory user's, plus their profile photo: `user` targets an id or UPN, `photo` is `metadata` or `bytes` (sized by `photo_size`, default 240x240), and the photo keys are null when none is set |
 | `search_people` | Search the organisation directory by name or mail prefix |
-| `sync_mail` | Fetch one page of a mail folder's delta feed for incremental sync |
+| `sync_mail` | Drain a mail folder's delta feed for incremental sync, up to a per-call page cap; `min_received` is a hard floor on every page returned (send it on every call, including continuations), a fresh call without one defaults to the last 7 days, and `has_more` says the cap stopped the run early |
 | `manage_draft` | Compose, edit, attach to, and send mail drafts: `action` is `create`, `reply`, `update_body`, `add_attachment`, or `send`; the draft actions return its ids, web link, and recipients, `update_body` returns `ok`, `add_attachment` returns `attachment_id`, and `send` returns the ids the sent copy carries |
 | `mark_mail_read` | Mark messages read or unread in bulk, best effort per message |
 | `get_chat_members` | List a chat's members (user IDs and display names) |

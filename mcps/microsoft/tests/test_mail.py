@@ -1177,6 +1177,14 @@ class TestAfterFloor:
         kept = mail.after_floor([SAMPLE_DELTA_MESSAGE, "not-a-dict", None], "2026-01-01T00:00:00Z")
         assert kept == [SAMPLE_DELTA_MESSAGE]
 
+    def test_null_received_date_is_dropped_not_raised(self):
+        """Graph sending the key as null must not surface as a tool error, which
+        the client would retry forever; the row is dropped fail-closed instead."""
+        null_date = {**SAMPLE_DELTA_MESSAGE, "id": "null=", "receivedDateTime": None}
+        missing = {k: v for k, v in SAMPLE_DELTA_MESSAGE.items() if k != "receivedDateTime"}
+        kept = mail.after_floor([SAMPLE_DELTA_MESSAGE, null_date, missing], "2026-01-01T00:00:00Z")
+        assert kept == [SAMPLE_DELTA_MESSAGE]
+
     def test_millisecond_and_zone_suffix_do_not_skew_compare(self):
         msg = {**SAMPLE_DELTA_MESSAGE, "receivedDateTime": "2026-01-01T00:00:00.500Z"}
         # Same second as the floor: normalized to second precision, it is kept.

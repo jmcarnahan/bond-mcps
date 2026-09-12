@@ -703,7 +703,10 @@ def after_floor(messages: list[Any], floor: str) -> list[Any]:
     ``mail_policy.filter_messages`` uses, because the client needs them to delete
     rows regardless of when the deleted item arrived. An empty ``floor`` returns
     the input unchanged; timestamps are normalized to second precision so a
-    millisecond/timezone suffix cannot skew the comparison.
+    millisecond/timezone suffix cannot skew the comparison. A message whose
+    ``receivedDateTime`` is missing or null is dropped (fail closed) rather than
+    raising, because a raised error reads to the client as "retry later" and
+    would wedge the sync on that page.
     """
     floor_norm = _normalize_ts(floor)
     if not floor_norm:
@@ -712,7 +715,7 @@ def after_floor(messages: list[Any], floor: str) -> list[Any]:
         msg
         for msg in messages
         if isinstance(msg, dict)
-        and ("@removed" in msg or _normalize_ts(msg.get("receivedDateTime", "")) >= floor_norm)
+        and ("@removed" in msg or _normalize_ts(msg.get("receivedDateTime") or "") >= floor_norm)
     ]
 
 

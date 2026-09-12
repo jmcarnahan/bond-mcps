@@ -3899,8 +3899,8 @@ async def sync_mail(folder: str = "inbox", cursor: str = "", min_received: str =
         except ValueError as e:
             return {"error": "invalid_date", "reason": str(e)}
     elif not cursor:
-        # Trigger A: a fresh enumeration with no floor must not walk the whole
-        # mailbox — default to the last 7 days.
+        # A fresh enumeration with no floor must not walk the whole mailbox —
+        # default to the last 7 days.
         floor = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
     else:
         # Continuation without a floor: rely on the page cap. The delta token is
