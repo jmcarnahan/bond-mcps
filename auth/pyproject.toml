@@ -39,7 +39,10 @@ fastmcp = ">=3.0,<4.0"
 # every dev installs (it backs both the proxy and the AS). Pre-commit hook
 # config + runners live at the repo root (.pre-commit-config.yaml, pyproject.toml).
 pre-commit = ">=4.0,<5.0"
-ruff = ">=0.6,<1.0"
+# Pinned to the exact version .pre-commit-config.yaml runs in CI, so `make lint`
+# and the pre-commit hook agree; a floating range drifted to 0.15 and flagged
+# 46 I001 import-sort findings that CI never sees. Bump both together.
+ruff = "0.6.9"
 bandit = {version = ">=1.7,<2.0", extras = ["toml"]}
 
 [tool.poetry.scripts]
