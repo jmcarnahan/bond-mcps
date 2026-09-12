@@ -111,7 +111,11 @@ class TestCompactPath:
     """No desktop header — the model-facing rendering."""
 
     async def test_status_dict_renders_compactly(self, mcp_server):
-        result = await _call(mcp_server, "connection_status")
+        # Laptop (MSAL) mode raises a bare PermissionError with no connect_url.
+        # Without the patch this test reaches the real Graph API on a signed-in
+        # machine and renders that account instead — it only ever passed in CI.
+        with patch("ms_graph_mcp.get_graph_token", side_effect=PermissionError("no auth")):
+            result = await _call(mcp_server, "connection_status")
 
         assert result.structured_content is None
         # `scopes: []` makes this an (empty) table, so the list key leads and
