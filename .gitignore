@@ -31,6 +31,10 @@ tmp/
 # commit — it's machine-specific and may contain task IDs that leak.
 .claude/
 
+# Local parking lot for finished-round notes and one-off scripts kept out of the
+# tree so `make deploy-check` sees a clean working tree.
+.archive/
+
 # Org-specific operational notes that should not be committed to a public/
 # fork-shareable repo. Local working notes only.
 docs/REDIRECT_URIS.md
