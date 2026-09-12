@@ -6,11 +6,12 @@ All functions accept a GraphClient or AsyncGraphClient and return parsed dicts.
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, unquote
 
 from .graph_client import AsyncGraphClient, GraphClient, GraphError
-from .pagination import apaginate
+from .pagination import _MAX_PAGES, _normalize_ts, apaginate
 
 logger = logging.getLogger(__name__)
 
@@ -664,6 +665,128 @@ async def adelta_page(
     if cursor:
         return await client.get(cursor)
     return await client.get(_delta_path(folder, min_received))
+
+
+def normalize_received_floor(value: str) -> str:
+    """Validate and canonicalize a received-date floor to UTC second precision.
+
+    Accepts a bare date (``YYYY-MM-DD``, read as midnight UTC) or an ISO 8601
+    datetime with or without a trailing ``Z`` (either case) / numeric offset;
+    surrounding whitespace is ignored. Returns a
+    canonical ``%Y-%m-%dT%H:%M:%SZ`` string — always UTC — so the Graph
+    ``$filter`` and the ``after_floor`` post-filter measure against the same
+    instant even if the caller sent an offset; an empty input returns ``""``.
+
+    Raises ValueError on anything that is not a real date/time. This is a full
+    parse, not a shape check: a bad month or day (``2026-13-01``) is rejected
+    here and surfaced as ``invalid_date`` rather than silently sorting above
+    every real timestamp and dropping the whole mailbox in ``after_floor``.
+    """
+    value = value.strip()
+    if not value:
+        return ""
+    if value[-1] in "zZ":
+        value = value[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid min_received: {value!r}. Use YYYY-MM-DD or an ISO 8601 datetime."
+        ) from e
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def after_floor(messages: list[Any], floor: str) -> list[Any]:
+    """Drop messages older than a received-date floor. Identity when no floor.
+
+    The delta token is not trusted to carry the ``$filter`` across pages, so the
+    floor is re-applied to every page here. ``@removed`` tombstones carry no
+    ``receivedDateTime`` and are kept unconditionally — same short-circuit
+    ``mail_policy.filter_messages`` uses, because the client needs them to delete
+    rows regardless of when the deleted item arrived. An empty ``floor`` returns
+    the input unchanged; timestamps are normalized to second precision so a
+    millisecond/timezone suffix cannot skew the comparison. A message whose
+    ``receivedDateTime`` is missing or null is dropped (fail closed) rather than
+    raising, because a raised error reads to the client as "retry later" and
+    would wedge the sync on that page.
+    """
+    floor_norm = _normalize_ts(floor)
+    if not floor_norm:
+        return messages
+    return [
+        msg
+        for msg in messages
+        if isinstance(msg, dict)
+        and ("@removed" in msg or _normalize_ts(msg.get("receivedDateTime") or "") >= floor_norm)
+    ]
+
+
+def _page_values(page: Any) -> list[Any]:
+    """The ``value`` array of a delta page, or ``[]`` when it is missing or malformed."""
+    values = page.get("value") if isinstance(page, dict) else None
+    return list(values) if isinstance(values, list) else []
+
+
+async def adelta_drain(
+    client: AsyncGraphClient,
+    folder: str = "inbox",
+    cursor: str = "",
+    min_received: str = "",
+    max_pages: int = _MAX_PAGES,
+) -> dict[str, Any]:
+    """Drain up to ``max_pages`` of the folder delta feed in one call.
+
+    Follows ``@odata.nextLink`` verbatim, accumulating each page's ``value``.
+    Returns ``{"value", "next_cursor", "delta_cursor"}``:
+
+    - ``delta_cursor`` (the run's ``@odata.deltaLink``) is set only when the feed
+      was drained to the end — save it and pass it back next time.
+    - ``next_cursor`` (a surviving ``@odata.nextLink``) is set only when the page
+      cap stopped the drain early — more pages remain in this run.
+
+    Exactly one of the two is non-empty on a normal run. A ``GraphError`` on
+    the first page propagates to the tool layer (a 410 for a stale cursor maps
+    to a resync there). A non-410 failure on a later page — a throttle, a 5xx —
+    ends the drain early instead: the pages already fetched are returned and
+    the link that failed comes back as ``next_cursor``, so the caller keeps its
+    progress rather than refetching every earlier page; if the fault persists
+    it surfaces on the next call, whose first fetch always propagates. A 410
+    on any page propagates, because the whole run is stale. The date
+    ``$filter`` on the fresh-start URL is a first-line filter only; callers
+    must still post-filter with ``after_floor`` because the delta token is not
+    trusted to preserve it across pages.
+    """
+    data = await adelta_page(client, folder=folder, cursor=cursor, min_received=min_received)
+    values: list[Any] = _page_values(data)
+
+    pages = 1
+    while pages < max_pages:
+        next_link = data.get("@odata.nextLink")
+        if not next_link:
+            break
+        try:
+            page = await client.get(next_link)
+        except GraphError as e:
+            if e.status_code == 410:
+                raise
+            logger.warning(
+                "adelta_drain: stopping after %d page(s), keeping progress: %s", pages, e
+            )
+            break
+        data = page
+        values.extend(_page_values(data))
+        pages += 1
+
+    if not data.get("@odata.nextLink") and not data.get("@odata.deltaLink"):
+        logger.warning("adelta_drain: page carried neither nextLink nor deltaLink")
+
+    return {
+        "value": values,
+        "next_cursor": data.get("@odata.nextLink", ""),
+        "delta_cursor": data.get("@odata.deltaLink", ""),
+    }
 
 
 async def aget_message_detail(
