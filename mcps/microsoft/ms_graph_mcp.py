@@ -3879,6 +3879,15 @@ async def sync_mail(folder: str = "inbox", cursor: str = "", min_received: str =
     reads), not how many delta pages Graph emits: a run still pages through the
     feed to its deltaLink, up to a per-call page cap, so a first sync of a large
     mailbox can take several calls even though each returns only in-window rows.
+    The floor also bounds updates: a change to a message received before it (a
+    read-state flip, a move) is dropped like the message itself, so a client
+    that keeps older rows locally should send the floor it originally synced
+    from, not a rolling one; `@removed` tombstones always pass through.
+
+    A throttle or Graph 5xx partway through a run does not lose the pages
+    already drained: they are returned with has_more true and the link that
+    failed as next_cursor, and the fault surfaces on the next call if it
+    persists. The same fault on the first page propagates as a tool error.
 
     A resync of true means the saved cursor has expired: discard local state
     for the folder and call again with an empty cursor. A cursor that is not a

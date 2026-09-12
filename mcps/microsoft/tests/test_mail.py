@@ -1138,6 +1138,10 @@ class TestNormalizeReceivedFloor:
     def test_naive_datetime_is_treated_as_utc(self):
         assert mail.normalize_received_floor("2026-01-05T09:00:00") == "2026-01-05T09:00:00Z"
 
+    def test_whitespace_and_lowercase_z_are_tolerated(self):
+        assert mail.normalize_received_floor("  2026-01-05T09:00:00z\n") == "2026-01-05T09:00:00Z"
+        assert mail.normalize_received_floor("   ") == ""
+
     def test_fractional_seconds_dropped(self):
         assert mail.normalize_received_floor("2026-01-05T09:00:00.500Z") == "2026-01-05T09:00:00Z"
 
@@ -1241,6 +1245,60 @@ class TestDeltaDrain:
                 await mail.adelta_drain(client, cursor=SAMPLE_DELTA_LINK)
 
         assert exc.value.status_code == 410
+
+    @respx.mock
+    async def test_mid_drain_throttle_keeps_progress_and_surfaces_failed_link(self):
+        """A 429 on page 2 returns page 1 with the failed link as next_cursor."""
+        respx.get(SAMPLE_DELTA_NEXT_LINK).mock(
+            return_value=httpx.Response(429, json={"error": {"code": "x", "message": "slow"}})
+        )
+        respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.adelta_drain(client, folder="inbox")
+
+        assert data["value"] == [SAMPLE_DELTA_MESSAGE]
+        assert data["next_cursor"] == SAMPLE_DELTA_NEXT_LINK
+        assert data["delta_cursor"] == ""
+
+    @respx.mock
+    async def test_mid_drain_410_still_propagates(self):
+        """A stale cursor is stale for the whole run: no partial progress."""
+        respx.get(SAMPLE_DELTA_NEXT_LINK).mock(
+            return_value=httpx.Response(410, json=GRAPH_ERROR_410)
+        )
+        respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await mail.adelta_drain(client, folder="inbox")
+
+        assert exc.value.status_code == 410
+
+    @respx.mock
+    async def test_first_page_failure_propagates(self):
+        """Nothing drained yet, so there is no progress to keep — the error is the answer."""
+        respx.get(url__startswith=DELTA_URL).mock(
+            return_value=httpx.Response(503, json={"error": {"code": "x", "message": "down"}})
+        )
+        async with AsyncGraphClient("tok") as client:
+            with pytest.raises(GraphError) as exc:
+                await mail.adelta_drain(client, folder="inbox")
+
+        assert exc.value.status_code == 503
+
+    @respx.mock
+    async def test_malformed_value_is_treated_as_empty(self):
+        """A page whose value is not a list contributes nothing rather than raising."""
+        page = {"@odata.deltaLink": SAMPLE_DELTA_LINK, "value": {"oops": 1}}
+        respx.get(url__startswith=DELTA_URL).mock(return_value=httpx.Response(200, json=page))
+        async with AsyncGraphClient("tok") as client:
+            data = await mail.adelta_drain(client, folder="inbox")
+
+        assert data["value"] == []
+        assert data["delta_cursor"] == SAMPLE_DELTA_LINK
 
 
 class TestGetMessageDetailSync:

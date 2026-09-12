@@ -671,7 +671,8 @@ def normalize_received_floor(value: str) -> str:
     """Validate and canonicalize a received-date floor to UTC second precision.
 
     Accepts a bare date (``YYYY-MM-DD``, read as midnight UTC) or an ISO 8601
-    datetime with or without a trailing ``Z`` / numeric offset. Returns a
+    datetime with or without a trailing ``Z`` (either case) / numeric offset;
+    surrounding whitespace is ignored. Returns a
     canonical ``%Y-%m-%dT%H:%M:%SZ`` string — always UTC — so the Graph
     ``$filter`` and the ``after_floor`` post-filter measure against the same
     instant even if the caller sent an offset; an empty input returns ``""``.
@@ -681,10 +682,13 @@ def normalize_received_floor(value: str) -> str:
     here and surfaced as ``invalid_date`` rather than silently sorting above
     every real timestamp and dropping the whole mailbox in ``after_floor``.
     """
+    value = value.strip()
     if not value:
         return ""
+    if value[-1] in "zZ":
+        value = value[:-1] + "+00:00"
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as e:
         raise ValueError(
             f"Invalid min_received: {value!r}. Use YYYY-MM-DD or an ISO 8601 datetime."
@@ -719,6 +723,12 @@ def after_floor(messages: list[Any], floor: str) -> list[Any]:
     ]
 
 
+def _page_values(page: Any) -> list[Any]:
+    """The ``value`` array of a delta page, or ``[]`` when it is missing or malformed."""
+    values = page.get("value") if isinstance(page, dict) else None
+    return list(values) if isinstance(values, list) else []
+
+
 async def adelta_drain(
     client: AsyncGraphClient,
     folder: str = "inbox",
@@ -736,23 +746,41 @@ async def adelta_drain(
     - ``next_cursor`` (a surviving ``@odata.nextLink``) is set only when the page
       cap stopped the drain early — more pages remain in this run.
 
-    Exactly one of the two is non-empty on a normal run. ``GraphError`` (incl. a
-    410 for a stale cursor) propagates to the tool layer, which maps it to a
-    resync. The date ``$filter`` on the fresh-start URL is a first-line filter
-    only; callers must still post-filter with ``after_floor`` because the delta
-    token is not trusted to preserve it across pages.
+    Exactly one of the two is non-empty on a normal run. A ``GraphError`` on
+    the first page propagates to the tool layer (a 410 for a stale cursor maps
+    to a resync there). A non-410 failure on a later page — a throttle, a 5xx —
+    ends the drain early instead: the pages already fetched are returned and
+    the link that failed comes back as ``next_cursor``, so the caller keeps its
+    progress rather than refetching every earlier page; if the fault persists
+    it surfaces on the next call, whose first fetch always propagates. A 410
+    on any page propagates, because the whole run is stale. The date
+    ``$filter`` on the fresh-start URL is a first-line filter only; callers
+    must still post-filter with ``after_floor`` because the delta token is not
+    trusted to preserve it across pages.
     """
     data = await adelta_page(client, folder=folder, cursor=cursor, min_received=min_received)
-    values: list[Any] = list(data.get("value", []))
+    values: list[Any] = _page_values(data)
 
     pages = 1
     while pages < max_pages:
         next_link = data.get("@odata.nextLink")
         if not next_link:
             break
-        data = await client.get(next_link)
-        values.extend(data.get("value", []))
+        try:
+            page = await client.get(next_link)
+        except GraphError as e:
+            if e.status_code == 410:
+                raise
+            logger.warning(
+                "adelta_drain: stopping after %d page(s), keeping progress: %s", pages, e
+            )
+            break
+        data = page
+        values.extend(_page_values(data))
         pages += 1
+
+    if not data.get("@odata.nextLink") and not data.get("@odata.deltaLink"):
+        logger.warning("adelta_drain: page carried neither nextLink nor deltaLink")
 
     return {
         "value": values,

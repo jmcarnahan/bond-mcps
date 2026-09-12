@@ -6413,8 +6413,28 @@ class TestMCPSyncMail:
         }
 
     @respx.mock
+    async def test_mid_drain_failure_returns_progress_with_has_more(self, mcp_server):
+        """A 5xx on page 2 hands back page 1 (floored) with has_more=True and the
+        failed link as next_cursor, instead of a tool error that discards it."""
+        respx.get(SAMPLE_DELTA_NEXT_LINK).mock(
+            return_value=httpx.Response(503, json={"error": {"code": "x", "message": "down"}})
+        )
+        respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
+            return_value=httpx.Response(200, json=SAMPLE_DELTA_PAGE_NEXT)
+        )
+        with _mock_token():
+            result = await _call(mcp_server, "sync_mail", {"min_received": "2026-01-01T00:00:00Z"})
+
+        data = _structured(result)
+        assert data["messages"] == [SAMPLE_DELTA_MESSAGE]
+        assert data["next_cursor"] == SAMPLE_DELTA_NEXT_LINK
+        assert data["has_more"] is True
+        assert data["delta_cursor"] == ""
+        assert data["resync"] is False
+
+    @respx.mock
     async def test_other_graph_errors_propagate(self, mcp_server):
-        """A 500 is the client's "transient, retry later" signal — not a resync."""
+        """A 500 on the first page is the client's "transient, retry later" signal — not a resync."""
         respx.get(url__startswith=f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta").mock(
             return_value=httpx.Response(500, json={"error": {"code": "x", "message": "boom"}})
         )
