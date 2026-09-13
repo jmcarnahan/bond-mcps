@@ -403,12 +403,15 @@ def _handle_refresh_grant(form) -> Response:
             status_code=400,
         )
     try:
-        issued = code_store.consume_refresh_token(refresh_token, client_id=client_id)
+        issued = code_store.rotate_refresh_token(refresh_token, client_id=client_id)
     except code_store.AuthCodeError as exc:
-        return JSONResponse(
-            {"error": "invalid_grant", "error_description": str(exc)},
-            status_code=400,
-        )
+        body = {"error": "invalid_grant", "error_description": str(exc)}
+        # Non-standard extension beside the description: the desktop turns it
+        # into an honest message ("expired" reads nothing like "revoked"),
+        # and matching on the prose would rot the first time it is reworded.
+        if exc.reason is not None:
+            body["error_reason"] = exc.reason
+        return JSONResponse(body, status_code=400)
     # Email isn't preserved on the refresh-token row (it can drift from the
     # upstream IdP between sessions). The access token re-issued here is
     # bound to the original user_key + audience.
@@ -418,6 +421,7 @@ def _handle_refresh_grant(form) -> Response:
         client_id=issued.client_id,
         resource=issued.resource,
         scope=issued.scope,
+        refresh_token=issued.refresh_token,
     )
 
 
@@ -428,9 +432,15 @@ def _build_token_response(
     client_id: str,
     resource: str | None,
     scope: str | None,
+    refresh_token: str | None = None,
 ) -> Response:
     """Common path for the two grants — sign a JWT + issue a rotating
-    refresh token + format the OAuth 2.0 token response."""
+    refresh token + format the OAuth 2.0 token response.
+
+    The refresh grant already minted its successor inside the rotation
+    transaction and passes it in; the code grant passes nothing and gets a
+    fresh token issued here.
+    """
     access_token = _sign_access_token(
         user_key=user_key,
         email=email,
@@ -438,12 +448,13 @@ def _build_token_response(
         resource=resource,
         scope=scope,
     )
-    refresh_token = code_store.issue_refresh_token(
-        client_id=client_id,
-        user_key=user_key,
-        resource=resource,
-        scope=scope,
-    )
+    if refresh_token is None:
+        refresh_token = code_store.issue_refresh_token(
+            client_id=client_id,
+            user_key=user_key,
+            resource=resource,
+            scope=scope,
+        )
     return JSONResponse(
         {
             "access_token": access_token,

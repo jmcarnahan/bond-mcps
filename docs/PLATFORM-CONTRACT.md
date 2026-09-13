@@ -65,7 +65,8 @@ breaks bond-ai's nginx upstreams — treat service keys as part of this contract
 | Discovery | MCP's RFC 9728 PRM document → `authorization_servers[0]` → that AS's RFC 8414 metadata |
 | Registration | `POST {AS}/oauth/register` (RFC 7591) on every interactive sign-in; `client_name` "Bond Desktop", one loopback redirect `http://127.0.0.1:<ephemeral>/callback`, public client (`token_endpoint_auth_method=none`) |
 | Authorize + token | both carry RFC 8707 `resource=<mcp url>`; no `scope` is sent |
-| Refresh | presents the DCR `client_id`, not the static one — refresh tokens are bound to the client they were issued to. A keychain slot with no stored id (a session from before the desktop stored one) refreshes as `bond-desktop`, the client it was issued to |
+| Refresh | presents the DCR `client_id`, not the static one — refresh tokens are bound to the client they were issued to. A keychain slot with no stored id (a session from before the desktop stored one) refreshes as `bond-desktop`, the client it was issued to. A rotation whose response was lost is honoured again while its successor is unused (`BOND_MCPS_AS_REFRESH_GRACE_SECONDS`, default 7 d); refusals carry `error_reason` (`unknown` / `revoked` / `expired` / `client_mismatch`) |
+| Sign-in prompt | `BOND_MCPS_UPSTREAM_PROMPT` is empty by default — an existing IdP session signs in without credentials. Set it to `login` for a credential form on every sign-in |
 | Fallback | static `client_id=bond-desktop`, redirect `http://127.0.0.1:8766/callback`, used ONLY against an AS whose metadata carries no `registration_endpoint`. No bond-mcps deployment needs to seed it. |
 | Operations | each desktop sign-in is one non-static `oauth_clients` row; `bond-mcps prune-oauth` retires idle ones |
 

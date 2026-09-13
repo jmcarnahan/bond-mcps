@@ -411,7 +411,19 @@ def test_refresh_token_round_trip(env, stub_upstream):
     assert access_obj is not None
     assert access_obj.claims["sub"] == stub_upstream.user_sub
     assert access_obj.claims["aud"] == f"{MCP_PUBLIC_URL}/mcp"
-    # The old refresh_token must be rejected on replay (rotation).
+    # Rotation, precisely: the old refresh_token is dead once the client has
+    # actually used its successor. Until then it is a client that may simply
+    # never have received the reply, and the AS honours it again (see
+    # tests/test_refresh_grace.py) rather than sign the user out.
+    third_response = as_client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": new_refresh,
+            "client_id": cid,
+        },
+    )
+    assert third_response.status_code == 200, third_response.text
     replay = as_client.post(
         "/oauth/token",
         data={
@@ -422,6 +434,7 @@ def test_refresh_token_round_trip(env, stub_upstream):
     )
     assert replay.status_code == 400
     assert replay.json()["error"] == "invalid_grant"
+    assert replay.json()["error_reason"] == "revoked"
 
 
 def test_synthetic_bond_desktop_flow(env, stub_upstream, monkeypatch):
@@ -566,19 +579,71 @@ def test_synthetic_bond_desktop_flow(env, stub_upstream, monkeypatch):
     assert refreshed.claims["aud"] == resource
     assert refreshed.claims["client_id"] == client_id
 
-    # Step 6: the binding that is why the desktop stores the client id beside
-    # the refresh token. Presenting the static id instead signs the user out.
-    wrong = as_client.post(
+    # Step 5b: the same refresh, but the app never saw the reply — the lid
+    # closed, or it was quit mid-launch. All it still has is first_refresh,
+    # and presenting it again must not cost a sign-in: the AS honours it
+    # because the successor it minted was never used.
+    r = as_client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": first_refresh,
+            "client_id": client_id,
+            "resource": resource,
+        },
+    )
+    assert r.status_code == 200, r.text
+    third_body = r.json()
+    third_refresh = third_body["refresh_token"]
+    assert third_refresh not in (first_refresh, second_refresh)
+    graced_access = asyncio.run(build_verifier().verify_token(third_body["access_token"]))
+    assert graced_access is not None, "JWTVerifier rejected the token from a graced refresh"
+    assert graced_access.claims["aud"] == resource
+    assert graced_access.claims["client_id"] == client_id
+
+    # The token the app never received is retired by that grace, so the grace
+    # is good exactly once per lost reply and a stolen copy is worth nothing.
+    stale = as_client.post(
         "/oauth/token",
         data={
             "grant_type": "refresh_token",
             "refresh_token": second_refresh,
+            "client_id": client_id,
+            "resource": resource,
+        },
+    )
+    assert stale.status_code == 400, stale.text
+    assert stale.json()["error"] == "invalid_grant"
+    assert stale.json()["error_reason"] == "revoked"
+
+    # Step 6: the binding that is why the desktop stores the client id beside
+    # the refresh token. Presenting the static id instead signs the user out —
+    # and says so precisely enough for the app to word the message honestly.
+    wrong = as_client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": third_refresh,
             "client_id": "bond-desktop",
             "resource": resource,
         },
     )
     assert wrong.status_code == 400, wrong.text
     assert wrong.json()["error"] == "invalid_grant"
+    assert wrong.json()["error_reason"] == "client_mismatch"
+
+    # And that refusal revoked nothing: a session must not die because some
+    # other caller presented its token under the wrong client id.
+    r = as_client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": third_refresh,
+            "client_id": client_id,
+            "resource": resource,
+        },
+    )
+    assert r.status_code == 200, r.text
 
 
 def test_desktop_registration_needs_no_allowlist(env, monkeypatch):

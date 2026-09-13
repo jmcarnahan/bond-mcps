@@ -140,6 +140,11 @@ class OAuthRefreshToken(Base):
     resource = Column(String, nullable=True)
     scope = Column(String, nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+    # Hash of the successor minted when this row was rotated. NULL on a live
+    # row and on a row retired by the grace path (nothing was minted for it).
+    # Rotation can honour a revoked token again while its successor is unused,
+    # which is only knowable if the revoked row names the successor.
+    replaced_by_hash = Column(String, nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 

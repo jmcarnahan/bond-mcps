@@ -12,10 +12,18 @@ tables. The opaque token values are never stored in plaintext:
 Both stores enforce single-use semantics via an atomic UPDATE ... WHERE
 used_at IS NULL idiom (works on SQLite and Postgres). Expired rows are
 swept lazily on each insert.
+
+Refresh tokens rotate: ``rotate_refresh_token`` revokes the presented token,
+mints its successor and records the successor's hash on the revoked row, all
+in one transaction. That record is what lets a rotation whose response never
+reached the client be honoured a second time while the successor sits unused
+-- see ``refresh_grace_seconds``.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -27,6 +35,8 @@ from auth.db.repository import build_default_resolver
 from auth.db.session import get_session
 from auth.oauth_utils import generate_opaque_secret, sha256_b64u
 
+logger = logging.getLogger(__name__)
+
 AUTH_CODE_TTL_SECONDS = 60
 PENDING_AUTH_TTL_SECONDS = 600
 # Refresh-token TTL is a sliding window: each successful refresh issues a
@@ -35,9 +45,22 @@ PENDING_AUTH_TTL_SECONDS = 600
 # enough that a stale workstation isn't a long-lived attack window.
 REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 3600
 
+_ENV_REFRESH_GRACE_SECONDS = "BOND_MCPS_AS_REFRESH_GRACE_SECONDS"
+_DEFAULT_REFRESH_GRACE_SECONDS = 7 * 24 * 3600
+
 
 class AuthCodeError(RuntimeError):
-    """Code lookup / consumption failed (unknown, expired, or already used)."""
+    """Code lookup / consumption failed (unknown, expired, or already used).
+
+    ``reason`` is an optional stable tag the token endpoint surfaces as
+    ``error_reason`` beside ``error_description``. Clients that want to tell
+    an expired session from a revoked one need something that does not rot
+    when the prose is reworded.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -261,14 +284,77 @@ def consume_auth_code(
 # ---------------------------------------------------------------------------
 
 
+def refresh_grace_seconds() -> int:
+    """How long after revocation a rotated refresh token may still be used.
+
+    A refresh POST that reaches the AS but whose response is lost (lid
+    closed, VPN dropping in, the app quit mid-launch) leaves the client
+    holding a token the AS has already revoked. Its only move is to present
+    that token again, which is indistinguishable from a replay unless the AS
+    remembers what replaced it. It does: while the recorded successor has
+    never been used, the presentation is honoured (see
+    ``rotate_refresh_token``). This window bounds that offer in wall-clock
+    time; the unused-successor rule is the safety property, since a stolen
+    token cannot be graced once the real client has moved on.
+
+    Default 7 days, matching ``bond-mcps prune-oauth --revoked-grace-days``:
+    prune deletes revoked rows older than that, so a longer grace would
+    promise something the database no longer remembers. ``0`` restores
+    strict single-use rotation. Operators wanting Okta's posture set 30.
+    Anything above the refresh token's own lifetime is clamped to it: past
+    that the token has expired anyway, and an absurd value would overflow
+    ``timedelta``.
+    """
+    raw = (os.environ.get(_ENV_REFRESH_GRACE_SECONDS) or "").strip()
+    if not raw:
+        return _DEFAULT_REFRESH_GRACE_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not an integer; using default %ss",
+            _ENV_REFRESH_GRACE_SECONDS,
+            raw,
+            _DEFAULT_REFRESH_GRACE_SECONDS,
+        )
+        return _DEFAULT_REFRESH_GRACE_SECONDS
+    if value < 0:
+        logger.warning(
+            "%s=%r is negative; using default %ss",
+            _ENV_REFRESH_GRACE_SECONDS,
+            raw,
+            _DEFAULT_REFRESH_GRACE_SECONDS,
+        )
+        return _DEFAULT_REFRESH_GRACE_SECONDS
+    if value > REFRESH_TOKEN_TTL_SECONDS:
+        logger.warning(
+            "%s=%r exceeds the refresh token lifetime; clamping to %ss",
+            _ENV_REFRESH_GRACE_SECONDS,
+            raw,
+            REFRESH_TOKEN_TTL_SECONDS,
+        )
+        return REFRESH_TOKEN_TTL_SECONDS
+    return value
+
+
 @dataclass(frozen=True)
-class IssuedRefreshToken:
-    """Returned by ``consume_refresh_token`` after validation."""
+class RotatedRefreshToken:
+    """Returned by ``rotate_refresh_token``: bindings plus the successor.
+
+    ``refresh_token`` is the opaque successor the caller must hand back to
+    the client. ``graced`` records that the presented token had already been
+    revoked and was honoured because its own successor was never used.
+    """
 
     client_id: str
     user_key: str
     resource: str | None
     scope: str | None
+    refresh_token: str
+    # No production consumer today: the token response looks the same either
+    # way, deliberately. It is here so the tests can tell a grace from a plain
+    # rotation, which is the whole behaviour under test — don't tidy it away.
+    graced: bool
 
 
 def issue_refresh_token(
@@ -297,16 +383,35 @@ def issue_refresh_token(
     return token
 
 
-def consume_refresh_token(
+def rotate_refresh_token(
     refresh_token: str,
     *,
     client_id: str,
-) -> IssuedRefreshToken:
-    """Atomically revoke the supplied refresh token and return its bindings.
+) -> RotatedRefreshToken:
+    """Revoke the presented refresh token and mint its successor, atomically.
 
-    The caller mints a *new* refresh token after this returns — refresh
-    token rotation per RFC 6749 §10.4 and OAuth 2.1's strong recommendation
-    for public clients.
+    Rotation per RFC 6749 §10.4 and OAuth 2.1's strong recommendation for
+    public clients. Revoke, mint and the successor pointer all happen in one
+    transaction, so there is no instant where the presented token is revoked
+    but names no successor — a retry landing in that gap would be refused and
+    would cost the user a sign-in.
+
+    A token that is already revoked is honoured once more when its recorded
+    successor has never been used and the grace window has not closed: that
+    is a lost response, not a replay. Honouring it retires the unused
+    successor, so the offer is good exactly once per lost response.
+
+    Every refusal raises ``AuthCodeError`` with a ``reason`` and rolls the
+    whole transaction back — a refused presentation must change nothing.
+
+    Two simultaneous presentations of the same *live* token both succeed. The
+    loser blocks on the row lock, finds the revoke matched nothing, takes the
+    grace path and retires the winner's successor — so whoever received the
+    first reply is holding a dead token and is refused (``revoked``) on its
+    next refresh. That is the one case where the grace costs a sign-in strict
+    rotation would not have. A well-behaved client never has two refreshes in
+    flight (Bond Desktop coalesces them), so it surfaces a client bug late
+    rather than a defect here.
     """
     token_hash = sha256_b64u(refresh_token)
     now = datetime.now(timezone.utc)
@@ -320,22 +425,84 @@ def consume_refresh_token(
             )
             .values(revoked_at=now)
         ).rowcount
-        if not updated:
-            existing = session.get(OAuthRefreshToken, token_hash)
-            if existing is None:
-                raise AuthCodeError("Unknown refresh token.")
-            raise AuthCodeError("Refresh token has been revoked.")
-
+        # `row` can only be None when the revoke matched nothing: a matched
+        # row exists by definition, which is why the `updated` branch below
+        # dereferences it unguarded.
         row = session.get(OAuthRefreshToken, token_hash)
-        if _aware(row.expires_at) < now:
-            raise AuthCodeError("Refresh token expired; sign in again.")
-        if row.client_id != client_id:
-            raise AuthCodeError("Refresh token was issued to a different client.")
-        return IssuedRefreshToken(
+
+        if updated:
+            graced = False
+            if _aware(row.expires_at) < now:
+                raise AuthCodeError("Refresh token expired; sign in again.", reason="expired")
+            if row.client_id != client_id:
+                raise AuthCodeError(
+                    "Refresh token was issued to a different client.",
+                    reason="client_mismatch",
+                )
+        else:
+            if row is None:
+                raise AuthCodeError("Unknown refresh token.", reason="unknown")
+            revoked = "Refresh token has been revoked."
+            grace = refresh_grace_seconds()
+            if grace <= 0:
+                raise AuthCodeError(revoked, reason="revoked")
+            if row.replaced_by_hash is None:
+                raise AuthCodeError(revoked, reason="revoked")
+            if row.revoked_at is None or now - _aware(row.revoked_at) > timedelta(seconds=grace):
+                raise AuthCodeError(revoked, reason="revoked")
+            # The bindings are still the presented row's, so they are still
+            # checked before anything is retired.
+            if _aware(row.expires_at) < now:
+                raise AuthCodeError("Refresh token expired; sign in again.", reason="expired")
+            if row.client_id != client_id:
+                raise AuthCodeError(
+                    "Refresh token was issued to a different client.",
+                    reason="client_mismatch",
+                )
+            # Retiring the successor is the atomic test for "never used": if
+            # the client did receive it and rotated with it, or a concurrent
+            # grace got there first, this updates zero rows and the
+            # presentation is a genuine replay.
+            retired = session.execute(
+                update(OAuthRefreshToken)
+                .where(
+                    OAuthRefreshToken.token_hash == row.replaced_by_hash,
+                    OAuthRefreshToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=now)
+            ).rowcount
+            if retired != 1:
+                raise AuthCodeError(revoked, reason="revoked")
+            graced = True
+            logger.info(
+                "refresh token rotation graced for client %s (successor unused)",
+                row.client_id,
+            )
+
+        # Mint the successor in this same transaction. On the grace path the
+        # presented row's revoked_at is left alone: the window counts from the
+        # first revocation, so a client stuck offline cannot renew it forever.
+        new_token = generate_opaque_secret(48)
+        new_hash = sha256_b64u(new_token)
+        _sweep_refresh_tokens(session, now)
+        session.add(
+            OAuthRefreshToken(
+                token_hash=new_hash,
+                client_id=row.client_id,
+                user_key=row.user_key,
+                resource=row.resource,
+                scope=row.scope,
+                expires_at=now + timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS),
+            )
+        )
+        row.replaced_by_hash = new_hash
+        return RotatedRefreshToken(
             client_id=row.client_id,
             user_key=row.user_key,
             resource=row.resource,
             scope=row.scope,
+            refresh_token=new_token,
+            graced=graced,
         )
 
 
@@ -345,9 +512,10 @@ def consume_refresh_token(
 
 
 def _sweep_refresh_tokens(session, now: datetime) -> None:
-    """Remove long-expired rows. Revoked-but-recent rows are kept around
-    so a replayed token returns a useful 'already revoked' error rather
-    than a generic 'unknown token'."""
+    """Remove long-expired rows. Revoked-but-recent rows are kept around so
+    a replayed token returns a useful 'already revoked' error rather than a
+    generic 'unknown token' — and so the lost-response grace in
+    ``rotate_refresh_token`` can still find the successor they name."""
     cutoff = now - timedelta(days=7)
     session.query(OAuthRefreshToken).filter(OAuthRefreshToken.expires_at < cutoff).delete(
         synchronize_session=False
