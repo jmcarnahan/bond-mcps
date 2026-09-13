@@ -181,6 +181,10 @@ BOND_MCPS_STATIC_CLIENTS='[
 Then pass `--client-id bm-claude-code --callback-port 18999` to
 `claude mcp add`.
 
+Bond Desktop no longer needs one — it registers itself at each sign-in and
+falls back to the static `bond-desktop` client only against an AS that
+advertises no `registration_endpoint`.
+
 ## Provider token bootstrap (`/connect/<provider>`)
 
 When a tool call needs an upstream provider access token that the user

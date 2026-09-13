@@ -58,6 +58,17 @@ breaks bond-ai's nginx upstreams — treat service keys as part of this contract
 | Exchange | RFC 8693 on `POST {AS}/oauth/token`, `client_id=bond-ai`, `resource=<mcp url>`; AS resolves email → Cognito sub (pool of client `4uog2crm587odi3pb39e7b8726`) |
 | Browser front door | `https://ai.southbayequity.cloud` — `BOND_MCPS_CONNECT_PUBLIC_URL` on every MCP pod; bond-ai nginx routes `/connect/<p>/*`, `/connections/<p>/callback`, `/connections/discovery` to the services above |
 
+### Desktop client (bond-desktop)
+
+| Key | Value |
+|---|---|
+| Discovery | MCP's RFC 9728 PRM document → `authorization_servers[0]` → that AS's RFC 8414 metadata |
+| Registration | `POST {AS}/oauth/register` (RFC 7591) on every interactive sign-in; `client_name` "Bond Desktop", one loopback redirect `http://127.0.0.1:<ephemeral>/callback`, public client (`token_endpoint_auth_method=none`) |
+| Authorize + token | both carry RFC 8707 `resource=<mcp url>`; no `scope` is sent |
+| Refresh | presents the DCR `client_id`, not the static one — refresh tokens are bound to the client they were issued to. A keychain slot with no stored id (a session from before the desktop stored one) refreshes as `bond-desktop`, the client it was issued to |
+| Fallback | static `client_id=bond-desktop`, redirect `http://127.0.0.1:8766/callback`, used ONLY against an AS whose metadata carries no `registration_endpoint`. No bond-mcps deployment needs to seed it. |
+| Operations | each desktop sign-in is one non-static `oauth_clients` row; `bond-mcps prune-oauth` retires idle ones |
+
 ## MCP discovery
 
 bond-ai learns which MCPs exist from one or more discovery endpoints
