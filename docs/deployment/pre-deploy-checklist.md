@@ -238,8 +238,11 @@ client). Schedule the cleanup CLI on a daily cron:
 
 ```bash
 # Inside the AS pod (or any pod with the auth image)
-bond-mcps prune-oauth --client-idle-days 30 --revoked-grace-days 7
+bond-mcps prune-oauth --client-idle-days 30
 ```
+
+Revoked refresh tokens are kept one day past `BOND_MCPS_AS_REFRESH_GRACE_SECONDS`
+by default (8 days with the default grace); `--revoked-grace-days` overrides it.
 
 Or wire it into k8s as a CronJob using the same auth image.
 

@@ -297,10 +297,10 @@ def refresh_grace_seconds() -> int:
     time; the unused-successor rule is the safety property, since a stolen
     token cannot be graced once the real client has moved on.
 
-    Default 7 days, matching ``bond-mcps prune-oauth --revoked-grace-days``:
-    prune deletes revoked rows older than that, so a longer grace would
-    promise something the database no longer remembers. ``0`` restores
-    strict single-use rotation. Operators wanting Okta's posture set 30.
+    Default 7 days. ``bond-mcps prune-oauth`` keeps revoked rows one day past
+    this window unless told otherwise, so the grace never promises something
+    the database has already forgotten. ``0`` restores strict single-use
+    rotation. Operators wanting Okta's posture set 30.
     Anything above the refresh token's own lifetime is clamped to it: past
     that the token has expired anyway, and an absurd value would overflow
     ``timedelta``.
@@ -342,8 +342,9 @@ class RotatedRefreshToken:
     """Returned by ``rotate_refresh_token``: bindings plus the successor.
 
     ``refresh_token`` is the opaque successor the caller must hand back to
-    the client. ``graced`` records that the presented token had already been
-    revoked and was honoured because its own successor was never used.
+    the client. A graced rotation (the presented token was already revoked
+    and honoured because its successor was never used) returns the same
+    shape as a plain one, deliberately: the client cannot tell and need not.
     """
 
     client_id: str
@@ -351,10 +352,6 @@ class RotatedRefreshToken:
     resource: str | None
     scope: str | None
     refresh_token: str
-    # No production consumer today: the token response looks the same either
-    # way, deliberately. It is here so the tests can tell a grace from a plain
-    # rotation, which is the whole behaviour under test — don't tidy it away.
-    graced: bool
 
 
 def issue_refresh_token(
@@ -431,7 +428,6 @@ def rotate_refresh_token(
         row = session.get(OAuthRefreshToken, token_hash)
 
         if updated:
-            graced = False
             if _aware(row.expires_at) < now:
                 raise AuthCodeError("Refresh token expired; sign in again.", reason="expired")
             if row.client_id != client_id:
@@ -473,10 +469,13 @@ def rotate_refresh_token(
             ).rowcount
             if retired != 1:
                 raise AuthCodeError(revoked, reason="revoked")
-            graced = True
+            # The age is the operator's signal: a lost response is retried
+            # within minutes or at the next launch, so a grace days after the
+            # revocation is worth a second look.
             logger.info(
-                "refresh token rotation graced for client %s (successor unused)",
+                "refresh token rotation graced for client %s (successor unused, revoked %ds ago)",
                 row.client_id,
+                int((now - _aware(row.revoked_at)).total_seconds()),
             )
 
         # Mint the successor in this same transaction. On the grace path the
@@ -502,7 +501,6 @@ def rotate_refresh_token(
             resource=row.resource,
             scope=row.scope,
             refresh_token=new_token,
-            graced=graced,
         )
 
 

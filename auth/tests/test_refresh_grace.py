@@ -87,10 +87,9 @@ def test_a_lost_response_is_graced(token, monkeypatch):
     """The app rotated, the reply never arrived, it retries with what it has."""
     monkeypatch.delenv("BOND_MCPS_AS_REFRESH_GRACE_SECONDS", raising=False)
     first = rotate_refresh_token(token, client_id=CLIENT)
-    assert first.graced is False
 
+    # The retry is honoured and hands out a token of its own.
     retry = rotate_refresh_token(token, client_id=CLIENT)
-    assert retry.graced is True
     assert retry.refresh_token != first.refresh_token
     assert retry.user_key == USER
     assert retry.resource == RESOURCE
@@ -101,7 +100,7 @@ def test_a_lost_response_is_graced(token, monkeypatch):
     assert exc.value.reason == "revoked"
 
     # And the token the client did receive keeps working.
-    assert rotate_refresh_token(retry.refresh_token, client_id=CLIENT).graced is False
+    rotate_refresh_token(retry.refresh_token, client_id=CLIENT)
 
 
 def test_a_used_successor_is_not_graced(token, monkeypatch):
@@ -117,7 +116,7 @@ def test_a_used_successor_is_not_graced(token, monkeypatch):
     assert str(exc.value) == "Refresh token has been revoked."
 
     # The refusal changed nothing: the live token still rotates.
-    assert rotate_refresh_token(second.refresh_token, client_id=CLIENT).graced is False
+    rotate_refresh_token(second.refresh_token, client_id=CLIENT)
 
 
 def test_grace_disabled_is_strict_single_use(token, monkeypatch):
@@ -152,7 +151,7 @@ def test_grace_window_counts_from_the_first_revocation(token, monkeypatch):
     rotate_refresh_token(token, client_id=CLIENT)
 
     _shift(token, revoked_at=datetime.now(timezone.utc) - timedelta(seconds=45))
-    assert rotate_refresh_token(token, client_id=CLIENT).graced is True
+    rotate_refresh_token(token, client_id=CLIENT)  # inside the window: honoured
 
     _shift(token, revoked_at=datetime.now(timezone.utc) - timedelta(seconds=90))
     with pytest.raises(AuthCodeError) as exc:
@@ -174,7 +173,7 @@ def test_client_mismatch_inside_grace_keeps_the_successor_live(token, monkeypatc
         rotate_refresh_token(token, client_id="bm-someone-else")
     assert exc.value.reason == "client_mismatch"
 
-    assert rotate_refresh_token(first.refresh_token, client_id=CLIENT).graced is False
+    rotate_refresh_token(first.refresh_token, client_id=CLIENT)  # successor still live
 
 
 def test_a_live_token_presented_by_the_wrong_client_is_not_revoked(token, monkeypatch):
@@ -187,7 +186,7 @@ def test_a_live_token_presented_by_the_wrong_client_is_not_revoked(token, monkey
     assert exc.value.reason == "client_mismatch"
     assert _row(token)["revoked_at"] is None
 
-    assert rotate_refresh_token(token, client_id=CLIENT).graced is False
+    rotate_refresh_token(token, client_id=CLIENT)  # still live for its owner
 
 
 def test_expired_token_inside_grace(token, monkeypatch):
@@ -209,8 +208,6 @@ def test_two_lost_responses_in_a_row(token, monkeypatch):
 
     second = rotate_refresh_token(token, client_id=CLIENT)
     third = rotate_refresh_token(token, client_id=CLIENT)
-    assert second.graced is True
-    assert third.graced is True
     assert len({first.refresh_token, second.refresh_token, third.refresh_token}) == 3
     # Each grace rewrites the successor pointer and nothing else. The window
     # is measured from the first revocation, so repeated graces cannot walk
@@ -221,7 +218,7 @@ def test_two_lost_responses_in_a_row(token, monkeypatch):
         rotate_refresh_token(second.refresh_token, client_id=CLIENT)
     assert exc.value.reason == "revoked"
 
-    assert rotate_refresh_token(third.refresh_token, client_id=CLIENT).graced is False
+    rotate_refresh_token(third.refresh_token, client_id=CLIENT)  # the one it holds works
 
 
 def test_rotation_is_one_transaction(token, monkeypatch):
@@ -282,13 +279,16 @@ def test_concurrent_presentations_of_a_live_token(token, monkeypatch):
         thread.join(timeout=30)
 
     assert all(isinstance(r, RotatedRefreshToken) for r in results), results
-    winner = next(r for r in results if not r.graced)
-    loser = next(r for r in results if r.graced)
 
     # Three rows: the presented token, the successor nobody will ever use,
-    # and the live one the graced caller was handed.
+    # and the live one the graced caller was handed. The live row tells the
+    # two callers apart: whoever holds it was served second.
     rows = _chain_rows()
     assert len(rows) == 3
+    live_hashes = [h for h, r in rows.items() if r["revoked_at"] is None]
+    assert len(live_hashes) == 1
+    loser = next(r for r in results if sha256_b64u(r.refresh_token) == live_hashes[0])
+    winner = next(r for r in results if r is not loser)
     presented = rows[sha256_b64u(token)]
     assert presented["revoked_at"] is not None
     assert presented["replaced_by_hash"] == sha256_b64u(loser.refresh_token)
@@ -305,7 +305,7 @@ def test_concurrent_presentations_of_a_live_token(token, monkeypatch):
         rotate_refresh_token(winner.refresh_token, client_id=CLIENT)
     assert exc.value.reason == "revoked"
     # ...and the other one carries on.
-    assert rotate_refresh_token(loser.refresh_token, client_id=CLIENT).graced is False
+    rotate_refresh_token(loser.refresh_token, client_id=CLIENT)
 
 
 def test_grace_setting_parsing(monkeypatch):

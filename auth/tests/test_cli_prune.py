@@ -125,6 +125,35 @@ class TestPruneOAuth:
         assert main(["prune-oauth"]) == 0
         assert _row_count(OAuthRefreshToken) == 2  # old-revoked deleted
 
+    def test_revoked_retention_tracks_the_refresh_grace(self, fresh_db, monkeypatch):
+        """A revoked row the AS would still honour must survive prune.
+
+        The rotation grace honours a revoked token while its successor is
+        unused and BOND_MCPS_AS_REFRESH_GRACE_SECONDS has not elapsed; prune
+        keeps revoked rows one day past that window by default, and an
+        explicit --revoked-grace-days still wins.
+        """
+        now = datetime.now(timezone.utc)
+        with get_session() as s:
+            s.add(
+                OAuthRefreshToken(
+                    token_hash="revoked-14d",
+                    client_id="cid",
+                    user_key="u",
+                    revoked_at=now - timedelta(days=14),
+                    expires_at=now + timedelta(days=16),
+                )
+            )
+
+        # Grace clamped to the 30-day token lifetime → kept for 31 days.
+        monkeypatch.setenv("BOND_MCPS_AS_REFRESH_GRACE_SECONDS", str(30 * 24 * 3600))
+        assert main(["prune-oauth"]) == 0
+        assert _row_count(OAuthRefreshToken) == 1
+
+        # The flag overrides the derived default.
+        assert main(["prune-oauth", "--revoked-grace-days", "7"]) == 0
+        assert _row_count(OAuthRefreshToken) == 0
+
     def test_deletes_idle_dcr_clients_but_keeps_active(self, fresh_db):
         now = datetime.now(timezone.utc)
         with get_session() as s:

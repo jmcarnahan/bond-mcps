@@ -612,8 +612,10 @@ Claude Code 2.1.x mints a fresh DCR client on every restart (bug #43000).
 Schedule the prune CLI daily:
 ```bash
 kubectl exec -n bond-mcps deploy/auth-server -- \
-  bond-mcps prune-oauth --client-idle-days 30 --revoked-grace-days 7
+  bond-mcps prune-oauth --client-idle-days 30
 ```
+Revoked refresh tokens are kept one day past `BOND_MCPS_AS_REFRESH_GRACE_SECONDS`
+by default; pass `--revoked-grace-days` only to override that.
 Or wire it as a CronJob using the same auth image.
 
 ### Revoke a user's sessions (emergency)

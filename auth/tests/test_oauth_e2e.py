@@ -602,7 +602,10 @@ def test_synthetic_bond_desktop_flow(env, stub_upstream, monkeypatch):
     assert graced_access.claims["client_id"] == client_id
 
     # The token the app never received is retired by that grace, so the grace
-    # is good exactly once per lost reply and a stolen copy is worth nothing.
+    # is good exactly once per lost reply. (A copy of first_refresh stolen
+    # before this retry would have been honoured instead — the grace trades
+    # that window, bounded by BOND_MCPS_AS_REFRESH_GRACE_SECONDS, for not
+    # signing the user out; see docs/deployment/oauth-resource-server.md.)
     stale = as_client.post(
         "/oauth/token",
         data={

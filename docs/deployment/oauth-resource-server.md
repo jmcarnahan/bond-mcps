@@ -68,6 +68,12 @@ against the same AS like any other client.
 | `BOND_MCPS_AS_ALLOWED_REDIRECT_HOSTS` | no | CSV of allowed redirect hosts (in addition to loopback) |
 | `BOND_MCPS_AS_REFRESH_GRACE_SECONDS` | no | Default `604800` (7 days). How long a rotated refresh token may still be presented while its successor is unused; `0` = strict single-use. See *Refresh token rotation*. |
 
+On EKS the Terraform module fills in the required variables from
+`jwt_verification`. The optional knobs it does not model —
+`BOND_MCPS_UPSTREAM_PROMPT`, `BOND_MCPS_AS_REFRESH_GRACE_SECONDS`,
+`BOND_MCPS_STATIC_CLIENTS` — go in the auth service's `extra_env` map in your
+tfvars, the same way an MCP's provider settings do (see `docs/DEPLOYMENT.md`).
+
 ### Each MCP Resource Server
 
 | Var | Required | Notes |
@@ -248,9 +254,9 @@ revocation; the unused successor is retired in the same transaction, so the
 grace is worth exactly one lost response. The unused-successor condition is
 the safety property — a stolen old token is refused the moment the real client
 rotates with its successor. The window only bounds how long an idle client may
-come back, and the 7-day default matches `prune-oauth --revoked-grace-days`,
-which deletes revoked rows older than that; a longer grace would promise what
-the database no longer remembers.
+come back. `bond-mcps prune-oauth` keeps revoked rows one day past the
+configured grace unless `--revoked-grace-days` says otherwise, so the grace
+never promises what the database no longer remembers.
 
 Refusals answer `400 invalid_grant` with a non-standard `error_reason` beside
 `error_description`: `unknown`, `revoked`, `expired`, or `client_mismatch`.
