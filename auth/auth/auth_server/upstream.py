@@ -13,6 +13,11 @@ Both are full OIDC providers, so a single ``OIDCUpstreamIdP`` class handles
 both — the only deployment difference is the issuer URL and client
 credentials. The plugin shape leaves room to add other IdPs later (e.g.
 internal Azure AD) without touching the AS endpoints.
+
+Environment: ``BOND_MCPS_UPSTREAM_IDP``, ``BOND_MCPS_UPSTREAM_ISSUER``,
+``BOND_MCPS_UPSTREAM_CLIENT_ID``, ``BOND_MCPS_UPSTREAM_CLIENT_SECRET``,
+``BOND_MCPS_UPSTREAM_REDIRECT_URI``, ``BOND_MCPS_UPSTREAM_SCOPES``,
+``BOND_MCPS_UPSTREAM_ALLOWED_DOMAINS``, ``BOND_MCPS_UPSTREAM_PROMPT``.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ ENV_CLIENT_SECRET = "BOND_MCPS_UPSTREAM_CLIENT_SECRET"
 ENV_REDIRECT_URI = "BOND_MCPS_UPSTREAM_REDIRECT_URI"
 ENV_SCOPES = "BOND_MCPS_UPSTREAM_SCOPES"
 ENV_ALLOWED_DOMAINS = "BOND_MCPS_UPSTREAM_ALLOWED_DOMAINS"
+ENV_PROMPT = "BOND_MCPS_UPSTREAM_PROMPT"
 
 DEFAULT_SCOPES = "openid email profile"
 SUPPORTED_IDPS = {"cognito", "okta"}
@@ -101,6 +107,7 @@ def get_upstream_idp() -> UpstreamIdP:
         )
     scopes = os.environ.get(ENV_SCOPES, "").strip() or DEFAULT_SCOPES
     allowed_domains = _split_csv(os.environ.get(ENV_ALLOWED_DOMAINS, ""))
+    prompt = os.environ.get(ENV_PROMPT, "").strip() or None
 
     return OIDCUpstreamIdP(
         idp=idp,
@@ -110,6 +117,7 @@ def get_upstream_idp() -> UpstreamIdP:
         redirect_uri=redirect_uri,
         scopes=scopes,
         allowed_domains=allowed_domains,
+        prompt=prompt,
     )
 
 
@@ -129,6 +137,7 @@ class OIDCUpstreamIdP:
         redirect_uri: str,
         scopes: str,
         allowed_domains: list[str],
+        prompt: str | None = None,
     ):
         self._idp = idp
         self._issuer = issuer.rstrip("/")
@@ -137,6 +146,7 @@ class OIDCUpstreamIdP:
         self._redirect_uri = redirect_uri
         self._scopes = scopes
         self._allowed_domains = [d.lower() for d in allowed_domains]
+        self._prompt = prompt
         self._discovery: dict | None = None
 
     # -- Public API ----------------------------------------------------------
@@ -157,8 +167,15 @@ class OIDCUpstreamIdP:
             "state": state,
             "code_challenge": code_challenge,
             "code_challenge_method": code_challenge_method,
-            "prompt": "login",
         }
+        # No `prompt` unless an operator asks for one: a user who already has
+        # a browser session at the IdP should sign in without seeing a
+        # credential form, and an interactive sign-in nobody asked for is a
+        # defect. Okta honours `prompt=login` by demanding credentials every
+        # time; deployments that want that set BOND_MCPS_UPSTREAM_PROMPT to
+        # `login`. Cognito ignores the parameter either way.
+        if self._prompt:
+            params["prompt"] = self._prompt
         return f"{meta['authorization_endpoint']}?{urlencode(params)}"
 
     def exchange_code(self, *, code: str, code_verifier: str) -> UpstreamUserInfo:

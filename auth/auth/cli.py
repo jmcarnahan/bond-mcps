@@ -173,6 +173,19 @@ def cmd_doctor(_args) -> int:
     return 0
 
 
+def _default_revoked_grace_days() -> int:
+    """One day past the AS's refresh-rotation grace window.
+
+    ``rotate_refresh_token`` honours a revoked token while its successor is
+    unused and ``BOND_MCPS_AS_REFRESH_GRACE_SECONDS`` has not elapsed. A row
+    pruned inside that window would turn a promised grace into ``unknown``,
+    so by default prune keeps revoked rows until the window has closed.
+    """
+    from auth.auth_server.codes import refresh_grace_seconds
+
+    return -(-refresh_grace_seconds() // 86400) + 1
+
+
 def cmd_prune_oauth(args) -> int:
     """Delete OAuth AS rows no longer needed.
 
@@ -194,7 +207,12 @@ def cmd_prune_oauth(args) -> int:
 
     now = datetime.now(timezone.utc)
     client_idle_cutoff = now - timedelta(days=args.client_idle_days)
-    revoked_cutoff = now - timedelta(days=args.revoked_grace_days)
+    revoked_grace_days = (
+        args.revoked_grace_days
+        if args.revoked_grace_days is not None
+        else _default_revoked_grace_days()
+    )
+    revoked_cutoff = now - timedelta(days=revoked_grace_days)
     pending_cutoff = now - timedelta(minutes=10)
     code_cutoff = now - timedelta(minutes=10)
     ticket_cutoff = now - timedelta(minutes=10)
@@ -367,8 +385,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_prune.add_argument(
         "--revoked-grace-days",
         type=int,
-        default=7,
-        help="Refresh tokens revoked more than this many days ago are deleted. " "Default: 7.",
+        default=None,
+        help=(
+            "Refresh tokens revoked more than this many days ago are deleted. "
+            "Default: one day past BOND_MCPS_AS_REFRESH_GRACE_SECONDS "
+            "(8 with the 7-day default grace)."
+        ),
     )
     p_prune.add_argument(
         "--dry-run",

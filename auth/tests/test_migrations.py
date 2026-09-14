@@ -37,16 +37,21 @@ def test_upgrade_head_creates_expected_tables(tmp_path, monkeypatch):
         msal_cols = {c["name"] for c in insp.get_columns("msal_token_caches")}
         assert "user_key" in msal_cols
         assert "cache_data_encrypted" in msal_cols
+
+        # Migration 0003: the successor pointer the lost-response grace reads.
+        rt_cols = {c["name"] for c in insp.get_columns("oauth_refresh_tokens")}
+        assert "revoked_at" in rt_cols
+        assert "replaced_by_hash" in rt_cols
     finally:
         reset_for_tests()
 
 
-def test_head_revision_is_oauth_authorization_server(tmp_path, monkeypatch):
+def test_head_revision_is_refresh_token_successor(tmp_path, monkeypatch):
     """Head moves forward as new migrations land. Update this test alongside
     any migration that becomes the new head."""
     monkeypatch.setenv("BOND_MCPS_DB_URL", f"sqlite:///{tmp_path / 'tokens.db'}")
     head = get_head_revision()
-    assert head == "0002_oauth_authorization_server"
+    assert head == "0003_refresh_token_successor"
 
 
 def test_ensure_schema_current_passes_after_upgrade(tmp_path, monkeypatch):

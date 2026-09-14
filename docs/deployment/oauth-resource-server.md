@@ -64,7 +64,15 @@ against the same AS like any other client.
 | `BOND_MCPS_UPSTREAM_REDIRECT_URI` | yes | e.g. `https://auth.example.com/oauth/upstream/callback` |
 | `BOND_MCPS_UPSTREAM_SCOPES` | no | Default `openid email profile` |
 | `BOND_MCPS_UPSTREAM_ALLOWED_DOMAINS` | no | CSV of email domains to gate sign-up |
+| `BOND_MCPS_UPSTREAM_PROMPT` | no | Default empty (no `prompt` sent, so an existing IdP session signs in without a credential form). Set to `login` to force credential entry at the IdP on every sign-in. Cognito ignores it. |
 | `BOND_MCPS_AS_ALLOWED_REDIRECT_HOSTS` | no | CSV of allowed redirect hosts (in addition to loopback) |
+| `BOND_MCPS_AS_REFRESH_GRACE_SECONDS` | no | Default `604800` (7 days). How long a rotated refresh token may still be presented while its successor is unused; `0` = strict single-use. See *Refresh token rotation*. |
+
+On EKS the Terraform module fills in the required variables from
+`jwt_verification`. The optional knobs it does not model —
+`BOND_MCPS_UPSTREAM_PROMPT`, `BOND_MCPS_AS_REFRESH_GRACE_SECONDS`,
+`BOND_MCPS_STATIC_CLIENTS` — go in the auth service's `extra_env` map in your
+tfvars, the same way an MCP's provider settings do (see `docs/DEPLOYMENT.md`).
 
 ### Each MCP Resource Server
 
@@ -181,6 +189,10 @@ BOND_MCPS_STATIC_CLIENTS='[
 Then pass `--client-id bm-claude-code --callback-port 18999` to
 `claude mcp add`.
 
+Bond Desktop no longer needs one — it registers itself at each sign-in and
+falls back to the static `bond-desktop` client only against an AS that
+advertises no `registration_endpoint`.
+
 ## Provider token bootstrap (`/connect/<provider>`)
 
 When a tool call needs an upstream provider access token that the user
@@ -222,8 +234,47 @@ hosts:
   `oauth_refresh_tokens`)
 * Connect tickets (`connect_tickets`)
 
-Migration `0002_oauth_authorization_server` adds the AS tables; run
-`make migrate-db` after pulling this change.
+Migration `0002_oauth_authorization_server` adds the AS tables and migration
+`0003_refresh_token_successor` adds `oauth_refresh_tokens.replaced_by_hash`;
+run `make migrate-db` after pulling this change. (In Kubernetes the
+`migrate-db` initContainer runs on every pod start, so a redeploy migrates by
+itself.)
+
+### Refresh token rotation
+
+Every refresh rotates: the presented token is revoked, a successor is minted,
+and the revoked row records the successor's hash — all in one transaction, so
+a retry can never land on a token that is revoked but names no successor.
+
+A refresh POST whose *response* is lost (a closed lid, a dropped VPN, an app
+quit mid-launch) leaves the client holding a token the AS has already revoked.
+Presenting it again is honoured while the recorded successor has never been
+used and `BOND_MCPS_AS_REFRESH_GRACE_SECONDS` has not elapsed since
+revocation; the unused successor is retired in the same transaction, so the
+grace is worth exactly one lost response. The unused-successor condition is
+the safety property — a stolen old token is refused the moment the real client
+rotates with its successor. The window only bounds how long an idle client may
+come back. `bond-mcps prune-oauth` keeps revoked rows one day past the
+configured grace unless `--revoked-grace-days` says otherwise, so the grace
+never promises what the database no longer remembers.
+
+Refusals answer `400 invalid_grant` with a non-standard `error_reason` beside
+`error_description`: `unknown`, `revoked`, `expired`, or `client_mismatch`.
+Clients use it to word an honest message without matching on prose.
+
+One consequence worth knowing: two simultaneous presentations of the same
+*live* token both succeed. The loser blocks on the row lock, finds the revoke
+matched nothing, takes the grace path and retires the winner's successor — so
+whoever received the first reply holds a dead token and is refused (`revoked`)
+on its next refresh. That is the single case where the grace costs a sign-in
+strict rotation would not have. A well-behaved client never has two refreshes
+in flight (Bond Desktop coalesces them), so it surfaces a client bug late
+rather than a server defect.
+
+Follow-up, not implemented: genuine reuse (a token whose successor *was* used)
+is refused on its own and does not revoke the rest of the family, as OAuth 2.1
+§4.3.3 suggests. Family revocation would sign out both instances in the
+two-legitimate-clients case, so it is a separate decision.
 
 ### Health checks
 
